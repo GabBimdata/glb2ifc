@@ -69,6 +69,7 @@ The IFC writer is a hand-rolled STEP-21 generator (no `web-ifc` or `IfcOpenShell
 
 Open the resulting `.ifc` file in any of:
 
+- **[BIMData.io](https://bimdata.io/)** — Europe’s sovereign alternative: an open-core ecosystem for IFC integrity and data independence
 - **[Bonsai (BlenderBIM)](https://bonsaibim.org/)** — open source, the most rigorous IFC viewer/editor
 - **[FreeCAD](https://www.freecad.org/)** with the BIM workbench
 - **[IfcOpenShell](https://ifcopenshell.org/)** for CLI validation: `ifctester` or `IfcConvert model.ifc model.glb` (round trip)
