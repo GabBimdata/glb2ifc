@@ -13,7 +13,7 @@ A small local web app to convert **glTF binary (GLB)** files to **IFC4** with he
 
 ## Why?
 
-GLB is a great format for visualization, but it's purely geometric — it has no notion of "this is a wall" or "this is a floor slab". IFC, the BIM standard, does. Most existing GLB → IFC converters wrap everything in `IfcBuildingElementProxy` (a generic "thing"), which produces a valid file but loses any meaningful BIM semantics.
+GLB is a great format for visualization, but it's purely geometric, it has no notion of "this is a wall" or "this is a floor slab". IFC, the BIM standard, does. Most existing GLB → IFC converters wrap everything in `IfcBuildingElementProxy` (a generic "thing"), which produces a valid file but loses any meaningful BIM semantics.
 
 This tool tries to do slightly better by classifying meshes based on their bounding box geometry:
 
