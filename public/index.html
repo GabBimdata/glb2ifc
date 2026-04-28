@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GLB → IFC</title>
+<style>
+  :root {
+    --bg: #0f1419;
+    --bg-elev: #1a2028;
+    --fg: #e8eaed;
+    --fg-dim: #8b95a3;
+    --accent: #ff9248;
+    --accent-glow: rgba(255, 146, 72, 0.15);
+    --border: #2a3441;
+    --success: #5dd39e;
+    --error: #ff6b6b;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: 'JetBrains Mono', 'Consolas', 'Monaco', monospace;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 4rem 2rem;
+    background-image:
+      radial-gradient(circle at 20% 0%, var(--accent-glow), transparent 50%),
+      radial-gradient(circle at 80% 100%, rgba(93, 211, 158, 0.08), transparent 50%);
+  }
+
+  header {
+    text-align: center;
+    margin-bottom: 3rem;
+    max-width: 600px;
+  }
+
+  .logo {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.75rem;
+    font-size: 0.875rem;
+    color: var(--fg-dim);
+    margin-bottom: 1.5rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+
+  .logo-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 12px var(--accent);
+    animation: pulse 2s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.6; transform: scale(0.9); }
+  }
+
+  h1 {
+    font-size: 3rem;
+    font-weight: 300;
+    letter-spacing: -0.04em;
+    margin-bottom: 1rem;
+    line-height: 1;
+  }
+
+  h1 .arrow {
+    color: var(--accent);
+    margin: 0 0.5rem;
+    font-weight: 200;
+  }
+
+  .subtitle {
+    color: var(--fg-dim);
+    font-size: 0.95rem;
+    line-height: 1.6;
+  }
+
+  .converter {
+    width: 100%;
+    max-width: 640px;
+  }
+
+  .dropzone {
+    display: block;
+    width: 100%;
+    background: var(--bg-elev);
+    border: 1px dashed var(--border);
+    border-radius: 4px;
+    padding: 4rem 2rem;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s ease, background 0.2s ease;
+  }
+
+  .dropzone:hover, .dropzone.drag-over {
+    border-color: var(--accent);
+    background: #1f2731;
+  }
+
+  .dropzone-icon {
+    font-size: 2.5rem;
+    margin-bottom: 1rem;
+    color: var(--accent);
+    font-weight: 200;
+  }
+
+  .dropzone-text {
+    font-size: 1rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .dropzone-hint {
+    font-size: 0.8rem;
+    color: var(--fg-dim);
+  }
+
+  #file-input { display: none; }
+
+  .status {
+    margin-top: 1.5rem;
+    padding: 1rem 1.25rem;
+    border-radius: 4px;
+    background: var(--bg-elev);
+    border-left: 2px solid var(--border);
+    font-size: 0.875rem;
+    line-height: 1.6;
+    display: none;
+  }
+
+  .status.visible { display: block; }
+  .status.processing { border-left-color: var(--accent); }
+  .status.success { border-left-color: var(--success); }
+  .status.error { border-left-color: var(--error); }
+
+  .status-line {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.25rem 0;
+  }
+
+  .status-label { color: var(--fg-dim); }
+  .status-value { font-weight: 500; }
+
+  .spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border: 1.5px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin-right: 0.5rem;
+    vertical-align: middle;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  footer {
+    margin-top: auto;
+    padding-top: 4rem;
+    color: var(--fg-dim);
+    font-size: 0.75rem;
+    text-align: center;
+    line-height: 1.8;
+  }
+
+  footer code {
+    color: var(--accent);
+    background: var(--bg-elev);
+    padding: 0.1rem 0.4rem;
+    border-radius: 2px;
+    font-size: 0.7rem;
+  }
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
+    background: var(--border);
+    margin-top: 1rem;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+
+  .stat {
+    background: var(--bg-elev);
+    padding: 1rem;
+    text-align: center;
+  }
+
+  .stat-value {
+    font-size: 1.5rem;
+    font-weight: 300;
+    color: var(--accent);
+  }
+
+  .stat-label {
+    font-size: 0.7rem;
+    color: var(--fg-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin-top: 0.25rem;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <span class="logo-dot"></span>
+    <span>local converter</span>
+  </div>
+  <h1>GLB <span class="arrow">→</span> IFC</h1>
+  <p class="subtitle">Convertit un fichier GLB en IFC4 avec classification heuristique des éléments en murs, dalles et proxies.</p>
+</header>
+
+<main class="converter">
+
+  <label class="dropzone" id="dropzone" for="file-input">
+    <div class="dropzone-icon">+</div>
+    <div class="dropzone-text">Glisse ton fichier .glb ici</div>
+    <div class="dropzone-hint">ou clique pour parcourir</div>
+    <input type="file" id="file-input" accept=".glb">
+  </label>
+
+  <div class="status" id="status"></div>
+
+</main>
+
+<footer>
+  glb2ifc &middot; runs locally on <code>localhost:3737</code><br>
+  Heuristique : meshes plats &rarr; IfcSlab, fins &amp; verticaux &rarr; IfcWall, autres &rarr; IfcBuildingElementProxy
+</footer>
+
+<script>
+const dropzone = document.getElementById('dropzone');
+const fileInput = document.getElementById('file-input');
+const status = document.getElementById('status');
+
+// Drag & drop
+['dragenter', 'dragover'].forEach(evt => {
+  dropzone.addEventListener(evt, (e) => {
+    e.preventDefault();
+    dropzone.classList.add('drag-over');
+  });
+});
+
+['dragleave', 'drop'].forEach(evt => {
+  dropzone.addEventListener(evt, (e) => {
+    e.preventDefault();
+    dropzone.classList.remove('drag-over');
+  });
+});
+
+dropzone.addEventListener('drop', (e) => {
+  const file = e.dataTransfer.files[0];
+  if (file) handleFile(file);
+});
+
+fileInput.addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (file) handleFile(file);
+});
+
+function showStatus(html, type = 'processing') {
+  status.className = 'status visible ' + type;
+  status.innerHTML = html;
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+async function handleFile(file) {
+  if (!file.name.toLowerCase().endsWith('.glb')) {
+    showStatus('Le fichier doit avoir l\'extension .glb', 'error');
+    return;
+  }
+
+  showStatus(`<span class="spinner"></span>Conversion de <strong>${file.name}</strong> (${formatBytes(file.size)}) en cours...`, 'processing');
+
+  const formData = new FormData();
+  formData.append('glb', file);
+
+  try {
+    const response = await fetch('/api/convert', {
+      method: 'POST',
+      body: formData
+    });
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({ error: 'Erreur inconnue' }));
+      throw new Error(err.error);
+    }
+
+    const stats = JSON.parse(response.headers.get('X-Conversion-Stats') || '{}');
+    const blob = await response.blob();
+    const outputName = file.name.replace(/\.glb$/i, '') + '.ifc';
+
+    // Trigger download
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = outputName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    showStatus(`
+      <div class="status-line">
+        <span class="status-label">Statut</span>
+        <span class="status-value" style="color: var(--success)">✓ Converti et téléchargé</span>
+      </div>
+      <div class="status-line">
+        <span class="status-label">Fichier</span>
+        <span class="status-value">${outputName}</span>
+      </div>
+      <div class="status-line">
+        <span class="status-label">Taille</span>
+        <span class="status-value">${formatBytes(blob.size)}</span>
+      </div>
+      <div class="stats">
+        <div class="stat">
+          <div class="stat-value">${stats.wall || 0}</div>
+          <div class="stat-label">walls</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value">${stats.slab || 0}</div>
+          <div class="stat-label">slabs</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value">${stats.proxy || 0}</div>
+          <div class="stat-label">proxies</div>
+        </div>
+      </div>
+    `, 'success');
+
+  } catch (err) {
+    showStatus(`<strong>Erreur :</strong> ${err.message}`, 'error');
+  }
+}
+</script>
+
+</body>
+</html>
