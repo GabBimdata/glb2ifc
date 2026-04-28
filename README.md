@@ -302,12 +302,10 @@ If needed, this value can be adjusted in `server.js`.
 
 Open the generated IFC in any IFC viewer, for example:
 
+- BIMData.io
 - Bonsai / BlenderBIM
 - FreeCAD BIM Workbench
 - IfcOpenShell tools
-- Solibri
-- BIMcollab Zoom
-- other commercial IFC viewers
 
 Check especially:
 
