@@ -18,7 +18,7 @@ This tool tries to do slightly better by classifying meshes based on their bound
 - **Tall & thin** (vertical span > 1m, one horizontal axis < 0.6m) → `IfcWall`
 - **Everything else** → `IfcBuildingElementProxy`
 
-It works reasonably well on architectural exports (e.g., from [Pascal Editor](https://github.com/pascalorg/editor)) where buildings have clean wall/slab geometry. Less so on furniture-heavy or organic models.
+It works reasonably well on architectural exports where buildings have clean wall/slab geometry. Less so on furniture-heavy or organic models.
 
 ## Quick start
 
@@ -59,7 +59,7 @@ The IFC writer is a hand-rolled STEP-21 generator (no `web-ifc` or `IfcOpenShell
 - **Single storey**: all elements are placed in one `IfcBuildingStorey`. No automatic floor detection.
 - **No materials, no property sets**: only geometry and classification are exported. Textures, colors, glTF materials are ignored.
 - **No openings**: doors and windows are not detected as such — they end up as `IfcBuildingElementProxy`.
-- **Heuristic is geometric only**: a thin tall pillar will be classified as a wall, a wide flat tabletop as a slab. The classification is meant as a "best effort" starting point, not a substitute for real BIM authoring.
+- **Heuristic is geometric only**: a thin tall pillar will be classified as a wall, a wide flat tabletop as a slab. The classification is a best-effort starting point, not a substitute for real BIM authoring.
 - **Non-ASCII characters in mesh names** are replaced with `_` (proper STEP-21 Unicode escaping is on the TODO list).
 
 ## Validating the output
@@ -92,8 +92,3 @@ PRs welcome! Particularly interesting directions:
 ## License
 
 [MIT](LICENSE)
-
-## Acknowledgments
-
-- Built originally to export from [Pascal Editor](https://github.com/pascalorg/editor) (a great open-source 3D building editor) into BIM workflows.
-- Inspired by [this excellent article](https://medium.com/@arcs-/how-to-get-from-glb-to-ifc-bim-in-web-node-js-08a7a8e15605) on GLB → IFC conversion in Node.js.
