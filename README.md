@@ -112,12 +112,18 @@ Open the resulting `.ifc` file in any of:
 
 PRs welcome! Particularly interesting directions:
 
-- [ ] Multi-storey detection (group meshes by Y altitude bands)
-- [ ] Door/window heuristics (small rectangular elements within walls)
-- [ ] Property set generation from glTF materials/extras
-- [ ] Proper Unicode escaping (`\X2\xxxx\X0\` for non-ASCII chars)
-- [ ] Configurable mapping (let users tune classification thresholds)
-- [ ] Direct GLB → IFC streaming for large files (current implementation loads everything in memory)
+- [ ] Detect more IFC element types: stairs, columns, railings, curtain walls, coverings and secondary members.
+- [ ] Improve interior wall detection and reduce false door/window positives.
+- [ ] Improve door/window heuristics and optionally create `IfcOpeningElement` relationships.
+- [ ] Improve material handling: transparency, IFC materials, material reuse and `IfcRelAssociatesMaterial`.
+- [ ] Add Uniformat classification using `IfcClassification` and `IfcRelAssociatesClassification`.
+- [ ] Generate IFC type objects such as `IfcWallType`, `IfcSlabType`, `IfcDoorType`, `IfcBeamType` and `IfcRoofType`.
+- [ ] Add IFC layers and explore IFC systems for category/material/source grouping.
+- [ ] Make all classification thresholds configurable via UI or config file.
+- [ ] Improve storey detection for mezzanines, split levels and tall elements.
+- [ ] Improve geometry output with optional mesh simplification or extrusion detection.
+- [ ] Add proper STEP-21 Unicode escaping and better metadata support from glTF `extras`.
+- [ ] Add validation tooling and sample GLB/IFC test models.
 
 ## License
 
