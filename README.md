@@ -1,5 +1,8 @@
 # glb2ifc
 
+<img width="6304" height="1682" alt="Group 3" src="https://github.com/user-attachments/assets/18a93d21-28cc-4147-b48f-63b0bfbdc0e5" />
+
+
 A small local web app to convert **glTF binary (GLB)** files to **IFC4** with heuristic classification of meshes into walls, slabs, and generic building elements.
 
 > Drag a `.glb` into your browser, get an `.ifc` back. Runs entirely on your machine — no cloud, no upload to any server.
