@@ -36,7 +36,7 @@
   header {
     text-align: center;
     margin-bottom: 3rem;
-    max-width: 600px;
+    max-width: 720px;
   }
 
   .logo {
@@ -86,7 +86,7 @@
 
   .converter {
     width: 100%;
-    max-width: 640px;
+    max-width: 760px;
   }
 
   .dropzone {
@@ -145,11 +145,15 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: 1rem;
     padding: 0.25rem 0;
   }
 
   .status-label { color: var(--fg-dim); }
-  .status-value { font-weight: 500; }
+  .status-value {
+    font-weight: 500;
+    text-align: right;
+  }
 
   .spinner {
     display: inline-block;
@@ -172,6 +176,7 @@
     font-size: 0.75rem;
     text-align: center;
     line-height: 1.8;
+    max-width: 760px;
   }
 
   footer code {
@@ -184,7 +189,7 @@
 
   .stats {
     display: grid;
-    grid-template-columns: repeat(5, 1fr);
+    grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
     gap: 1px;
     background: var(--border);
     margin-top: 1rem;
@@ -196,6 +201,7 @@
     background: var(--bg-elev);
     padding: 0.85rem 0.5rem;
     text-align: center;
+    min-height: 74px;
   }
 
   .stat-value {
@@ -205,11 +211,29 @@
   }
 
   .stat-label {
-    font-size: 0.7rem;
+    font-size: 0.66rem;
     color: var(--fg-dim);
     text-transform: uppercase;
-    letter-spacing: 0.1em;
+    letter-spacing: 0.08em;
     margin-top: 0.25rem;
+    line-height: 1.25;
+  }
+
+  .summary {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 0.5rem 1.5rem;
+    margin-top: 0.75rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--border);
+  }
+
+  @media (max-width: 560px) {
+    body { padding: 2.5rem 1rem; }
+    h1 { font-size: 2.25rem; }
+    .dropzone { padding: 3rem 1.25rem; }
+    .status-line { align-items: flex-start; }
+    .summary { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -221,7 +245,10 @@
     <span>local converter</span>
   </div>
   <h1>GLB <span class="arrow">→</span> IFC</h1>
-  <p class="subtitle">Convertit un fichier GLB en IFC4 avec classification heuristique des éléments en murs, dalles et proxies.</p>
+  <p class="subtitle">
+    Convertit un fichier GLB en IFC4 avec classification heuristique des murs, dalles,
+    portes, fenêtres, poutres, poteaux, escaliers, toitures, murs extérieurs et étages.
+  </p>
 </header>
 
 <main class="converter">
@@ -239,7 +266,7 @@
 
 <footer>
   glb2ifc &middot; runs locally on <code>localhost:3737</code><br>
-  Heuristique : meshes plats &rarr; IfcSlab, fins &amp; verticaux &rarr; IfcWall, autres &rarr; IfcBuildingElementProxy
+  Heuristique : bounding boxes, faces verticales, marches répétées, matériaux, opacité, relations spatiales et enveloppe du bâtiment.
 </footer>
 
 <script>
@@ -283,9 +310,22 @@ function formatBytes(bytes) {
   return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
 }
 
+function statValue(stats, key) {
+  return Number(stats?.[key] || 0);
+}
+
+function renderStat(value, label) {
+  return `
+    <div class="stat">
+      <div class="stat-value">${value}</div>
+      <div class="stat-label">${label}</div>
+    </div>
+  `;
+}
+
 async function handleFile(file) {
   if (!file.name.toLowerCase().endsWith('.glb')) {
-    showStatus('Le fichier doit avoir l\'extension .glb', 'error');
+    showStatus("Le fichier doit avoir l’extension .glb", "error");
     return;
   }
 
@@ -319,6 +359,16 @@ async function handleFile(file) {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
 
+    const walls = statValue(stats, 'wall');
+    const externalWalls = statValue(stats, 'externalWall');
+    const storeys = statValue(stats, 'storeys') || 1;
+    const total = statValue(stats, 'total');
+    const uniformatCodes = statValue(stats, 'uniformatCodes');
+
+    const externalWallRatio = walls > 0
+      ? `${externalWalls}/${walls}`
+      : `${externalWalls}`;
+
     showStatus(`
       <div class="status-line">
         <span class="status-label">Statut</span>
@@ -329,34 +379,41 @@ async function handleFile(file) {
         <span class="status-value">${outputName}</span>
       </div>
       <div class="status-line">
-        <span class="status-label">Taille</span>
+        <span class="status-label">Taille IFC</span>
         <span class="status-value">${formatBytes(blob.size)}</span>
       </div>
-      <div class="status-line">
-        <span class="status-label">Étages détectés</span>
-        <span class="status-value">${stats.storeys || 1}</span>
+
+      <div class="summary">
+        <div class="status-line">
+          <span class="status-label">Éléments</span>
+          <span class="status-value">${total}</span>
+        </div>
+        <div class="status-line">
+          <span class="status-label">Étages détectés</span>
+          <span class="status-value">${storeys}</span>
+        </div>
+        <div class="status-line">
+          <span class="status-label">Murs extérieurs</span>
+          <span class="status-value">${externalWallRatio}</span>
+        </div>
+        <div class="status-line">
+          <span class="status-label">Codes Uniformat II</span>
+          <span class="status-value">${uniformatCodes}</span>
+        </div>
       </div>
+
       <div class="stats">
-        <div class="stat">
-          <div class="stat-value">${stats.wall || 0}</div>
-          <div class="stat-label">walls</div>
-        </div>
-        <div class="stat">
-          <div class="stat-value">${stats.slab || 0}</div>
-          <div class="stat-label">slabs</div>
-        </div>
-        <div class="stat">
-          <div class="stat-value">${stats.door || 0}</div>
-          <div class="stat-label">doors</div>
-        </div>
-        <div class="stat">
-          <div class="stat-value">${stats.window || 0}</div>
-          <div class="stat-label">windows</div>
-        </div>
-        <div class="stat">
-          <div class="stat-value">${stats.proxy || 0}</div>
-          <div class="stat-label">proxies</div>
-        </div>
+        ${renderStat(walls, 'walls')}
+        ${renderStat(externalWalls, 'ext walls')}
+        ${renderStat(statValue(stats, 'slab'), 'slabs')}
+        ${renderStat(statValue(stats, 'beam'), 'beams')}
+        ${renderStat(statValue(stats, 'column'), 'columns')}
+        ${renderStat(statValue(stats, 'stair'), 'stairs')}
+        ${renderStat(statValue(stats, 'roof'), 'roofs')}
+        ${renderStat(statValue(stats, 'door'), 'doors')}
+        ${renderStat(statValue(stats, 'window'), 'windows')}
+        ${renderStat(statValue(stats, 'proxy'), 'proxies')}
+        ${renderStat(uniformatCodes, 'uniformat')}
       </div>
     `, 'success');
 
