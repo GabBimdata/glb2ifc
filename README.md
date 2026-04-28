@@ -43,13 +43,35 @@ GLB file
    ↓
 @gltf-transform/core parses meshes + applies world transforms
    ↓
-For each mesh: compute bounding box → classify (wall/slab/proxy)
+For each mesh:
+   • compute bounding box
+   • analyze triangle orientation / vertical faces
+   • extract material color, material name and opacity
+   ↓
+First pass classification:
+   • slabs / floors
+   • walls and exterior wall candidates
+   • doors and windows
+   • beams
+   • roofs
+   • generic proxies
+   ↓
+Refinement passes:
+   • detect storeys from slab elevations and wall bases
+   • assign elements to the nearest building storey
+   • detect exterior walls from the building envelope
+   • refine openings by checking overlap with host walls
    ↓
 Generate IFC4 STEP-21 text file with:
-   • Project → Site → Building → Storey hierarchy
-   • IfcTriangulatedFaceSet geometry (preserves original triangles)
+   • Project → Site → Building → Storey(s) hierarchy
+   • IfcWall, IfcSlab, IfcDoor, IfcWindow, IfcBeam, IfcRoof
+   • IfcBuildingElementProxy for unclassified geometry
+   • IfcTriangulatedFaceSet geometry, preserving original triangles
+   • IfcSurfaceStyle per unique color
+   • Pset_WallCommon, Pset_BeamCommon and Pset_RoofCommon
+   • automatic element names such as Wall 001, Slab 001, Beam 001
    • Y-up (glTF) → Z-up (IFC) axis conversion
-   • Proper STEP-21 string escaping
+   • proper STEP-21 string escaping
    ↓
 IFC file downloaded
 ```
