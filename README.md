@@ -81,11 +81,15 @@ The IFC writer is a hand-rolled STEP-21 generator (no `web-ifc` or `IfcOpenShell
 ## Limits & caveats
 
 - **Units**: assumes the GLB is in **meters**. If your file is in millimeters or centimeters, the IFC will be wrong by a factor of 1000 or 100.
-- **Single storey**: all elements are placed in one `IfcBuildingStorey`. No automatic floor detection.
-- **No materials, no property sets**: only geometry and classification are exported. Textures, colors, glTF materials are ignored.
-- **No openings**: doors and windows are not detected as such — they end up as `IfcBuildingElementProxy`.
-- **Heuristic is geometric only**: a thin tall pillar will be classified as a wall, a wide flat tabletop as a slab. The classification is a best-effort starting point, not a substitute for real BIM authoring.
-- **Non-ASCII characters in mesh names** are replaced with `_` (proper STEP-21 Unicode escaping is on the TODO list).
+- **Heuristic classification**: the converter uses bounding boxes, triangle orientation, material hints, mesh names, opacity, and spatial relationships. It is a best-effort semantic reconstruction, not a substitute for real BIM authoring.
+- **Storey detection is approximate**: storeys are detected from slab elevations and wall bases. Models without clear floors, with split slabs, mezzanines, ramps, or unusual vertical offsets may produce imperfect storey assignments.
+- **Exterior wall detection is approximate**: `Pset_WallCommon.IsExternal` is inferred from the wall position near the building envelope and from façade-like geometry. Complex buildings, courtyards, patios, L/U-shaped plans, merged façade meshes, or interior atriums may need manual checking.
+- **Openings are detected only when represented as geometry**: doors and windows can be classified when they are separate mesh elements or glass-like/opening-like elements overlapping a wall. The converter does not cut actual voids into walls and does not create `IfcOpeningElement`.
+- **Beams and roofs are heuristic**: long horizontal elements may be classified as `IfcBeam`, and high/inclined or roof-named elements may be classified as `IfcRoof`. Furniture, decorative trims, soffits, parapets, or ceiling elements can still be misclassified.
+- **Materials are limited**: base color is preserved as `IfcSurfaceStyle`. Textures, normal maps, metallic/roughness, transparency rendering, and full glTF material properties are not fully exported.
+- **Property sets are minimal**: the converter writes basic common property sets such as `Pset_WallCommon`, `Pset_BeamCommon`, and `Pset_RoofCommon`, but values are inferred or left blank when the GLB does not contain reliable BIM data.
+- **Geometry is tessellated**: elements are exported using `IfcTriangulatedFaceSet`, preserving the original triangles. They are not converted into parametric BIM solids or clean extrusion profiles.
+- **Non-ASCII characters in original mesh names are replaced with `_`**: proper STEP-21 Unicode escaping is still a future improvement. Generated IFC element names such as `Wall 001` and `Slab 001` avoid most naming issues.
 
 ## Validating the output
 
