@@ -2,6 +2,7 @@ import * as THREE from "three";
 import * as OBC from "@thatopen/components";
 import * as FRAGS from "@thatopen/fragments";
 import { openTypePicker } from './ifc-type-picker.js';
+import { getProject, updateProject, findProjectForIfcFile, setLastProjectId, getLastProjectId, editsMapToArray, editsArrayToMap, textToIfcFile } from './project-store.js';
 
 const container = document.getElementById("container");
 const dropzone = document.getElementById("dropzone");
@@ -18,6 +19,7 @@ const exportEditedButton = document.getElementById("export-edited");
 const resetEditsButton = document.getElementById("reset-edits");
 const editCountEl = document.getElementById("edit-count");
 const reloadEditedButton = document.getElementById("reload-edited");
+const modelerButton = document.getElementById("modeler-button");
 
 const state = {
   components: null,
@@ -45,9 +47,14 @@ const state = {
   lastIfcText: null,             // texte brut du dernier IFC chargé
   ifcCatalog: null,  // { types, categories } from /api/ifc-catalog
   lastEditedBlobUrl: null,
+  projectId: null,
+  project: null,
+  restoringProjectEdits: false,
 };
 
-const selectionColor = new THREE.Color("#ff9248");
+let projectPersistTimer = null;
+
+const selectionColor = new THREE.Color("#ffd166");
 
 const itemConfig = {
   data: {
@@ -1119,6 +1126,26 @@ async function fitCameraToObject(object) {
   state.fragments?.core.update(true);
 }
 
+function setupSceneLighting(world) {
+  const scene = world.scene.three;
+
+  const ambient = new THREE.AmbientLight(0xffffff, 0.35);
+  scene.add(ambient);
+
+  const hemi = new THREE.HemisphereLight(0xffffff, 0x2a3441, 0.85);
+  scene.add(hemi);
+
+  const keyLight = new THREE.DirectionalLight(0xffffff, 1.2);
+  keyLight.position.set(25, 40, 30);
+  keyLight.castShadow = true;
+  keyLight.shadow.mapSize.set(2048, 2048);
+  scene.add(keyLight);
+
+  const fillLight = new THREE.DirectionalLight(0xc7d2fe, 0.35);
+  fillLight.position.set(-25, 20, -20);
+  scene.add(fillLight);
+}
+
 async function initViewer() {
   const components = new OBC.Components();
   const worlds = components.get(OBC.Worlds);
@@ -1130,6 +1157,8 @@ async function initViewer() {
 
   world.renderer = new OBC.SimpleRenderer(components, container);
   world.camera = new OBC.OrthoPerspectiveCamera(components);
+
+  setupSceneLighting(world);
 
   await world.camera.controls.setLookAt(10, 8, 10, 0, 0, 0);
 
@@ -1152,31 +1181,43 @@ async function initViewer() {
 
   world.camera.controls.addEventListener("update", () => fragments.core.update());
 
-  fragments.list.onItemSet.add(async ({ value: model }) => {
-    model.useCamera(world.camera.three);
-    world.scene.three.add(model.object);
+fragments.list.onItemSet.add(async ({ value: model }) => {
+  model.useCamera(world.camera.three);
+  world.scene.three.add(model.object);
 
-    state.activeModel = model;
-    state.lastModelObject = model.object;
+  state.activeModel = model;
+  state.lastModelObject = model.object;
 
-    fragments.core.update(true);
-    await fitCameraToObject(model.object);
-    await buildTree();
+  fragments.core.update(true);
+  await fitCameraToObject(model.object);
+  await buildTree();
+
+  // Les objets Fragments ne sont pas toujours prêts immédiatement.
+  // On attend deux frames avant de créer les edges.
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      addEdgesToObject(model.object);
+      fragments.core.update(true);
+    });
   });
+});
 
   fragments.core.models.materials.list.onItemSet.add(({ value: material }) => {
-    if (!("isLodMaterial" in material && material.isLodMaterial)) {
-      material.polygonOffset = true;
-      material.polygonOffsetUnits = 1;
-      material.polygonOffsetFactor = Math.random();
+   if (!("isLodMaterial" in material && material.isLodMaterial)) {
+     material.polygonOffset = true;
+     material.polygonOffsetUnits = 1;
+     material.polygonOffsetFactor = Math.random();
 
-      // Some converted roofs/beams can have inconsistent winding/normals.
-      // DoubleSide avoids faces disappearing in Fragments while we keep the
-      // geometric exporter simple.
-      material.side = THREE.DoubleSide;
-      material.needsUpdate = true;
-    }
-  });
+     material.side = THREE.DoubleSide;
+
+     if ("roughness" in material) material.roughness = 0.78;
+     if ("metalness" in material) material.metalness = 0.04;
+     if ("envMapIntensity" in material) material.envMapIntensity = 0.7;
+     if ("aoMapIntensity" in material) material.aoMapIntensity = 1.4;
+
+     material.needsUpdate = true;
+  }
+});
 
   const casters = components.get(OBC.Raycasters);
   const caster = casters.get(world);
@@ -1192,6 +1233,7 @@ async function initViewer() {
 
   setupPicking();
   setStatus("Viewer prêt. Dépose un fichier .ifc.", "ok");
+  await loadProjectFromUrl();
 }
 
 function setupPicking() {
@@ -1256,6 +1298,7 @@ async function clearModels() {
 
   const models = [...state.fragments.list.values()];
   for (const model of models) {
+    removeEdgesFromObject();
     state.world.scene.three.remove(model.object);
     model.dispose?.();
   }
@@ -1290,6 +1333,150 @@ async function clearModels() {
    editModeButton.disabled = true;
 }
 resetPendingEdits();
+updateModelerButtonState();
+}
+
+function updateModelerButtonState() {
+  if (!modelerButton) return;
+  // On laisse le bouton actif dès qu’un IFC texte est chargé : si aucun GLB
+  // source n’est lié, le handler donne un message clair au lieu de masquer l’action.
+  modelerButton.disabled = !state.lastIfcText;
+}
+
+async function attachProjectContextForFile(fileName) {
+  if (!fileName || !/\.ifc$/i.test(fileName)) {
+    updateModelerButtonState();
+    return;
+  }
+
+  try {
+    let project = state.projectId ? await getProject(state.projectId) : null;
+
+    if (!project) {
+      project = await findProjectForIfcFile(fileName);
+    }
+
+    if (!project) {
+      const lastId = getLastProjectId();
+      const last = lastId ? await getProject(lastId) : null;
+      if (last && last.glbBlob && last.ifcFileName) {
+        const a = String(last.ifcFileName).replace(/\.ifc$/i, '').toLowerCase();
+        const b = String(fileName).replace(/\.ifc$/i, '').toLowerCase();
+        if (a === b || a.replace(/\.edited$/i, '') === b.replace(/\.edited$/i, '')) project = last;
+      }
+    }
+
+    if (project) {
+      state.projectId = project.id;
+      state.project = project;
+      setLastProjectId(project.id);
+      setStatus(`Modèle chargé : ${fileName} · GLB source lié au projet local.`, "ok");
+    }
+  } catch (error) {
+    console.warn("Project context lookup failed:", error);
+  }
+
+  updateModelerButtonState();
+}
+
+function restorePendingEditsFromProject(project) {
+  if (!project?.edits?.length || !state.ifcIndex) return;
+  state.restoringProjectEdits = true;
+  state.pendingEdits = editsArrayToMap(project.edits, state.ifcIndex);
+  state.restoringProjectEdits = false;
+  updateEditCount();
+  if (state.pendingEdits.size > 0) {
+    setStatus(`Modèle chargé : ${state.currentFileName} · ${state.pendingEdits.size} reclassification(s) restaurée(s).`, "ok");
+  }
+}
+
+function scheduleProjectPersist() {
+  if (state.restoringProjectEdits || !state.projectId || !state.lastIfcText) return;
+  if (projectPersistTimer) clearTimeout(projectPersistTimer);
+  projectPersistTimer = setTimeout(() => {
+    projectPersistTimer = null;
+    persistCurrentProjectState().catch((error) => console.warn("Project persist failed:", error));
+  }, 250);
+}
+
+async function persistCurrentProjectState() {
+  if (!state.projectId || !state.lastIfcText) return null;
+  const updated = await updateProject(state.projectId, {
+    ifcText: state.lastIfcText,
+    ifcFileName: state.currentFileName || state.project?.ifcFileName || "model.ifc",
+    edits: editsMapToArray(state.pendingEdits),
+    lastOpenedIn: "viewer",
+  });
+  state.project = updated;
+  return updated;
+}
+
+async function ensureLinkedProjectForModeler() {
+  let project = state.projectId ? await getProject(state.projectId) : null;
+
+  if (!project && state.currentFileName) {
+    project = await findProjectForIfcFile(state.currentFileName);
+  }
+
+  if (!project) {
+    const last = await getProject(getLastProjectId());
+    if (last?.glbBlob) project = last;
+  }
+
+  if (!project?.glbBlob) {
+    throw new Error("Aucun GLB source n’est lié à cet IFC. Ouvre le viewer depuis le bouton créé après la conversion GLB → IFC, ou recharge l’IFC généré dans le même navigateur.");
+  }
+
+  state.projectId = project.id;
+  state.project = project;
+  setLastProjectId(project.id);
+  return project;
+}
+
+async function openModelerForCurrentProject() {
+  if (!state.lastIfcText) {
+    setStatus("Charge un IFC avant de lancer le modeler.", "error");
+    return;
+  }
+
+  try {
+    const project = await ensureLinkedProjectForModeler();
+    await updateProject(project.id, {
+      ifcText: state.lastIfcText,
+      ifcFileName: state.currentFileName || project.ifcFileName || "model.ifc",
+      edits: editsMapToArray(state.pendingEdits),
+      lastOpenedIn: "viewer",
+    });
+    window.location.href = `/modeler.html?project=${encodeURIComponent(project.id)}&return=viewer`;
+  } catch (error) {
+    setStatus(error.message || String(error), "error");
+  }
+}
+
+async function loadProjectFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  const projectId = params.get("project");
+  if (!projectId) return;
+
+  try {
+    const project = await getProject(projectId);
+    if (!project?.ifcText) throw new Error("Projet local introuvable ou IFC absent.");
+
+    state.projectId = project.id;
+    state.project = project;
+    setLastProjectId(project.id);
+
+    state.restoringProjectEdits = true;
+    await loadFile(textToIfcFile(project.ifcText, project.ifcFileName || "model.ifc"));
+    state.restoringProjectEdits = false;
+
+    restorePendingEditsFromProject(project);
+    updateModelerButtonState();
+  } catch (error) {
+    state.restoringProjectEdits = false;
+    console.error(error);
+    setStatus(`Impossible de charger le projet local : ${error.message || error}`, "error");
+  }
 }
 
 async function loadFile(file) {
@@ -1349,6 +1536,9 @@ async function loadFile(file) {
     resetButton.disabled = false;
     updateSelectionButtons();
     setStatus(`Modèle chargé : ${file.name}`, "ok");
+    await attachProjectContextForFile(file.name);
+    if (state.project?.edits?.length) restorePendingEditsFromProject(state.project);
+    updateModelerButtonState();
   } catch (error) {
     console.error(error);
     setStatus(`Erreur viewer : ${error.message || error}`, "error");
@@ -1553,7 +1743,7 @@ async function selectElements(modelId, ids, options = {}) {
     await state.fragments.highlight(
       {
         color: selectionColor,
-        renderedFaces: FRAGS.RenderedFaces?.ONE ?? 0,
+        renderedFaces: FRAGS.RenderedFaces?.TWO ?? FRAGS.RenderedFaces?.ONE ?? 0,
         opacity: 1,
         transparent: false,
       },
@@ -2161,6 +2351,7 @@ function updateEditCount() {
   if (exportEditedButton) {
     exportEditedButton.disabled = state.pendingEdits.size === 0;
   }
+  scheduleProjectPersist();
 }
 
 function toggleEditMode() {
@@ -2339,8 +2530,108 @@ if (resetEditsButton) resetEditsButton.addEventListener('click', () => {
   setStatus("Modifications annulées.", "ok");
 });
 if (reloadEditedButton) reloadEditedButton.addEventListener('click', reloadEditedIfc);
+if (modelerButton) modelerButton.addEventListener('click', openModelerForCurrentProject);
 
 loadIfcCatalog();
+
+const EDGE_HELPER_NAME = "__glb2ifc_edges__";
+
+function addEdgesToObject(root) {
+  if (!root || !state.world) return;
+
+  removeEdgesFromObject();
+
+  const scene = state.world.scene.three;
+  const edgesGroup = new THREE.Group();
+  edgesGroup.name = EDGE_HELPER_NAME;
+  edgesGroup.renderOrder = 9999;
+
+  const edgeMaterial = new THREE.LineBasicMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0.85,
+    depthTest: false,
+    depthWrite: false,
+  });
+
+  const instanceMatrix = new THREE.Matrix4();
+  const worldMatrix = new THREE.Matrix4();
+
+  let meshCount = 0;
+  let edgeCount = 0;
+
+  root.updateWorldMatrix(true, true);
+
+  root.traverse((child) => {
+    if (!child.isMesh || !child.geometry) return;
+
+    meshCount += 1;
+    child.updateWorldMatrix(true, false);
+
+    // Cas classique
+    if (!child.isInstancedMesh) {
+      const edgesGeometry = new THREE.EdgesGeometry(child.geometry, 20);
+      const edges = new THREE.LineSegments(edgesGeometry, edgeMaterial);
+
+      edges.matrixAutoUpdate = false;
+      edges.matrix.copy(child.matrixWorld);
+      edges.renderOrder = 9999;
+
+      edgesGroup.add(edges);
+      edgeCount += 1;
+      return;
+    }
+
+    // Cas InstancedMesh / Fragments
+    const count = Math.min(child.count || 0, 3000);
+    const baseEdgesGeometry = new THREE.EdgesGeometry(child.geometry, 20);
+
+    for (let i = 0; i < count; i++) {
+      child.getMatrixAt(i, instanceMatrix);
+
+      worldMatrix
+        .copy(child.matrixWorld)
+        .multiply(instanceMatrix);
+
+      const edges = new THREE.LineSegments(baseEdgesGeometry.clone(), edgeMaterial);
+      edges.matrixAutoUpdate = false;
+      edges.matrix.copy(worldMatrix);
+      edges.renderOrder = 9999;
+
+      edgesGroup.add(edges);
+      edgeCount += 1;
+    }
+
+    baseEdgesGeometry.dispose();
+  });
+
+  scene.add(edgesGroup);
+
+  console.info(`[Edges] meshes trouvés: ${meshCount}, edges ajoutés: ${edgeCount}`);
+}
+
+function removeEdgesFromObject() {
+  const scene = state.world?.scene?.three;
+  if (!scene) return;
+
+  const edgesGroup = scene.getObjectByName(EDGE_HELPER_NAME);
+  if (!edgesGroup) return;
+
+  edgesGroup.traverse((child) => {
+    child.geometry?.dispose?.();
+  });
+
+  const materials = new Set();
+  edgesGroup.traverse((child) => {
+    if (child.material) materials.add(child.material);
+  });
+
+  for (const material of materials) {
+    material.dispose?.();
+  }
+
+  scene.remove(edgesGroup);
+}
 
 initViewer().catch((error) => {
   console.error(error);

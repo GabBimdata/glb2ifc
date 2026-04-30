@@ -56,6 +56,10 @@ app.use(express.urlencoded({ limit: '200mb', extended: true }));
 
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Draco decoder files for the pure Three.js GLB modeler. This keeps Draco-compressed
+// GLBs loadable in /modeler.html without requiring a CDN.
+app.use('/vendor/draco', express.static(path.join(__dirname, 'node_modules/three/examples/jsm/libs/draco')));
+
 // Vite is used only to serve the BIM viewer module with local npm imports.
 // The converter UI and /api/convert remain handled by Express.
 const vite = await createViteServer({
@@ -70,6 +74,15 @@ app.get('/viewer.html', (req, res, next) => {
   const viewerPath = path.join(__dirname, 'public', 'viewer.html');
   if (fs.existsSync(viewerPath)) {
     return res.sendFile(viewerPath);
+  }
+  next();
+});
+
+
+app.get('/modeler.html', (req, res, next) => {
+  const modelerPath = path.join(__dirname, 'public', 'modeler.html');
+  if (fs.existsSync(modelerPath)) {
+    return res.sendFile(modelerPath);
   }
   next();
 });
@@ -3630,7 +3643,7 @@ function generateIFC(meshes, storeys, originalFilename, scaleInfo = null) {
           stair: { r: 0.90, g: 0.68, b: 0.42 }
         };
 
-        const spaceStyle = getOrCreateStyle(styleByCategory[category.key] || styleByCategory.main, 0.82);
+        const spaceStyle = getOrCreateStyle(styleByCategory[category.key] || styleByCategory.main, 0.35);
         if (spaceStyle) {
           for (const faceSet of faceSets) {
             lines.push(`${nextId()}=IFCSTYLEDITEM(${faceSet},(${spaceStyle.presStyle}),$);`);

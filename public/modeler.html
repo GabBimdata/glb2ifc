@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>glb2ifc · Modeler GLB</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #151b23;
+      --panel-2: #1a2028;
+      --panel-3: #10161d;
+      --text: #e8eaed;
+      --muted: #8b95a3;
+      --border: #2a3441;
+      --accent: #ff9248;
+      --accent-soft: rgba(255, 146, 72, 0.12);
+      --success: #5dd39e;
+      --error: #ff6b6b;
+      --warning: #ffd166;
+      --selected: rgba(255, 146, 72, 0.14);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "JetBrains Mono", Consolas, Monaco, monospace;
+      overflow: hidden;
+    }
+
+    #app {
+      display: grid;
+      grid-template-columns: 320px minmax(0, 1fr) 340px;
+      height: 100vh;
+    }
+
+    aside,
+    .properties-panel {
+      background:
+        radial-gradient(circle at 0% 0%, rgba(255, 146, 72, 0.09), transparent 42%),
+        var(--panel);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+
+    aside { border-right: 1px solid var(--border); }
+    .properties-panel { border-left: 1px solid var(--border); }
+
+    main {
+      position: relative;
+      min-width: 0;
+      background: radial-gradient(circle at 50% 10%, rgba(255, 146, 72, 0.05), transparent 35%), #0b1016;
+    }
+
+    #container { position: absolute; inset: 0; }
+
+    .panel-header {
+      padding: 0.8rem 0.9rem 0.75rem;
+      border-bottom: 1px solid var(--border);
+      flex: 0 0 auto;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 0.65rem;
+      margin-bottom: 0.55rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      font-size: 0.70rem;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      background: var(--accent);
+      box-shadow: 0 0 18px var(--accent);
+    }
+
+    h1, h2 { margin: 0; letter-spacing: -0.04em; }
+    h1 { font-size: 1.22rem; }
+    h2 { font-size: 1rem; }
+
+    p {
+      color: var(--muted);
+      line-height: 1.5;
+      font-size: 0.76rem;
+      margin: 0.45rem 0 0;
+    }
+
+    .link-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.5rem;
+      margin-top: 0.75rem;
+    }
+
+    .dropzone {
+      display: grid;
+      place-items: center;
+      min-height: 76px;
+      margin-top: 0.75rem;
+      border: 1px dashed var(--border);
+      border-radius: 16px;
+      background: var(--panel-2);
+      text-align: center;
+      padding: 0.6rem;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s, transform 0.2s;
+      color: var(--muted);
+      font-size: 0.75rem;
+    }
+
+    .dropzone:hover,
+    .dropzone.drag-over {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+      transform: translateY(-1px);
+    }
+
+    .dropzone strong {
+      display: block;
+      color: var(--text);
+      margin-bottom: 0.16rem;
+    }
+
+    input[type="file"] { display: none; }
+
+    button,
+    .link-button {
+      border: 1px solid var(--border);
+      background: var(--panel-2);
+      color: var(--text);
+      padding: 0.62rem 0.68rem;
+      border-radius: 12px;
+      font: inherit;
+      font-size: 0.74rem;
+      cursor: pointer;
+      text-decoration: none;
+      text-align: center;
+      transition: border-color 0.2s, background 0.2s, color 0.2s;
+    }
+
+    button:hover,
+    .link-button:hover {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    button:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
+    button.active {
+      color: var(--accent);
+      border-color: var(--accent);
+      background: rgba(255, 146, 72, 0.16);
+    }
+
+    .toolbar,
+    .floating-help {
+      position: absolute;
+      z-index: 5;
+      display: flex;
+      gap: 0.45rem;
+      align-items: center;
+    }
+
+    .toolbar {
+      top: 0.75rem;
+      left: 0.75rem;
+      flex-wrap: wrap;
+      max-width: calc(100% - 1.5rem);
+    }
+
+    .toolbar-group {
+      display: flex;
+      gap: 0.35rem;
+      padding: 0.35rem;
+      border: 1px solid var(--border);
+      border-radius: 15px;
+      background: rgba(15, 20, 25, 0.82);
+      backdrop-filter: blur(12px);
+      box-shadow: 0 10px 30px rgba(0,0,0,0.18);
+    }
+
+    .toolbar button { padding: 0.48rem 0.58rem; }
+
+    .floating-help {
+      right: 0.75rem;
+      bottom: 0.75rem;
+      display: block;
+      max-width: 360px;
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      background: rgba(15, 20, 25, 0.84);
+      backdrop-filter: blur(12px);
+      color: var(--muted);
+      font-size: 0.70rem;
+      line-height: 1.55;
+      padding: 0.75rem 0.85rem;
+      pointer-events: none;
+    }
+
+    .status {
+      border-top: 1px solid var(--border);
+      padding: 0.72rem 0.9rem;
+      color: var(--muted);
+      font-size: 0.70rem;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      min-height: 64px;
+      flex: 0 0 auto;
+    }
+
+    .status.ok { color: var(--success); }
+    .status.error { color: var(--error); }
+    .status.warning { color: var(--warning); }
+
+    .tree-actions,
+    .export-actions,
+    .mode-actions {
+      display: grid;
+      gap: 0.5rem;
+      padding: 0.75rem 0.9rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .tree-actions,
+    .mode-actions { grid-template-columns: 1fr 1fr; }
+    .export-actions { grid-template-columns: 1fr; border-top: 1px solid var(--border); border-bottom: none; }
+
+    .search-wrap {
+      padding: 0.75rem 0.9rem 0;
+      border-bottom: 1px solid var(--border);
+    }
+
+    #tree-search,
+    #name-input {
+      width: 100%;
+      border: 1px solid var(--border);
+      background: var(--panel-3);
+      color: var(--text);
+      border-radius: 12px;
+      padding: 0.62rem 0.7rem;
+      font: inherit;
+      font-size: 0.74rem;
+      outline: none;
+    }
+
+    #tree-search:focus,
+    #name-input:focus { border-color: var(--accent); }
+
+    #tree {
+      overflow: auto;
+      padding: 0.45rem 0.4rem 0.8rem;
+      flex: 1 1 auto;
+      min-height: 0;
+    }
+
+    .tree-empty,
+    .properties-empty {
+      color: var(--muted);
+      font-size: 0.76rem;
+      padding: 1rem;
+      line-height: 1.5;
+    }
+
+    .tree-item {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 0.45rem;
+      align-items: center;
+      padding: 0.44rem 0.52rem;
+      border-radius: 8px;
+      cursor: pointer;
+      color: var(--muted);
+      font-size: 0.73rem;
+      border: 1px solid transparent;
+    }
+
+    .tree-item:hover {
+      background: rgba(255,255,255,0.035);
+      color: var(--text);
+    }
+
+    .tree-item.selected {
+      color: var(--text);
+      border-color: rgba(255, 146, 72, 0.36);
+      background: var(--selected);
+    }
+
+    .tree-main { min-width: 0; }
+    .tree-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tree-meta { margin-top: 0.12rem; font-size: 0.64rem; color: var(--muted); }
+    .tree-badge { font-size: 0.62rem; color: var(--accent); border: 1px solid rgba(255,146,72,0.32); border-radius: 999px; padding: 0.12rem 0.36rem; }
+
+    .properties-content {
+      overflow: auto;
+      padding: 0.8rem 0.9rem 1rem;
+      flex: 1 1 auto;
+      min-height: 0;
+    }
+
+    .prop-section {
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      background: rgba(16, 22, 29, 0.72);
+      margin-bottom: 0.75rem;
+      overflow: hidden;
+    }
+
+    .prop-section h3 {
+      margin: 0;
+      padding: 0.65rem 0.75rem;
+      border-bottom: 1px solid var(--border);
+      color: var(--text);
+      font-size: 0.76rem;
+      font-weight: 600;
+    }
+
+    .prop-grid { padding: 0.55rem 0.75rem 0.7rem; }
+
+    .prop-row {
+      display: grid;
+      grid-template-columns: 110px minmax(0, 1fr);
+      gap: 0.7rem;
+      padding: 0.28rem 0;
+      font-size: 0.70rem;
+      line-height: 1.35;
+    }
+
+    .prop-label { color: var(--muted); }
+    .prop-value { color: var(--text); overflow-wrap: anywhere; }
+
+    .hint {
+      color: var(--muted);
+      font-size: 0.68rem;
+      line-height: 1.5;
+      padding: 0.65rem 0.75rem 0.75rem;
+    }
+
+    .spinner {
+      display: inline-block;
+      width: 11px;
+      height: 11px;
+      border: 1.5px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin-right: 0.4rem;
+      vertical-align: -1px;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    @media (max-width: 1050px) {
+      #app { grid-template-columns: 280px minmax(0, 1fr); }
+      .properties-panel { display: none; }
+    }
+
+    @media (max-width: 760px) {
+      #app { grid-template-columns: 1fr; }
+      aside { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <aside>
+      <div class="panel-header">
+        <div class="brand"><span class="dot"></span><span>modeler glb</span></div>
+        <h1>Three.js pur</h1>
+        <p>Édite le GLB source, exporte un GLB baked, puis relance le convertisseur GLB → IFC.</p>
+        <div class="link-row">
+          <a class="link-button" href="/">Convertisseur</a>
+          <a class="link-button" href="/viewer.html">Viewer IFC</a>
+        </div>
+        <label class="dropzone" id="dropzone" for="glb-input">
+          <span><strong>Ouvrir un .glb</strong>Drag & drop ou clic</span>
+          <input type="file" id="glb-input" accept=".glb,.gltf,model/gltf-binary,model/gltf+json" />
+        </label>
+      </div>
+
+      <div class="mode-actions">
+        <button id="select-all" disabled>Tout cadrer</button>
+        <button id="clear-scene" disabled>Vider</button>
+      </div>
+
+      <div class="search-wrap">
+        <input id="tree-search" type="search" placeholder="Filtrer les meshes…" autocomplete="off" />
+      </div>
+
+      <div id="tree">
+        <div class="tree-empty">Charge un GLB pour voir les meshes éditables.</div>
+      </div>
+
+      <div class="export-actions">
+        <button id="export-glb" disabled>Exporter GLB modifié</button>
+        <button id="convert-ifc" disabled>Convertir le GLB modifié en IFC</button>
+      </div>
+
+      <div id="status" class="status">Prêt.</div>
+    </aside>
+
+    <main>
+      <div id="container"></div>
+      <div class="toolbar">
+        <div class="toolbar-group">
+          <button id="mode-translate" disabled title="T">Translate</button>
+          <button id="mode-rotate" disabled title="R">Rotate</button>
+          <button id="mode-scale" disabled title="S">Scale</button>
+        </div>
+        <div class="toolbar-group">
+          <button id="space-local" disabled>Local</button>
+          <button id="space-world" disabled>World</button>
+          <button id="reset-transform" disabled>Reset</button>
+        </div>
+      </div>
+      <div class="floating-help">
+        <strong>Raccourcis</strong><br />
+        Clic mesh = sélectionner · T/R/S = transform · L/W = local/world · Échap = désélectionner.<br />
+        À l’export, les transformations sont baked dans les positions des vertices pour ton pipeline IFC.
+      </div>
+    </main>
+
+    <section class="properties-panel">
+      <div class="panel-header">
+        <div class="brand"><span class="dot"></span><span>sélection</span></div>
+        <h2>Propriétés GLB</h2>
+        <p>Infos mesh + édition du nom conservé au re-smelt.</p>
+      </div>
+      <div id="properties" class="properties-content">
+        <div class="properties-empty">Sélectionne un mesh dans la scène ou dans l’arbre.</div>
+      </div>
+    </section>
+  </div>
+
+  <script type="module" src="/src/modeler.js"></script>
+</body>
+</html>
