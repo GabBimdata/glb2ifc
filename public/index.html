@@ -89,6 +89,26 @@
     max-width: 760px;
   }
 
+  .viewer-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 1.25rem;
+    color: var(--accent);
+    text-decoration: none;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0.7rem 1rem;
+    background: rgba(255, 146, 72, 0.08);
+    transition: border-color 0.2s, transform 0.2s, background 0.2s;
+  }
+
+  .viewer-link:hover {
+    border-color: var(--accent);
+    background: rgba(255, 146, 72, 0.14);
+    transform: translateY(-1px);
+  }
+
   .dropzone {
     display: block;
     width: 100%;
@@ -231,7 +251,27 @@
   @media (max-width: 560px) {
     body { padding: 2.5rem 1rem; }
     h1 { font-size: 2.25rem; }
-    .dropzone { padding: 3rem 1.25rem; }
+    .viewer-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 1.25rem;
+    color: var(--accent);
+    text-decoration: none;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0.7rem 1rem;
+    background: rgba(255, 146, 72, 0.08);
+    transition: border-color 0.2s, transform 0.2s, background 0.2s;
+  }
+
+  .viewer-link:hover {
+    border-color: var(--accent);
+    background: rgba(255, 146, 72, 0.14);
+    transform: translateY(-1px);
+  }
+
+  .dropzone { padding: 3rem 1.25rem; }
     .status-line { align-items: flex-start; }
     .summary { grid-template-columns: 1fr; }
   }
@@ -249,6 +289,7 @@
     Convertit un fichier GLB en IFC4 avec classification heuristique des murs, dalles,
     portes, fenêtres, poutres, poteaux, escaliers, toitures, murs extérieurs et étages.
   </p>
+  <a class="viewer-link" href="/viewer.html">Ouvrir le viewer IFC local →</a>
 </header>
 
 <main class="converter">
@@ -266,7 +307,7 @@
 
 <footer>
   glb2ifc &middot; runs locally on <code>localhost:3737</code><br>
-  Heuristique : bounding boxes, faces verticales, marches répétées, matériaux, opacité, relations spatiales et enveloppe du bâtiment.
+  Heuristique : bounding boxes, faces verticales, marches répétées, matériaux, couleurs fallback, quantités IFC, matériaux IFC, layers IFC, spaces IFC, zones IFC, Draco GLB, opacité, relations spatiales et enveloppe du bâtiment.
 </footer>
 
 <script>
@@ -364,6 +405,26 @@ async function handleFile(file) {
     const storeys = statValue(stats, 'storeys') || 1;
     const total = statValue(stats, 'total');
     const uniformatCodes = statValue(stats, 'uniformatCodes');
+    const fallbackColors = statValue(stats, 'fallbackColors');
+    const quantities = statValue(stats, 'quantities');
+    const materials = statValue(stats, 'materials');
+    const layers = statValue(stats, 'layers');
+    const spaces = statValue(stats, 'spaces');
+    const zones = statValue(stats, 'zones');
+    const tinySpacesFiltered = stats.tinySpacesFiltered ? 'on' : 'off';
+    const roomPrototypeSpaces = statValue(stats, 'roomPrototypeSpaces');
+    const slopedRoofSpaces = statValue(stats, 'slopedRoofSpaces');
+    const spaceBoundaries = statValue(stats, 'spaceBoundaries');
+    const beamGuidedRoofSpaces = statValue(stats, 'beamGuidedRoofSpaces');
+    const openRoomCellMerge = stats.openRoomCellMerge ? 'on' : 'off';
+    const wallSnapping = stats.wallSnapping ? 'on' : 'off';
+    const wallClamp = stats.wallClamp ? 'on' : 'off';
+    const strongWallClamp = stats.strongWallClamp ? 'on' : 'off';
+    const inputScaleApplied = stats.inputScaleApplied ? 'on' : 'off';
+    const inputScale = stats.inputScale || 1;
+    const assumedInputUnit = stats.assumedInputUnit || 'metre';
+    const outputUnit = stats.outputUnit || 'metre';
+    const normalizedMaxDimension = Number(stats.normalizedMaxDimension || 0).toFixed(2);
 
     const externalWallRatio = walls > 0
       ? `${externalWalls}/${walls}`
@@ -393,12 +454,80 @@ async function handleFile(file) {
           <span class="status-value">${storeys}</span>
         </div>
         <div class="status-line">
+          <span class="status-label">Échelle entrée</span>
+          <span class="status-value">${inputScaleApplied === 'on' ? `${assumedInputUnit} → ${outputUnit} · x${inputScale}` : 'mètres · x1'}</span>
+        </div>
+        <div class="status-line">
+          <span class="status-label">Dimension max normalisée</span>
+          <span class="status-value">${normalizedMaxDimension} m</span>
+        </div>
+        <div class="status-line">
           <span class="status-label">Murs extérieurs</span>
           <span class="status-value">${externalWallRatio}</span>
         </div>
         <div class="status-line">
           <span class="status-label">Codes Uniformat II</span>
           <span class="status-value">${uniformatCodes}</span>
+        </div>
+        <div class="status-line">
+          <span class="status-label">Couleurs fallback (pas si blanc explicite)</span>
+          <span class="status-value">${fallbackColors}</span>
+        </div>
+        <div class="status-line">
+          <span class="status-label">Quantités IFC</span>
+          <span class="status-value">${quantities}</span>
+        </div>
+        <div class="status-line">
+          <span class="status-label">Matériaux IFC</span>
+          <span class="status-value">${materials}</span>
+        </div>
+        <div class="status-line">
+          <span class="status-label">Layers IFC</span>
+          <span class="status-value">${layers}</span>
+        </div>
+        <div class="status-line">
+          <span class="status-label">Spaces IFC</span>
+          <span class="status-value">${spaces}</span>
+        </div>
+        <div class="status-line">
+          <span class="status-label">Zones IFC</span>
+          <span class="status-value">${zones}</span>
+        </div>
+        <div class="status-line">
+          <span class="status-label">Room prototype spaces</span>
+          <span class="status-value">${roomPrototypeSpaces}</span>
+        </div>
+        <div class="status-line">
+          <span class="status-label">Spaces sous toiture</span>
+          <span class="status-value">${slopedRoofSpaces}</span>
+        </div>
+        <div class="status-line">
+          <span class="status-label">Space boundaries</span>
+          <span class="status-value">${spaceBoundaries}</span>
+        </div>
+        <div class="status-line">
+          <span class="status-label">Toits guidés par beams</span>
+          <span class="status-value">${beamGuidedRoofSpaces}</span>
+        </div>
+        <div class="status-line">
+          <span class="status-label">Fusion cells ouvertes</span>
+          <span class="status-value">${openRoomCellMerge}</span>
+        </div>
+        <div class="status-line">
+          <span class="status-label">Snap spaces sur murs</span>
+          <span class="status-value">${wallSnapping}</span>
+        </div>
+        <div class="status-line">
+          <span class="status-label">Clamp spaces sur murs</span>
+          <span class="status-value">${wallClamp}</span>
+        </div>
+        <div class="status-line">
+          <span class="status-label">Clamp fort murs</span>
+          <span class="status-value">${strongWallClamp}</span>
+        </div>
+        <div class="status-line">
+          <span class="status-label">Filtre mini-spaces</span>
+          <span class="status-value">${tinySpacesFiltered}</span>
         </div>
       </div>
 
@@ -414,6 +543,22 @@ async function handleFile(file) {
         ${renderStat(statValue(stats, 'window'), 'windows')}
         ${renderStat(statValue(stats, 'proxy'), 'proxies')}
         ${renderStat(uniformatCodes, 'uniformat')}
+        ${renderStat(fallbackColors, 'fallback colors (not for explicit white)')}
+        ${renderStat(quantities, 'quantities')}
+        ${renderStat(materials, 'materials')}
+        ${renderStat(layers, 'layers')}
+        ${renderStat(spaces, 'spaces')}
+        ${renderStat(zones, 'zones')}
+        ${renderStat(roomPrototypeSpaces, 'room prototype spaces')}
+        ${renderStat(slopedRoofSpaces, 'sloped roof spaces')}
+        ${renderStat(spaceBoundaries, 'space boundaries')}
+        ${renderStat(beamGuidedRoofSpaces, 'beam-guided roof spaces')}
+        ${renderStat(openRoomCellMerge, 'open room-cell merge')}
+        ${renderStat(wallSnapping, 'wall snapping')}
+        ${renderStat(wallClamp, 'wall clamp')}
+        ${renderStat(strongWallClamp, 'strong wall clamp')}
+        ${renderStat(inputScaleApplied, 'input scale normalization')}
+        ${renderStat(tinySpacesFiltered, 'tiny space filter')}
       </div>
     `, 'success');
 
