@@ -1,173 +1,84 @@
-# glb2ifc
+# GLB → IFC Converter
 
 <img width="6304" height="1682" alt="Group 3" src="https://github.com/user-attachments/assets/0faa42d7-5a68-42fe-96f1-d5ba5b1a242c" />
 
+A local web tool that converts `.glb` building models into IFC4 `.ifc` files, with heuristic BIM classification, IFC metadata enrichment, and a lightweight local BIM viewer.
 
-A small local web app to convert **glTF binary (GLB)** files to **IFC4** with heuristic classification of architectural elements.
+The project is intentionally experimental: it is not a replacement for BIM authoring software, but it can turn many GLB building models into a more useful IFC starting point.
 
-> Drag a `.glb` into your browser, get an `.ifc` back. Runs locally on your machine — no cloud upload.
+## Features
 
-![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Node](https://img.shields.io/badge/node-%E2%89%A518-green.svg)
-![IFC](https://img.shields.io/badge/IFC-4-orange.svg)
+### GLB → IFC conversion
 
-## What it detects
+The converter reads a GLB file, extracts mesh geometry, classifies elements, and exports an IFC4 STEP file.
 
-The converter tries to infer BIM semantics from raw GLB geometry.
-
-It currently detects and exports:
+Current exported IFC element types include:
 
 - `IfcWall`
-- exterior walls with `Pset_WallCommon.IsExternal`
 - `IfcSlab`
-- `IfcDoor`
-- `IfcWindow`
 - `IfcBeam`
 - `IfcColumn`
 - `IfcStair`
 - `IfcRoof`
-- `IfcBuildingElementProxy` for unclassified geometry
+- `IfcDoor`
+- `IfcWindow`
+- `IfcSpace`
+- `IfcZone`
+- `IfcBuildingElementProxy`
 
-It also adds:
+The IFC file includes:
 
-- automatic storey detection
-- automatic element naming, such as `Wall 001`, `Slab 001`, `Beam 001`
-- base color preservation through `IfcSurfaceStyle`
-- basic IFC property sets
-- Uniformat II classification references
+- IFC4 STEP-21 export
+- Project → Site → Building → Storey hierarchy
+- multi-storey detection
+- storey assignment per element
+- Y-up glTF → Z-up IFC axis conversion
+- `IfcTriangulatedFaceSet` geometry to preserve original mesh triangles
+- STEP-21 string escaping
+- Draco-compressed GLB support through `draco3dgltf`
+- automatic millimetre → metre scale normalization for very large GLB extents
+- fallback colours by IFC type when the GLB has no useful material colour
+- preservation of explicit white materials instead of recolouring them
 
-## Why?
+### Classification heuristics
 
-GLB is great for visualization, but it usually has no BIM semantics. A mesh does not inherently know whether it is a wall, slab, beam, roof, stair, or window.
+The converter uses geometry, mesh names, material names, dimensions, and triangle normal analysis to classify objects.
 
-Most simple GLB → IFC conversions wrap everything as `IfcBuildingElementProxy`, which creates a valid IFC file but loses most of the useful building information.
+Current detection includes:
 
-This tool tries to do better by using:
+- walls and external walls
+- slabs and floors
+- beams and roof beams
+- columns
+- stairs
+- roofs
+- doors
+- windows
+- spaces / zones
+- storeys
+- roof-adjacent and upper-storey elements
 
-- bounding boxes
-- triangle orientation
-- vertical and horizontal face ratios
-- material names
-- mesh names
-- material opacity
-- spatial relationships
-- wall overlap
-- building envelope detection
-- storey context
-- top-of-building context
+Mesh names are checked in both English and French where useful, for example:
 
-The result is still heuristic, but it gives a much richer IFC starting point.
+- `wall`, `mur`, `cloison`
+- `beam`, `poutre`, `chevron`, `panne`
+- `column`, `poteau`, `colonne`
+- `stair`, `escalier`, `marche`
+- `roof`, `toit`, `toiture`
+- `window`, `fenêtre`, `vitrage`
+- `door`, `porte`
 
-## Quick start
+### Property sets and quantities
 
-You need [Node.js 18+](https://nodejs.org) or Bun.
+The generated IFC can include common property sets such as:
 
-```bash
-git clone https://github.com/YOUR_USERNAME/glb2ifc.git
-cd glb2ifc
-npm install
-npm start
-```
+- `Pset_WallCommon`
+- `Pset_BeamCommon`
+- `Pset_ColumnCommon`
+- `Pset_StairCommon`
+- `Pset_RoofCommon`
 
-Then open:
-
-```txt
-http://localhost:3737
-```
-
-Drop a `.glb` file into the browser and download the generated `.ifc`.
-
-## How it works
-
-```txt
-GLB file
-   ↓
-@gltf-transform/core parses meshes + applies world transforms
-   ↓
-For each mesh:
-   • compute bounding box
-   • analyze triangle orientation
-   • detect vertical, horizontal and inclined face ratios
-   • extract material color, material name and opacity
-   ↓
-First pass classification:
-   • slabs / floors
-   • walls and facade-like vertical elements
-   • beams
-   • columns
-   • stairs
-   • roofs
-   • generic proxies
-   ↓
-Storey detection v2:
-   • collect candidate levels from slab tops
-   • collect wall, door, column and stair bases
-   • cluster elevations
-   • score candidate levels
-   • ignore weak/ceiling-like levels
-   • assign elements to storeys with upward snapping for thick/old buildings
-   ↓
-Refinement passes:
-   • detect doors and windows from wall overlap and floor offset
-   • detect exterior walls from envelope position and facade-like geometry
-   • promote high/inclined roof-like elements to roofs
-   • classify roof beams separately from floor beams
-   ↓
-Generate IFC4 STEP-21 text file with:
-   • Project → Site → Building → Storey(s) hierarchy
-   • IfcWall, IfcSlab, IfcDoor, IfcWindow
-   • IfcBeam, IfcColumn, IfcStair, IfcRoof
-   • IfcBuildingElementProxy for unclassified geometry
-   • IfcTriangulatedFaceSet geometry preserving original triangles
-   • IfcSurfaceStyle per unique base color
-   • Pset_WallCommon
-   • Pset_BeamCommon
-   • Pset_ColumnCommon
-   • Pset_StairCommon
-   • Pset_RoofCommon
-   • Uniformat II classification references
-   • automatic element names
-   • Y-up glTF → Z-up IFC axis conversion
-   • STEP-21 string escaping
-   ↓
-IFC file downloaded
-```
-
-## Classification logic
-
-The converter uses a best-effort heuristic pipeline.
-
-Examples:
-
-- flat and wide elements → `IfcSlab`
-- tall thin elements → `IfcWall`
-- vertical-face-dominant facade meshes → `IfcWall`
-- envelope walls → `IfcWall` with `Pset_WallCommon.IsExternal = true`
-- small thin elements overlapping host walls near floor level → `IfcDoor`
-- small thin glass-like or elevated elements overlapping host walls → `IfcWindow`
-- long horizontal structural elements → `IfcBeam`
-- compact vertical structural elements → `IfcColumn`
-- named or repeated-step geometry → `IfcStair`
-- high, inclined or roof-named elements → `IfcRoof`
-- everything else → `IfcBuildingElementProxy`
-
-The classifier supports both English and French mesh/material hints, for example:
-
-```txt
-wall, mur, murs, cloison
-door, porte, portes
-window, fenêtre, fenetre, vitrage, glass
-beam, poutre, linteau, chevron, panne
-column, colonne, poteau, pilier
-stair, escalier, marche, contremarche
-roof, toit, toiture, couverture, tuile, charpente
-```
-
-## IFC property sets
-
-The converter writes minimal common property sets where relevant.
-
-### Walls
+For walls, the converter writes:
 
 ```txt
 Pset_WallCommon
@@ -177,229 +88,326 @@ Pset_WallCommon
   ExtendToStructure = false
 ```
 
-### Beams
+The converter also generates base quantities where supported, including examples such as:
+
+- `Qto_WallBaseQuantities`
+- gross / net style dimensions where available from bounding boxes
+- length / width / height / area / volume approximations depending on type
+
+These quantities are geometric approximations derived from mesh bounding boxes and triangulated geometry. They should be reviewed before use in production workflows.
+
+### Materials, colours, layers and classifications
+
+The converter enriches IFC data with:
+
+- `IfcMaterial`
+- `IfcRelAssociatesMaterial`
+- `IfcPresentationLayerAssignment`
+- `IfcClassification`
+- `IfcClassificationReference`
+- `IfcRelAssociatesClassification`
+
+Uniformat II classification is currently assigned heuristically. Examples:
+
+- `B1010` Floor Construction
+- `B1020` Roof Construction
+- `B2010` Exterior Walls
+- `B2020` Exterior Windows
+- `B2030` Exterior Doors
+- `B3010` Roof Coverings
+- `C1010` Partitions
+- `C1020` Interior Doors
+- `C2010` Stair Construction
+
+Layers are generated by detected IFC type / discipline-style grouping, making it easier to review the model in the local viewer or external BIM tools.
+
+### Spaces and zones
+
+The converter can generate simple `IfcSpace` and `IfcZone` entities from detected slabs and storeys.
+
+Current space logic includes:
+
+- filtering of tiny slab artefacts
+- merging of contiguous slabs into cleaner spaces
+- rough distinction between main space, balcony, terrace, and stair space
+- room prototype generation for some storeys
+- sloped roof space experiments
+- `IfcRelSpaceBoundary` prototype relations
+
+The space generation is still experimental. It is useful for visual QA and early data enrichment, but it does not yet replace true room detection from architectural plans.
+
+## Local BIM viewer
+
+The project includes a local BIM viewer at:
 
 ```txt
-Pset_BeamCommon
-  Reference = ""
-  IsExternal = false
-  LoadBearing = false
+http://localhost:3737/viewer.html
 ```
 
-### Columns
+The viewer is built with the That Open / Fragments ecosystem and supports loading local IFC files.
+
+Current viewer features:
+
+- drag-and-drop IFC loading
+- IFC → Fragments conversion in the browser
+- orbit / pan / zoom
+- reset camera
+- local IFC spatial tree
+- BIMData-like structure tree:
+  - Project
+  - Site
+  - Building
+  - Storey
+  - IFC type groups
+  - IFC elements
+- element selection from the 3D view
+- element selection from the tree
+- second click to deselect
+- property panel with accordions
+- attributes
+- classifications
+- layers
+- property sets
+- quantities
+- tabs for:
+  - Spatial
+  - Objects
+  - Classifications
+  - Layers
+- show / hide checkboxes for:
+  - storeys
+  - groups
+  - individual elements
+- keyboard shortcuts:
+  - `H` hide selected element or group
+  - `F` fit view on selected element or group when possible
+  - `I` isolate current selection
+  - `Esc` clear selection / exit isolation
+
+For visual robustness, the viewer renders materials as double-sided. This helps when some triangulated roof or beam faces have inconsistent winding / normals.
+
+## How it works
 
 ```txt
-Pset_ColumnCommon
-  Reference = ""
-  IsExternal = false
-  LoadBearing = false
+GLB file
+   ↓
+@gltf-transform/core parses meshes and applies world transforms
+   ↓
+Draco decoder is registered when needed
+   ↓
+Input scale is checked
+   ↓
+If the model is probably in millimetres, coordinates are scaled to metres
+   ↓
+For each mesh:
+   - compute bounding box
+   - analyse triangle normals
+   - inspect material and mesh names
+   - classify wall / slab / beam / column / stair / roof / door / window / proxy
+   ↓
+Detect storeys
+   ↓
+Assign elements to storeys
+   ↓
+Detect exterior walls
+   ↓
+Generate spaces / zones where possible
+   ↓
+Generate IFC4 STEP-21 text file with:
+   - spatial hierarchy
+   - triangulated geometry
+   - property sets
+   - quantities
+   - materials
+   - colours
+   - layers
+   - Uniformat classifications
+   ↓
+IFC file downloaded
 ```
 
-### Stairs
+## Installation
+
+Install dependencies with Bun:
+
+```bash
+bun install
+```
+
+Start the local server:
+
+```bash
+bun run start
+```
+
+Open the converter:
 
 ```txt
-Pset_StairCommon
-  Reference = ""
-  IsExternal = false
+http://localhost:3737/
 ```
 
-### Roofs
+Open the viewer:
 
 ```txt
-Pset_RoofCommon
-  Reference = ""
-  IsExternal = true
-  LoadBearing = false
+http://localhost:3737/viewer.html
 ```
 
-These values are intentionally conservative. For example, `LoadBearing` is left as `false` because a GLB file usually does not contain reliable structural intent.
-
-## Uniformat II classification
-
-The converter can attach Uniformat II classifications using:
+## Project structure
 
 ```txt
-IfcClassification
-IfcClassificationReference
-IfcRelAssociatesClassification
+public/
+  index.html
+  viewer.html
+
+src/
+  viewer.js
+
+server.js
+package.json
+bun.lock
+README.md
 ```
 
-Current mapping:
+Generated or runtime folders should not be committed:
 
 ```txt
-External wall       → B2010 Exterior Walls
-Interior wall       → C1010 Partitions
-Slab                → B1010 Floor Construction
-Floor beam          → B1010 Floor Construction
-Roof beam           → B1020 Roof Construction
-Column              → B1010 Floor Construction
-Roof                → B3010 Roof Coverings
-Exterior window     → B2020 Exterior Windows
-Exterior door       → B2030 Exterior Doors
-Interior door       → C1020 Interior Doors
-Stair               → C2010 Stair Construction
-Proxy               → no classification
+node_modules/
+uploads/
+outputs/
 ```
 
-Beams are classified contextually:
+## Dependencies
+
+Main runtime dependencies include:
+
+- `express`
+- `multer`
+- `@gltf-transform/core`
+- `@gltf-transform/extensions`
+- `draco3dgltf`
+- `vite`
+- `three`
+- `web-ifc`
+- `@thatopen/components`
+- `@thatopen/fragments`
+
+## Git / repository notes
+
+Recommended files to commit:
 
 ```txt
-IfcBeam near the roof / roof zone / roof mesh
-→ B1020 Roof Construction
-
-IfcBeam elsewhere
-→ B1010 Floor Construction
+server.js
+package.json
+bun.lock
+README.md
+public/
+src/
+.gitignore
+LICENSE
 ```
 
-## Storey detection
+Do not commit:
 
-Storeys are detected automatically using a scoring system based on:
-
-- slab top elevations
-- wall bases
-- door bases
-- column bases
-- stair bases
-- weak hints from windows and beams
-
-The converter clusters vertical levels, scores them, and filters out weak or ceiling-like candidates.
-
-The default minimum storey height is:
-
-```js
-const MIN_STOREY_HEIGHT = 2.0;
+```txt
+node_modules/
+uploads/
+outputs/
+.env
+.env.local
 ```
 
-This is tuned to support older buildings with low ceilings, for example around 2.18 m.
+## Limits and caveats
 
-If needed, this value can be adjusted in `server.js`.
+### Input assumptions
 
-## Limits & caveats
+The converter assumes the input GLB represents an architectural or building-like model.
 
-- **Units**: assumes the GLB is in **meters**. If your file is in millimeters or centimeters, the IFC will be wrong by a factor of 1000 or 100.
+It now attempts automatic scale normalization:
 
-- **Heuristic classification**: the converter uses geometry, names, material hints, opacity and spatial relationships. It is a best-effort semantic reconstruction, not a substitute for real BIM authoring.
+- plausible metre-sized model → no scaling
+- very large model extent → likely millimetres → scale `0.001`
 
-- **Storey detection is approximate**: it works better than a simple slab-only approach, but mezzanines, split levels, ramps, thick floors, partial levels, merged meshes or unusual old buildings may still need manual review.
+This is heuristic. Some large sites or civil models may be incorrectly interpreted as millimetres.
 
-- **Exterior wall detection is approximate**: `Pset_WallCommon.IsExternal` is inferred from envelope position, vertical facade-like geometry and naming hints. Courtyards, patios, atriums, L/U-shaped buildings or merged facade meshes can still be difficult.
+### Geometry
 
-- **Doors and windows are geometry-based**: they can be detected when represented as separate or glass-like mesh elements overlapping a wall. The converter does not create real wall voids or `IfcOpeningElement` relationships yet.
+Geometry is exported as `IfcTriangulatedFaceSet`. This preserves the original triangles but is not the same as native BIM solids. Some downstream tools may prefer extruded solids, swept profiles, or parametric IFC geometry.
 
-- **Beams, columns, stairs and roofs are heuristic**: furniture, trims, railings, shelves, facade details, decorative beams, roof ornaments or repeated geometry may still be misclassified.
+### Classification
 
-- **Materials are limited**: base color is preserved as `IfcSurfaceStyle`. Textures, normal maps, metallic/roughness values and full transparency rendering are not fully exported.
+Classification is heuristic and can be wrong.
 
-- **Property sets are minimal**: common Psets are generated, but values are inferred or left blank when the GLB does not contain reliable BIM data.
+Examples:
 
-- **Uniformat II is inferred**: classification is attached based on detected IFC class and context. It should be reviewed before downstream cost estimating or formal classification workflows.
+- a wall with many openings may look like a stair
+- a thin tall furniture object may look like a wall
+- a flat table may look like a slab
+- a roof beam may look like floor construction without context
+- merged meshes can confuse element boundaries
 
-- **Geometry is tessellated**: elements are exported as `IfcTriangulatedFaceSet`. They are not converted into clean parametric extrusions or native BIM solids.
+The current approach is a best-effort starting point, not a guaranteed BIM reconstruction.
 
-- **Unicode escaping is incomplete**: non-ASCII characters in source names are replaced with `_`. Generated names such as `Wall 001` avoid most issues, but proper STEP-21 Unicode escaping is still a future improvement.
+### Storeys
 
-## Validating the output
+Storey detection is based on slabs, wall bases, doors, columns, and other vertical signals. It works better on architectural models with clear floor levels. Split-level buildings, old buildings, mezzanines, and partial slabs can still be difficult.
 
-Open the generated IFC in any IFC viewer, for example:
+### Spaces
 
-- BIMData.io
-- Bonsai / BlenderBIM
-- FreeCAD BIM Workbench
-- IfcOpenShell tools
+Space generation is experimental. Current spaces are approximate and derived from slabs, storeys, walls and roof relationships. They may not match actual rooms.
 
-Check especially:
+### Openings
 
-- element classes
-- storey assignment
-- `Pset_WallCommon.IsExternal`
-- Uniformat II classification references
-- remaining `IfcBuildingElementProxy` elements
-- false positives for doors, windows, beams, stairs or roofs
+Doors and windows are detected as separate elements where possible, but the converter does not yet cut real IFC openings into host walls. It does not generate robust `IfcOpeningElement` voids.
 
-## Stack
+### Materials and colours
 
-- **Server**: Node.js + Express + Multer
-- **GLB parsing**: `@gltf-transform/core` with `@gltf-transform/extensions`
-- **IFC writing**: hand-written STEP-21 generator
-- **Frontend**: vanilla HTML/CSS/JS
+GLB materials are read when available. If no usable colour is found, the converter can use fallback colours by IFC type. Explicit white materials should remain white.
 
-## Contributing
+### Normals and winding
 
-PRs welcome! Particularly interesting directions:
+Some converted roof or beam elements may appear visually odd in certain viewers because triangulated face winding / normals can be inconsistent. The local viewer mitigates this with double-sided rendering.
 
-- [ ] **Detect more IFC element types**
-  - `IfcRailing`
-  - `IfcCurtainWall`
-  - `IfcCovering`
-  - `IfcRamp`
-  - `IfcMember`
-  - `IfcFooting`
-  - `IfcSpace`
+### Unicode
 
-- [ ] **Improve interior wall detection**
-  - distinguish interior walls from thin facade parts
-  - reduce false door/window detection on wall fragments
-  - detect host walls before detecting openings
-  - support merged or fragmented wall meshes
+Non-ASCII names are currently simplified for STEP output. Proper IFC Unicode escaping remains a future improvement.
 
-- [ ] **Improve doors and windows**
-  - reduce false positives
-  - distinguish windows, curtain wall panels and glass facade systems
-  - optionally create `IfcOpeningElement`
-  - add host-wall relationships where possible
+## Roadmap
 
-- [ ] **Improve stairs**
-  - distinguish full stairs from individual steps
-  - support `IfcStairFlight`
-  - detect landings
-  - avoid false positives from shelves or stepped facades
+Interesting next steps:
 
-- [ ] **Improve material handling**
-  - export transparency for glass-like materials
-  - map glTF materials to IFC material definitions
-  - reuse identical materials
-  - support `IfcRelAssociatesMaterial`
-  - infer basic construction types from material names
+- improve stair detection and wall-with-openings robustness
+- improve true room detection
+- improve `IfcRelSpaceBoundary`
+- add better `IfcOpeningElement` support
+- add `IfcRailing`
+- add `IfcCovering`
+- improve material mapping
+- improve layer naming and filtering
+- add richer QA / conversion report JSON
+- add viewer colour modes:
+  - by IFC type
+  - by storey
+  - by Uniformat
+  - by layer
+- add selected element fit-view with true bounding box when Fragments exposes stable APIs
+- add true isolation by opacity rather than hiding
+- improve normals / triangle winding during IFC export
+- support more input formats through pre-conversion to GLB
 
-- [ ] **Improve Uniformat classification**
-  - refine mappings for interior/exterior systems
-  - classify roof structure vs roof covering more accurately
-  - add configurable Uniformat mapping
-  - support other classification systems later, such as Omniclass or Uniclass
+## Development notes
 
-- [ ] **Add IFC type objects**
-  - generate `IfcWallType`, `IfcSlabType`, `IfcDoorType`, `IfcWindowType`
-  - generate `IfcBeamType`, `IfcColumnType`, `IfcRoofType`, `IfcStairType`
-  - group elements by thickness, material, role or classification
-  - move common properties to types where appropriate
+This project deliberately favours simple, inspectable JavaScript over a full BIM kernel.
 
-- [ ] **Add IFC layers and systems**
-  - create `IfcPresentationLayerAssignment`
-  - group elements by category, material or source hierarchy
-  - explore `IfcSystem` where meaningful
+The converter is useful for:
 
-- [ ] **Make heuristics configurable**
-  - expose thresholds in a config file or UI
-  - tune wall thickness, slab thickness, storey height, openings, roof detection and stair detection
-  - add presets for architecture, structure, scan-derived models and visualization models
+- testing GLB → IFC workflows
+- enriching 3D building models with BIM-like structure
+- prototyping IFC data generation
+- reviewing classification heuristics
+- building local QA tools around IFC output
 
-- [ ] **Improve storey and spatial structure**
-  - better support mezzanines, split levels and ramps
-  - handle tall elements spanning multiple storeys
-  - optionally detect spaces/zones from enclosed geometry
-
-- [ ] **Improve geometry output**
-  - optional mesh simplification
-  - detect extrusions where possible
-  - reduce IFC size for heavy GLB files
-  - investigate streaming conversion for large files
-
-- [ ] **Improve metadata and encoding**
-  - read glTF `extras`
-  - preserve original mesh names as optional metadata
-  - implement proper STEP-21 Unicode escaping
-  - add validation tooling and sample test models
+It should not be treated as an authoritative BIM model generator without manual review.
 
 ## License
 
-MIT
+See `LICENSE`.
