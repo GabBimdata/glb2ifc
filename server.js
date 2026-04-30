@@ -4172,6 +4172,13 @@ app.post('/api/reexport', async (req, res) => {
   }
 });
 
+app.get('/api/ifc-catalog', (req, res) => {
+  res.json({
+    types: IFC_TYPES,
+    categories: IFC_CATEGORIES,
+  });
+});
+
 app.get('/api/reclassifiable-types', (req, res) => {
   res.json({ types: reclassifiableTypeNames() });
 });
