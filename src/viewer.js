@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import * as OBC from "@thatopen/components";
 import * as FRAGS from "@thatopen/fragments";
+import { openTypePicker } from './ifc-type-picker.js';
 
 const container = document.getElementById("container");
 const dropzone = document.getElementById("dropzone");
@@ -12,6 +13,11 @@ const isolateButton = document.getElementById("isolate-selection");
 const tree = document.getElementById("tree");
 const propertiesPanel = document.getElementById("properties");
 const treeTabs = [...document.querySelectorAll(".tree-tab")];
+const editModeButton = document.getElementById("edit-mode-button");
+const exportEditedButton = document.getElementById("export-edited");
+const resetEditsButton = document.getElementById("reset-edits");
+const editCountEl = document.getElementById("edit-count");
+const reloadEditedButton = document.getElementById("reload-edited");
 
 const state = {
   components: null,
@@ -34,6 +40,11 @@ const state = {
   isolateActive: false,
   isolatedIds: [],
   selectableIds: [],
+  editMode: false,
+  pendingEdits: new Map(),       // localId -> { fromType, toType }
+  lastIfcText: null,             // texte brut du dernier IFC chargé
+  ifcCatalog: null,  // { types, categories } from /api/ifc-catalog
+  lastEditedBlobUrl: null,
 };
 
 const selectionColor = new THREE.Color("#ff9248");
@@ -1201,7 +1212,23 @@ function setupPicking() {
       const result = await state.caster.castRay();
       if (!result) return;
 
-      await toggleSelection(result.fragments.modelId, result.localId, { from3D: true });
+      const modelId = result.fragments.modelId;
+      const localId = Number(result.localId);
+
+      // Si Ctrl/Cmd est enfoncé → étend la sélection
+      if (event.ctrlKey || event.metaKey) {
+        const current = new Set(state.selectedIds);
+
+        if (current.has(localId)) {
+          current.delete(localId);
+        } else {
+          current.add(localId);
+        }
+
+        await selectElements(modelId, [...current]);
+      } else {
+        await selectElement(modelId, localId);
+      }
     } catch (error) {
       console.warn("Picking failed:", error);
     }
@@ -1254,6 +1281,15 @@ async function clearModels() {
 
   await state.fragments.resetHighlight?.();
   state.fragments.core.update(true);
+
+  state.lastIfcText = null;
+  state.editMode = false;
+  document.body.classList.remove('edit-mode');
+  if (editModeButton) {
+   editModeButton.classList.remove('active');
+   editModeButton.disabled = true;
+}
+resetPendingEdits();
 }
 
 async function loadFile(file) {
@@ -1281,15 +1317,21 @@ async function loadFile(file) {
     if (lower.endsWith(".frag")) {
       const modelId = file.name.replace(/\.frag$/i, "");
       await state.fragments.core.load(data, { modelId });
+      state.lastIfcText = null; 
+      resetPendingEdits();
+      if (editModeButton) editModeButton.disabled = true;
     } else {
       const buffer = new Uint8Array(data);
       const modelId = file.name.replace(/\.ifc(zip)?$/i, "");
 
-      if (lower.endsWith(".ifc")) {
-        const ifcText = new TextDecoder("utf-8").decode(buffer);
-        state.ifcIndex = parseIfcText(ifcText, file.name);
-        state.selectableIds = allDisplayableIfcElementIds(state.ifcIndex);
-      }
+     if (lower.endsWith(".ifc")) {
+     const ifcText = new TextDecoder("utf-8").decode(buffer);
+     state.ifcIndex = parseIfcText(ifcText, file.name);
+     state.selectableIds = allDisplayableIfcElementIds(state.ifcIndex);
+     state.lastIfcText = ifcText;     // ← garde le source
+     resetPendingEdits();              // ← reset des edits sur nouveau modèle
+     if (editModeButton) editModeButton.disabled = false;
+   }
 
       await state.ifcLoader.load(buffer, false, modelId, {
         processData: {
@@ -1556,16 +1598,87 @@ function markSelectedTreeItems(ids) {
 }
 
 function renderGroupProperties(ids) {
-  const rows = [
-    { name: "Éléments sélectionnés", value: String(ids.length) },
-    { name: "Raccourcis", value: "H masquer · F fit view · I isoler · Esc désélection" },
-  ];
+  if (!state.editMode) {
+    // Comportement original
+    const rows = [
+      { name: "Éléments sélectionnés", value: String(ids.length) },
+      { name: "Raccourcis", value: "H masquer · F fit view · I isoler · Esc désélection" },
+    ];
+    propertiesPanel.innerHTML = `
+      <div class="prop-title">Groupe sélectionné</div>
+      <div class="prop-subtitle">${ids.length} éléments</div>
+      ${renderAccordion({ title: "Sélection", rows, open: true })}
+    `;
+    return;
+  }
+
+  // Mode édition : on affiche le picker pour reclassifier en masse
+  const typesPresent = new Map(); // type -> count
+  for (const id of ids) {
+    const t = currentTypeForEntity(id);
+    if (t) typesPresent.set(t, (typesPresent.get(t) || 0) + 1);
+  }
+
+  const typesChips = [...typesPresent.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([t, n]) => `<span class="type-chip">${escapeHtml(prettyIfcType(t))} × ${n}</span>`)
+    .join('');
+
+  const pendingCount = ids.filter(id => state.pendingEdits.has(Number(id))).length;
+  const pendingMark = pendingCount > 0
+    ? `<span class="pending-mark">${pendingCount} modifié${pendingCount > 1 ? 's' : ''}</span>`
+    : '';
+
+  // Most common type as default for the picker
+  const dominant = [...typesPresent.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
 
   propertiesPanel.innerHTML = `
-    <div class="prop-title">Groupe sélectionné</div>
+    <div class="prop-title">Sélection multiple</div>
     <div class="prop-subtitle">${ids.length} éléments</div>
-    ${renderAccordion({ title: "Sélection", rows, open: true })}
+
+    <div class="multi-summary">
+      <div class="count-line">
+        <strong>${ids.length}</strong> élément${ids.length > 1 ? 's' : ''} sélectionné${ids.length > 1 ? 's' : ''}
+      </div>
+      <div class="types-line">${typesChips}</div>
+    </div>
+
+    <div class="reclassify-section">
+      <h3>Reclassification en masse${pendingMark}</h3>
+      <button type="button" class="reclassify-trigger" id="multi-reclassify-trigger">
+        <span>Choisir un type IFC à appliquer…</span>
+        <span class="arrow">▾</span>
+      </button>
+      <div class="original">Tip : Ctrl+clic pour ajouter à la sélection</div>
+    </div>
   `;
+
+  const btn = document.getElementById('multi-reclassify-trigger');
+  if (btn) {
+    btn.addEventListener('click', async () => {
+      const newType = await openTypePicker({
+        anchor: btn,
+        currentType: dominant,
+        catalog: state.ifcCatalog,
+      });
+      if (!newType) return;
+      // Apply to all
+      for (const id of ids) applyTypeChangeQuiet(id, newType);
+      updateEditCount();
+      renderGroupProperties(ids); // re-render to show pending mark
+      setStatus(`Reclassifié ${ids.length} élément(s) vers ${prettyIfcType(newType)}`, "ok");
+    });
+  }
+}
+
+// Silent version that doesn't re-render or set status (used for batch)
+function applyTypeChangeQuiet(localId, newType) {
+  const original = originalTypeForEntity(localId);
+  if (!original || newType === original) {
+    state.pendingEdits.delete(Number(localId));
+    return;
+  }
+  state.pendingEdits.set(Number(localId), { fromType: original, toType: newType });
 }
 
 async function renderProperties(model, localId) {
@@ -1589,13 +1702,20 @@ async function renderProperties(model, localId) {
     const attrs = extractAttributes(data);
     const accordions = buildAccordions(data, attrs);
 
+    const reclassifyBlock = state.editMode
+     ? renderReclassifyBlock(localId)
+     : '';
+
     propertiesPanel.innerHTML = `
-      <div class="prop-title">${escapeHtml(title)}</div>
-      <div class="prop-subtitle">
-        ${escapeHtml(prettyIfcType(category))} · #${localId}${globalId ? ` · ${escapeHtml(globalId)}` : ""}
-      </div>
-      ${accordions}
+     <div class="prop-title">${escapeHtml(title)}</div>
+     <div class="prop-subtitle">
+      ${escapeHtml(prettyIfcType(category))} · #${localId}${globalId ? ` · ${escapeHtml(globalId)}` : ""}
+     </div>
+     ${reclassifyBlock}
+     ${accordions}
     `;
+
+    if (state.editMode) attachReclassifyHandler();
   } catch (error) {
     console.error(error);
     propertiesPanel.innerHTML = `<div class="properties-empty">Erreur de lecture des propriétés : ${escapeHtml(error.message || error)}</div>`;
@@ -1990,6 +2110,237 @@ window.addEventListener("resize", () => {
   state.world?.camera?.updateAspect?.();
   state.fragments?.core.update(true);
 });
+
+// ─────────────────────────────────────────────────────────────────────────
+// Edit mode (reclassification)
+// ─────────────────────────────────────────────────────────────────────────
+
+const FALLBACK_RECLASSIFIABLE_TYPES = [
+  "IFCWALL",
+  "IFCSLAB",
+  "IFCBEAM",
+  "IFCCOLUMN",
+  "IFCSTAIR",
+  "IFCROOF",
+  "IFCDOOR",
+  "IFCWINDOW",
+  "IFCBUILDINGELEMENTPROXY",
+];
+
+async function loadIfcCatalog() {
+  try {
+    const r = await fetch('/api/ifc-catalog');
+    if (r.ok) {
+      const data = await r.json();
+      if (Array.isArray(data.types) && data.types.length) {
+        state.ifcCatalog = data;
+        return;
+      }
+    }
+  } catch (_) { /* ignore */ }
+  // Fallback minimal
+  state.ifcCatalog = {
+    types: [
+      { type: 'IFCWALL', label: 'Mur', aliases: ['mur', 'wall'], category: 'misc', tier: 'standard' },
+      { type: 'IFCSLAB', label: 'Dalle', aliases: ['dalle', 'slab'], category: 'misc', tier: 'standard' },
+      { type: 'IFCDOOR', label: 'Porte', aliases: ['porte', 'door'], category: 'misc', tier: 'opening' },
+      { type: 'IFCWINDOW', label: 'Fenêtre', aliases: ['fenetre', 'window'], category: 'misc', tier: 'opening' },
+      { type: 'IFCBUILDINGELEMENTPROXY', label: 'Élément générique', aliases: [], category: 'misc', tier: 'standard' },
+    ],
+    categories: [{ key: 'misc', label: 'Divers' }],
+  };
+}
+
+function resetPendingEdits() {
+  state.pendingEdits.clear();
+  updateEditCount();
+}
+
+function updateEditCount() {
+  if (editCountEl) editCountEl.textContent = String(state.pendingEdits.size);
+  if (exportEditedButton) {
+    exportEditedButton.disabled = state.pendingEdits.size === 0;
+  }
+}
+
+function toggleEditMode() {
+  if (!state.lastIfcText) {
+    setStatus("Charge un IFC pour activer le mode édition.", "error");
+    return;
+  }
+  state.editMode = !state.editMode;
+  document.body.classList.toggle('edit-mode', state.editMode);
+  if (editModeButton) editModeButton.classList.toggle('active', state.editMode);
+
+  // Force re-render of the current selection's properties so the dropdown
+  // appears/disappears immediately.
+  if (state.currentSelection) {
+    const model = state.fragments?.list.get(state.currentSelection.modelId) || state.activeModel;
+    if (model) renderProperties(model, state.currentSelection.localId);
+  }
+}
+
+function currentTypeForEntity(localId) {
+  const pending = state.pendingEdits.get(Number(localId));
+  if (pending) return pending.toType;
+  const entity = state.ifcIndex?.entities?.get(Number(localId));
+  return entity?.type || null;
+}
+
+function originalTypeForEntity(localId) {
+  const pending = state.pendingEdits.get(Number(localId));
+  if (pending) return pending.fromType;
+  const entity = state.ifcIndex?.entities?.get(Number(localId));
+  return entity?.type || null;
+}
+
+function renderReclassifyBlock(localId) {
+  const original = originalTypeForEntity(localId);
+  const current = currentTypeForEntity(localId);
+  const isPending = state.pendingEdits.has(Number(localId));
+
+  if (!original) {
+    return '';
+  }
+
+  const entry = state.ifcCatalog?.types.find(t => t.type === current);
+  const label = entry?.label || prettyIfcType(current);
+
+  const pendingMark = isPending
+    ? `<span class="pending-mark">modifié</span>`
+    : '';
+
+  return `
+    <div class="reclassify-section">
+      <h3>Reclassification${pendingMark}</h3>
+      <button type="button" class="reclassify-trigger" id="reclassify-trigger" data-local-id="${localId}">
+        <span><strong>${escapeHtml(current)}</strong> · ${escapeHtml(label)}</span>
+        <span class="arrow">▾</span>
+      </button>
+      <div class="original">Type d'origine : ${escapeHtml(prettyIfcType(original))}</div>
+    </div>
+  `;
+}
+
+function attachReclassifyHandler() {
+  const btn = document.getElementById('reclassify-trigger');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    const localId = Number(btn.dataset.localId);
+    const current = currentTypeForEntity(localId);
+    const newType = await openTypePicker({
+      anchor: btn,
+      currentType: current,
+      catalog: state.ifcCatalog,
+    });
+    if (!newType) return;
+    applyTypeChange(localId, newType);
+  });
+}
+
+function applyTypeChange(localId, newType) {
+  const original = originalTypeForEntity(localId);
+  if (!original) return;
+  if (newType === original) {
+    state.pendingEdits.delete(Number(localId));
+  } else {
+    state.pendingEdits.set(Number(localId), { fromType: original, toType: newType });
+  }
+  updateEditCount();
+  // Re-render selection
+  if (state.currentSelection) {
+    const model = state.fragments?.list.get(state.currentSelection.modelId) || state.activeModel;
+    if (model && state.selectedIds.length === 1) {
+      renderProperties(model, state.selectedIds[0]);
+    } else if (state.selectedIds.length > 1) {
+      renderGroupProperties(state.selectedIds);
+    }
+  }
+  setStatus(`Reclassifié vers ${prettyIfcType(newType)} (#${localId})`, "ok");
+}
+
+async function exportEditedIfc() {
+  if (!state.lastIfcText || state.pendingEdits.size === 0) return;
+
+  const edits = [];
+  for (const [localId, edit] of state.pendingEdits.entries()) {
+    edits.push({ localId, toType: edit.toType });
+  }
+
+  setStatus(`Export en cours (${edits.length} modifs)…`);
+
+  try {
+    const response = await fetch('/api/reexport', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ifcText: state.lastIfcText,
+        edits,
+        fileName: state.currentFileName,
+      }),
+    });
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({ error: 'Erreur serveur' }));
+      throw new Error(err.error);
+    }
+
+    const applied = response.headers.get('X-Edits-Applied');
+    const errors  = response.headers.get('X-Edits-Errors');
+    const blob = await response.blob();
+
+    if (state.lastEditedBlobUrl) URL.revokeObjectURL(state.lastEditedBlobUrl);
+    const url = URL.createObjectURL(blob);
+    state.lastEditedBlobUrl = url;
+
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = (state.currentFileName || 'edited.ifc').replace(/\.ifc$/i, '') + '.edited.ifc';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+
+    setStatus(`Export OK · ${applied} modif(s) appliquée(s)${errors > 0 ? ` · ${errors} erreur(s)` : ''}`, "ok");
+    if (reloadEditedButton) {
+      reloadEditedButton.disabled = false;
+      reloadEditedButton.style.display = '';
+      reloadEditedButton.dataset.blobUrl = url;
+    }
+  } catch (err) {
+    setStatus(`Erreur export : ${err.message || err}`, "error");
+  }
+}
+
+async function reloadEditedIfc() {
+  const url = reloadEditedButton?.dataset.blobUrl;
+  if (!url) return;
+
+  try {
+    setStatus("Rechargement de l'IFC modifié…");
+    const response = await fetch(url);
+    const blob = await response.blob();
+    const file = new File([blob], state.currentFileName.replace(/\.ifc$/i, '') + '.edited.ifc', { type: 'application/x-step' });
+    await loadFile(file);
+  } catch (err) {
+    setStatus(`Erreur rechargement : ${err.message || err}`, "error");
+  }
+}
+
+if (editModeButton) editModeButton.addEventListener('click', toggleEditMode);
+if (exportEditedButton) exportEditedButton.addEventListener('click', exportEditedIfc);
+if (resetEditsButton) resetEditsButton.addEventListener('click', () => {
+  if (state.pendingEdits.size === 0) return;
+  if (!confirm(`Annuler ${state.pendingEdits.size} modification(s) ?`)) return;
+  resetPendingEdits();
+  if (state.currentSelection) {
+    const model = state.fragments?.list.get(state.currentSelection.modelId) || state.activeModel;
+    if (model) renderProperties(model, state.currentSelection.localId);
+  }
+  setStatus("Modifications annulées.", "ok");
+});
+if (reloadEditedButton) reloadEditedButton.addEventListener('click', reloadEditedIfc);
+
+loadIfcCatalog();
 
 initViewer().catch((error) => {
   console.error(error);
