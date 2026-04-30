@@ -89,11 +89,18 @@
     max-width: 760px;
   }
 
+  .header-actions {
+    display: inline-flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 0.75rem;
+    margin-top: 1.25rem;
+  }
+
   .viewer-link {
     display: inline-flex;
     align-items: center;
     gap: 0.5rem;
-    margin-top: 1.25rem;
     color: var(--accent);
     text-decoration: none;
     border: 1px solid var(--border);
@@ -251,11 +258,18 @@
   @media (max-width: 560px) {
     body { padding: 2.5rem 1rem; }
     h1 { font-size: 2.25rem; }
-    .viewer-link {
+    .header-actions {
+    display: inline-flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 0.75rem;
+    margin-top: 1.25rem;
+  }
+
+  .viewer-link {
     display: inline-flex;
     align-items: center;
     gap: 0.5rem;
-    margin-top: 1.25rem;
     color: var(--accent);
     text-decoration: none;
     border: 1px solid var(--border);
@@ -289,7 +303,10 @@
     Convertit un fichier GLB en IFC4 avec classification heuristique des murs, dalles,
     portes, fenêtres, poutres, poteaux, escaliers, toitures, murs extérieurs et étages.
   </p>
-  <a class="viewer-link" href="/viewer.html">Ouvrir le viewer IFC local →</a>
+  <div class="header-actions">
+    <a class="viewer-link" href="/modeler.html">Ouvrir le modeler GLB →</a>
+    <a class="viewer-link" href="/viewer.html">Ouvrir le viewer IFC local →</a>
+  </div>
 </header>
 
 <main class="converter">
@@ -310,7 +327,9 @@
   Heuristique : bounding boxes, faces verticales, marches répétées, matériaux, couleurs fallback, quantités IFC, matériaux IFC, layers IFC, spaces IFC, zones IFC, Draco GLB, opacité, relations spatiales et enveloppe du bâtiment.
 </footer>
 
-<script>
+<script type="module">
+import { makeProjectId, saveProject, safeFileName, blobToText } from "/src/project-store.js";
+
 const dropzone = document.getElementById('dropzone');
 const fileInput = document.getElementById('file-input');
 const status = document.getElementById('status');
@@ -388,7 +407,17 @@ async function handleFile(file) {
 
     const stats = JSON.parse(response.headers.get('X-Conversion-Stats') || '{}');
     const blob = await response.blob();
-    const outputName = file.name.replace(/\.glb$/i, '') + '.ifc';
+    const outputName = safeFileName(file.name.replace(/\.glb$/i, '') + '.ifc', 'model.ifc');
+
+    const project = await saveProject({
+      id: makeProjectId(),
+      glbBlob: file,
+      glbFileName: safeFileName(file.name, 'model.glb'),
+      ifcText: await blobToText(blob),
+      ifcFileName: outputName,
+      edits: [],
+      source: 'index-upload',
+    });
 
     // Trigger download
     const url = URL.createObjectURL(blob);
@@ -442,6 +471,10 @@ async function handleFile(file) {
       <div class="status-line">
         <span class="status-label">Taille IFC</span>
         <span class="status-value">${formatBytes(blob.size)}</span>
+      </div>
+      <div class="status-line">
+        <span class="status-label">Projet local</span>
+        <span class="status-value"><a class="viewer-link" href="/viewer.html?project=${encodeURIComponent(project.id)}">Ouvrir dans le viewer avec GLB lié →</a></span>
       </div>
 
       <div class="summary">
