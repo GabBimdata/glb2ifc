@@ -5,6 +5,8 @@ import { fileURLToPath } from 'url';
 import fs from 'fs';
 import { NodeIO } from '@gltf-transform/core';
 import { ALL_EXTENSIONS } from '@gltf-transform/extensions';
+import draco3d from 'draco3dgltf';
+import { createServer as createViteServer } from 'vite';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -17,12 +19,55 @@ const upload = multer({
   limits: { fileSize: 500 * 1024 * 1024 } // 500 MB
 });
 
+let dracoDecoderModulePromise = null;
+
+function getDracoDecoderModule() {
+  if (!dracoDecoderModulePromise) {
+    dracoDecoderModulePromise = draco3d.createDecoderModule();
+  }
+
+  return dracoDecoderModulePromise;
+}
+
+async function createGLTFReader() {
+  const io = new NodeIO().registerExtensions(ALL_EXTENSIONS);
+
+  // Required for GLBs using KHR_draco_mesh_compression. Without this explicit
+  // dependency @gltf-transform can fail with errors such as:
+  // "undefined is not an object (evaluating 'decoderModule.DT_FLOAT32')".
+  io.registerDependencies({
+    'draco3d.decoder': await getDracoDecoderModule()
+  });
+
+  return io;
+}
+
 ['uploads', 'outputs'].forEach(dir => {
   const p = path.join(__dirname, dir);
   if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
 });
 
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Vite is used only to serve the BIM viewer module with local npm imports.
+// The converter UI and /api/convert remain handled by Express.
+const vite = await createViteServer({
+  root: __dirname,
+  server: { middlewareMode: true },
+  appType: 'custom',
+  publicDir: false
+});
+app.use(vite.middlewares);
+
+app.get('/viewer.html', (req, res, next) => {
+  const viewerPath = path.join(__dirname, 'public', 'viewer.html');
+  if (fs.existsSync(viewerPath)) {
+    return res.sendFile(viewerPath);
+  }
+  next();
+});
+
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // STEP-21 string escaping
@@ -56,19 +101,25 @@ function computeBoundingBox(positions) {
 function extractMaterialInfo(primitive) {
   const material = primitive.getMaterial();
   if (!material) {
-    return { color: null, materialName: '', opacity: 1 };
+    return {
+      color: null,
+      materialName: '',
+      opacity: 1,
+      hasSourceMaterial: false
+    };
   }
 
   const base = material.getBaseColorFactor() || [1, 1, 1, 1];
   return {
     color: { r: base[0], g: base[1], b: base[2] },
     materialName: material.getName() || '',
-    opacity: base[3] ?? 1
+    opacity: base[3] ?? 1,
+    hasSourceMaterial: true
   };
 }
 
 async function extractMeshesFromGLB(glbPath) {
-  const io = new NodeIO().registerExtensions(ALL_EXTENSIONS);
+  const io = await createGLTFReader();
   const document = await io.read(glbPath);
   const root = document.getRoot();
 
@@ -140,6 +191,116 @@ function bboxStats(mesh) {
     areaXZ,
     centerY: (minY + maxY) / 2
   };
+}
+
+function globalMeshBounds(meshes) {
+  if (!meshes || meshes.length === 0) {
+    return null;
+  }
+
+  const bounds = {
+    min: [Infinity, Infinity, Infinity],
+    max: [-Infinity, -Infinity, -Infinity]
+  };
+
+  for (const mesh of meshes) {
+    for (let i = 0; i < 3; i++) {
+      bounds.min[i] = Math.min(bounds.min[i], mesh.bbox.min[i]);
+      bounds.max[i] = Math.max(bounds.max[i], mesh.bbox.max[i]);
+    }
+  }
+
+  const size = [
+    bounds.max[0] - bounds.min[0],
+    bounds.max[1] - bounds.min[1],
+    bounds.max[2] - bounds.min[2]
+  ];
+
+  return {
+    ...bounds,
+    size,
+    maxDimension: Math.max(...size),
+    verticalDimension: size[1]
+  };
+}
+
+function inferModelScale(meshes) {
+  const bounds = globalMeshBounds(meshes);
+
+  if (!bounds) {
+    return {
+      scale: 1,
+      applied: false,
+      assumedInputUnit: 'metre',
+      reason: 'no geometry',
+      originalMaxDimension: 0,
+      normalizedMaxDimension: 0
+    };
+  }
+
+  const maxDimension = bounds.maxDimension;
+  const verticalDimension = bounds.verticalDimension;
+
+  // IFC output is declared in metres. Many GLB files from CAD/BIM/web exports
+  // are stored in millimetres even though glTF is unitless. If exported as-is,
+  // BIMData / IfcOpenShell will read a 5000mm wall as 5000m.
+  //
+  // Keep this deliberately conservative:
+  // - > 500 units vertical is almost certainly mm for an architectural model.
+  // - > 1000 units global extent is also a strong mm signal.
+  // - do not guess centimetres automatically; that is too risky for sites.
+  const likelyMillimetres =
+    verticalDimension > 500 ||
+    maxDimension > 1000;
+
+  if (likelyMillimetres) {
+    return {
+      scale: 0.001,
+      applied: true,
+      assumedInputUnit: 'millimetre',
+      outputUnit: 'metre',
+      reason: `large model extent detected (max=${maxDimension.toFixed(2)}, vertical=${verticalDimension.toFixed(2)})`,
+      originalMaxDimension: maxDimension,
+      normalizedMaxDimension: maxDimension * 0.001
+    };
+  }
+
+  return {
+    scale: 1,
+    applied: false,
+    assumedInputUnit: 'metre',
+    outputUnit: 'metre',
+    reason: `model extent already plausible in metres (max=${maxDimension.toFixed(2)}, vertical=${verticalDimension.toFixed(2)})`,
+    originalMaxDimension: maxDimension,
+    normalizedMaxDimension: maxDimension
+  };
+}
+
+function applyScaleToMeshes(meshes, scaleInfo) {
+  const scale = Number(scaleInfo?.scale || 1);
+
+  if (!Number.isFinite(scale) || scale <= 0 || Math.abs(scale - 1) < 1e-12) {
+    return scaleInfo;
+  }
+
+  for (const mesh of meshes) {
+    for (let i = 0; i < mesh.positions.length; i++) {
+      mesh.positions[i] *= scale;
+    }
+
+    mesh.bbox = computeBoundingBox(mesh.positions);
+    mesh.appliedInputScale = scale;
+  }
+
+  return {
+    ...scaleInfo,
+    boundsAfterScale: globalMeshBounds(meshes)
+  };
+}
+
+function normalizeMeshUnits(meshes) {
+  const scaleInfo = inferModelScale(meshes);
+  return applyScaleToMeshes(meshes, scaleInfo);
 }
 
 function searchableText(mesh) {
@@ -404,38 +565,25 @@ function horizontalFaceLevels(mesh) {
 
 function looksLikeStair(mesh) {
   const s = bboxStats(mesh);
-  const f = triangleFaceAnalysis(mesh);
-  const levels = horizontalFaceLevels(mesh);
 
   if (hasDoorHint(mesh) || hasWindowHint(mesh) || hasBeamHint(mesh) || hasRoofHint(mesh)) return false;
 
-  const namedStair = hasStairHint(mesh) && s.horizontal >= 0.45 && s.sizeY >= 0.08;
+  const explicitStair = hasStairHint(mesh);
 
-  // A full stair mesh often has many horizontal treads at different altitudes.
-  // This is deliberately conservative to avoid classifying shelves, façades or
-  // decorative stepped roofs as stairs.
-  const repeatedTreads =
-    levels.count >= 4 &&
-    levels.ySpan >= 0.35 &&
-    levels.avgGap >= 0.07 &&
-    levels.avgGap <= 0.35 &&
-    s.horizontal >= 0.9 &&
-    s.sizeY >= 0.35 &&
-    s.sizeY <= 5.5 &&
-    s.areaXZ >= 0.6 &&
-    s.areaXZ <= 60 &&
-    f.horizontalRatio >= 0.18 &&
-    f.verticalRatio <= 0.82;
-
-  const stairSlope = s.sizeY / Math.max(s.horizontal, 0.001);
-  const plausibleSlope = stairSlope >= 0.08 && stairSlope <= 1.4;
-
-  if (namedStair || (repeatedTreads && plausibleSlope)) {
-    mesh.stairDetectionReason = namedStair ? 'named_stair' : 'repeated_horizontal_treads';
-    return true;
+  // Key fix: don't classify large vertical wall surfaces as stairs just
+  // because openings create several horizontal ledges.
+  if (!explicitStair && looksLikeDominantWallPlane(mesh)) {
+    mesh.stairRejectionReason = 'dominant_wall_plane';
+    return false;
   }
 
-  return false;
+  const confidence = stairStepConfidence(mesh);
+
+  if (explicitStair) {
+    return s.horizontal >= 0.45 && s.sizeY >= 0.08 && confidence >= 1.8;
+  }
+
+  return confidence >= 4.4;
 }
 
 function looksLikeColumn(mesh) {
@@ -477,18 +625,100 @@ function looksLikeColumn(mesh) {
 }
 
 
+function slopedBeamMetrics(mesh) {
+  const s = bboxStats(mesh);
+
+  // Sloped rafters / roof beams can have a large vertical bbox because their
+  // long axis is diagonal. Axis-aligned bbox rules then mistake them for walls.
+  // We therefore inspect the 2D section made by the long horizontal axis and Y:
+  // a sloped beam is long along a diagonal but very narrow perpendicular to it.
+  const useZLongAxis = s.sizeX <= 0.35 && s.sizeZ >= 0.9 && s.sizeY >= 0.25;
+  const useXLongAxis = s.sizeZ <= 0.35 && s.sizeX >= 0.9 && s.sizeY >= 0.25;
+
+  if (!useZLongAxis && !useXLongAxis) return null;
+
+  const positions = mesh.positions;
+  const samples = [];
+
+  for (let i = 0; i < positions.length; i += 3) {
+    samples.push({
+      h: useZLongAxis ? positions[i + 2] : positions[i],
+      y: positions[i + 1]
+    });
+  }
+
+  const hValues = samples.map(p => p.h);
+  const yValues = samples.map(p => p.y);
+  const hSpan = Math.max(...hValues) - Math.min(...hValues);
+  const ySpan = Math.max(...yValues) - Math.min(...yValues);
+
+  if (hSpan <= 0 || ySpan <= 0) return null;
+
+  function perpendicularSpan(sign = 1) {
+    const uxRaw = hSpan;
+    const uyRaw = sign * ySpan;
+    const len = Math.hypot(uxRaw, uyRaw);
+    const vx = -uyRaw / len;
+    const vy = uxRaw / len;
+
+    const projected = samples.map(p => p.h * vx + p.y * vy);
+    return Math.max(...projected) - Math.min(...projected);
+  }
+
+  const perpSpan = Math.min(perpendicularSpan(1), perpendicularSpan(-1));
+  const sideThickness = useZLongAxis ? s.sizeX : s.sizeZ;
+  const diagonalLength = Math.hypot(hSpan, ySpan);
+  const slope = ySpan / Math.max(hSpan, 0.001);
+  const maxCrossSection = Math.max(sideThickness, perpSpan);
+
+  return {
+    sideThickness,
+    perpSpan,
+    diagonalLength,
+    slope,
+    hSpan,
+    ySpan,
+    slenderness: diagonalLength / Math.max(maxCrossSection, 0.001)
+  };
+}
+
+function looksLikeSlopedBeam(mesh) {
+  const m = slopedBeamMetrics(mesh);
+  if (!m) return false;
+
+  return (
+    m.sideThickness >= 0.025 &&
+    m.sideThickness <= 0.35 &&
+    m.perpSpan <= 0.38 &&
+    m.diagonalLength >= 1.2 &&
+    m.slope >= 0.05 &&
+    m.slope <= 2.2 &&
+    m.slenderness >= 6.0
+  );
+}
+
 function looksLikeBeam(mesh) {
   const s = bboxStats(mesh);
   const f = triangleFaceAnalysis(mesh);
 
-  if (hasDoorHint(mesh) || hasWindowHint(mesh) || hasRoofHint(mesh) || hasColumnHint(mesh) || hasStairHint(mesh)) return false;
+  if (hasDoorHint(mesh) || hasWindowHint(mesh) || hasColumnHint(mesh) || hasStairHint(mesh)) return false;
+
+  // A generic "roof" surface should remain a roof, but roof-structure names
+  // such as rafter / chevron / panne / charpente can still be beams.
+  const roofOnly = hasRoofHint(mesh) && !hasBeamHint(mesh) && !hasRoofStructureHint(mesh);
+  if (roofOnly) return false;
 
   const length = s.horizontal;
   const width = s.minHoriz;
   const height = s.sizeY;
 
   // Named beams are strong signals, but still require plausible dimensions.
-  const namedBeam = hasBeamHint(mesh) && length >= 0.5 && height >= 0.05 && height <= 1.2 && width <= 1.2;
+  const namedBeam =
+    hasBeamHint(mesh) &&
+    length >= 0.5 &&
+    height >= 0.05 &&
+    height <= 1.5 &&
+    width <= 1.2;
 
   // Generic beams: elongated, horizontal, modest cross-section, with enough
   // vertical side faces to avoid classifying paper-thin strips or floor slabs.
@@ -497,8 +727,12 @@ function looksLikeBeam(mesh) {
   const notHugePanel = s.areaXZ <= Math.max(12, length * 1.2);
   const hasBeamFaces = f.verticalRatio >= 0.25;
 
-  if (namedBeam || (elongated && crossSectionOk && notHugePanel && hasBeamFaces)) {
-    mesh.beamDetectionReason = namedBeam ? 'named_beam' : 'elongated_horizontal_member';
+  const slopedBeam = looksLikeSlopedBeam(mesh);
+
+  if (namedBeam || slopedBeam || (elongated && crossSectionOk && notHugePanel && hasBeamFaces)) {
+    mesh.beamDetectionReason = namedBeam
+      ? 'named_beam'
+      : (slopedBeam ? 'sloped_oriented_member' : 'elongated_horizontal_member');
     return true;
   }
 
@@ -537,6 +771,86 @@ function looksLikeRoofCandidate(mesh) {
   return false;
 }
 
+function hasSimilarStackedOpeningPanel(candidate, candidates) {
+  const c = bboxStats(candidate);
+
+  // Very thin panels of the same plan position repeated on several storeys are
+  // much more likely to be windows than walls. This catches old-house windows
+  // that start close to the storey level and would otherwise be read as doors
+  // or thin wall fragments.
+  if (c.minHoriz > 0.20) return false;
+  if (c.horizontal < 0.45 || c.horizontal > 3.2) return false;
+  if (c.sizeY < 0.55 || c.sizeY > 2.25) return false;
+
+  return candidates.some(other => {
+    if (other === candidate) return false;
+
+    const o = bboxStats(other);
+
+    if (o.minHoriz > 0.22) return false;
+    if (o.horizontal < 0.45 || o.horizontal > 3.2) return false;
+    if (o.sizeY < 0.55 || o.sizeY > 2.35) return false;
+
+    const samePlan =
+      bboxOverlapsXZ(candidate, other, 0.12) &&
+      bboxOverlapRatioXZ(candidate, other, 0.12) >= 0.60 &&
+      bboxOverlapRatioXZ(other, candidate, 0.12) >= 0.60;
+
+    const similarWidth = Math.abs(c.horizontal - o.horizontal) <= Math.max(0.20, c.horizontal * 0.18);
+    const similarThickness = Math.abs(c.minHoriz - o.minHoriz) <= 0.12;
+    const verticallySeparated = Math.abs(c.centerY - o.centerY) >= 0.75;
+
+    return samePlan && similarWidth && similarThickness && verticallySeparated;
+  });
+}
+
+function looksLikeWindowPanel(candidate, candidates, storeys, hostWall = null) {
+  const s = bboxStats(candidate);
+
+  if (hasDoorHint(candidate)) return false;
+  if (hasBeamHint(candidate) || hasColumnHint(candidate) || hasStairHint(candidate) || hasRoofHint(candidate)) return false;
+
+  const veryThinPanel = s.minHoriz <= 0.20;
+  const plausibleWindowSize =
+    s.sizeY >= 0.55 &&
+    s.sizeY <= 2.25 &&
+    s.horizontal >= 0.45 &&
+    s.horizontal <= 3.2;
+
+  if (!veryThinPanel || !plausibleWindowSize) return false;
+
+  const floor = floorForY(s.minY, storeys);
+  const floorIdx = storeys.indexOf(floor);
+  const bottomOffset = s.minY - floor.elevation;
+
+  const repeatedPanel = hasSimilarStackedOpeningPanel(candidate, candidates);
+  const explicitWindow = hasWindowHint(candidate) || candidate.opacity < 0.65;
+  const externalLikeHost = Boolean(
+    hostWall &&
+    (hostWall.likelyExternalWall || hasExteriorWallHint(hostWall) || hostWall.wallDetectionReason === 'vertical_facade')
+  );
+
+  // Tall old-building windows can start slightly below or very close to the
+  // detected storey elevation due to thick floors/sills. Without this rule,
+  // they are often classified as doors or walls.
+  const upperStoreyTallWindowPanel =
+    floorIdx > 0 &&
+    s.horizontal >= 0.95 &&
+    s.sizeY <= 2.10 &&
+    bottomOffset >= -0.25 &&
+    bottomOffset <= 0.30 &&
+    (externalLikeHost || repeatedPanel);
+
+  if (explicitWindow || repeatedPanel || upperStoreyTallWindowPanel) {
+    candidate.windowDetectionReason = explicitWindow
+      ? 'window_hint_or_glass'
+      : (repeatedPanel ? 'stacked_thin_panel' : 'upper_storey_thin_panel');
+    return true;
+  }
+
+  return false;
+}
+
 function looksLikeVerticalFacadeOrWall(mesh) {
   const s = bboxStats(mesh);
   const f = triangleFaceAnalysis(mesh);
@@ -552,13 +866,26 @@ function looksLikeVerticalFacadeOrWall(mesh) {
   // Classic wall: thin in plan, large vertical surface.
   const thinWall = s.minHoriz < 0.75 && f.verticalRatio >= 0.35;
 
+  // Thick / old wall or low facade segment:
+  // Some real walls in old buildings are around 0.70–1.00m thick and may be
+  // below the 1.80m facade threshold because they are parapets, attic walls,
+  // gable fragments, or short wall sections. They should still become IfcWall
+  // when they are elongated and dominated by vertical faces.
+  const thickElongatedWall =
+    s.sizeY >= 1.15 &&
+    s.minHoriz <= 1.05 &&
+    s.horizontal >= 1.5 &&
+    s.horizontal / Math.max(s.minHoriz, 0.001) >= 3.0 &&
+    f.verticalRatio >= 0.52 &&
+    f.horizontalRatio <= 0.48;
+
   // Facade-like objects can have a large bounding box on both X and Z because
   // several exterior wall segments are merged into one mesh. They still have a
   // strong vertical-face signature and relatively little horizontal area.
   const facadeLike =
     f.verticalRatio >= 0.55 &&
-    f.horizontalRatio <= 0.35 &&
-    s.sizeY >= 1.8 &&
+    f.horizontalRatio <= 0.40 &&
+    s.sizeY >= 1.6 &&
     s.horizontal >= 1.2;
 
   // Helpful for exports where walls are explicitly named but not geometrically
@@ -567,6 +894,12 @@ function looksLikeVerticalFacadeOrWall(mesh) {
 
   if (thinWall) {
     mesh.wallDetectionReason = 'thin_wall';
+    if (hasExteriorWallHint(mesh)) mesh.likelyExternalWall = true;
+    return true;
+  }
+
+  if (thickElongatedWall) {
+    mesh.wallDetectionReason = 'thick_elongated_wall';
     if (hasExteriorWallHint(mesh)) mesh.likelyExternalWall = true;
     return true;
   }
@@ -589,6 +922,98 @@ function looksLikeVerticalFacadeOrWall(mesh) {
   return false;
 }
 
+function looksLikeDominantWallPlane(mesh) {
+  const s = bboxStats(mesh);
+  const f = triangleFaceAnalysis(mesh);
+
+  if (hasDoorHint(mesh) || hasWindowHint(mesh)) return false;
+
+  const longDim = Math.max(s.sizeX, s.sizeZ);
+  const thickDim = Math.min(s.sizeX, s.sizeZ);
+  const aspect = longDim / Math.max(thickDim, 0.001);
+
+  // Robust wall signal:
+  // walls with several openings can have many ledges, so we use overall
+  // vertical dominance + plan proportions to protect them from stair detection.
+  const wallByProportion =
+    s.sizeY >= 1.45 &&
+    longDim >= 1.50 &&
+    thickDim <= 1.25 &&
+    aspect >= 2.0 &&
+    f.verticalRatio >= 0.45;
+
+  const largeVerticalSurface =
+    s.sizeY >= 1.70 &&
+    longDim >= 2.0 &&
+    f.verticalArea >= 4.0 &&
+    f.verticalRatio >= 0.52 &&
+    aspect >= 1.65;
+
+  const namedWall =
+    hasWallHint(mesh) &&
+    s.sizeY >= 1.25 &&
+    longDim >= 1.0 &&
+    f.verticalRatio >= 0.35;
+
+  // A real stair named "stair/escalier" can still pass later, but if the object
+  // is overwhelmingly wall-like, the wall should win.
+  if (hasStairHint(mesh) && !(largeVerticalSurface && aspect >= 2.4)) {
+    return false;
+  }
+
+  if (wallByProportion || largeVerticalSurface || namedWall) {
+    mesh.wallLikeReason = wallByProportion
+      ? 'wall_by_proportion'
+      : largeVerticalSurface
+        ? 'large_vertical_surface'
+        : 'wall_name_hint';
+    return true;
+  }
+
+  return false;
+}
+
+function stairStepConfidence(mesh) {
+  const s = bboxStats(mesh);
+  const f = triangleFaceAnalysis(mesh);
+  const levels = horizontalFaceLevels(mesh);
+
+  if (levels.length < 4) return 0;
+
+  const longDim = Math.max(s.sizeX, s.sizeZ);
+  const thickDim = Math.min(s.sizeX, s.sizeZ);
+  const aspect = longDim / Math.max(thickDim, 0.001);
+
+  const diffs = [];
+  for (let i = 1; i < levels.length; i++) {
+    diffs.push(Math.abs(levels[i] - levels[i - 1]));
+  }
+
+  const plausibleRisers = diffs.filter(d => d >= 0.08 && d <= 0.32).length;
+  const riserRatio = plausibleRisers / Math.max(diffs.length, 1);
+
+  let confidence = 0;
+
+  confidence += Math.min(levels.length - 1, 5) * 0.65;
+  confidence += riserRatio >= 0.60 ? 2.2 : riserRatio >= 0.40 ? 0.9 : 0;
+  confidence += f.horizontalRatio >= 0.24 ? 1.2 : f.horizontalRatio >= 0.16 ? 0.4 : 0;
+  confidence += s.sizeY >= 0.35 && s.sizeY <= 4.5 ? 0.7 : 0;
+  confidence += longDim >= 0.9 ? 0.5 : 0;
+
+  // Penalize vertical-wall dominance.
+  if (aspect >= 2.0 && s.sizeY >= 1.45 && f.verticalRatio >= 0.45) confidence -= 2.4;
+  if (looksLikeDominantWallPlane(mesh)) confidence -= 4.5;
+
+  if (hasStairHint(mesh)) confidence += 3.0;
+  if (hasWallHint(mesh)) confidence -= 2.0;
+
+  mesh.stairStepConfidence = confidence;
+  mesh.stairStepLevels = levels.length;
+  mesh.stairRiserRatio = riserRatio;
+
+  return confidence;
+}
+
 function classifyMeshFirstPass(mesh) {
   const s = bboxStats(mesh);
 
@@ -598,6 +1023,10 @@ function classifyMeshFirstPass(mesh) {
   if (hasRoofHint(mesh) && looksLikeRoofCandidate(mesh)) {
     mesh.isExternal = true;
     return 'roof';
+  }
+
+  if (looksLikeDominantWallPlane(mesh)) {
+    return 'wall_candidate';
   }
 
   if (looksLikeStair(mesh)) {
@@ -678,10 +1107,27 @@ function refineOpenings(meshes, storeys = []) {
       })
       .sort((a, b) => bboxOverlapRatioXZ(candidate, b, 0.18) - bboxOverlapRatioXZ(candidate, a, 0.18))[0];
 
-    if (!hostWall) continue;
+    // Some window panels are separate thin meshes repeated on several storeys.
+    // Even if no larger host wall is found, do not promote these to IfcWall.
+    if (!hostWall) {
+      if (looksLikeWindowPanel(candidate, candidates, storeys, null)) {
+        candidate.classification = 'window';
+      }
+      continue;
+    }
 
-    const floorY = floorForY(s.minY, storeys).elevation;
-    const bottomOffset = s.minY - floorY;
+    const floor = floorForY(s.minY, storeys);
+    const bottomOffset = s.minY - floor.elevation;
+
+    // First, protect window-like panels from being classified as doors. This
+    // handles tall upper-storey windows and repeated thin panels that start very
+    // close to the detected floor elevation.
+    if (looksLikeWindowPanel(candidate, candidates, storeys, hostWall)) {
+      candidate.classification = 'window';
+      candidate.hostWallName = hostWall.name;
+      candidate.hostWall = hostWall;
+      continue;
+    }
 
     // Door: full-height-ish and starting at the floor. Allow a small negative
     // offset because some exports put the frame slightly below slab top.
@@ -1239,7 +1685,83 @@ const IFC_TYPE_MAP = {
   // door & window have different attribute lists, handled inline below
 };
 
-function generateIFC(meshes, storeys, originalFilename) {
+
+// Default visual colors used only when the source GLB does not provide a
+// usable color signal. Important rule: if the file explicitly contains a white
+// material/color, keep it white and do not force a fallback class color.
+// Values are normalized RGB in the 0..1 range for IfcColourRgb.
+const DEFAULT_CLASS_COLORS = {
+  wall:   { r: 0.78, g: 0.78, b: 0.74 }, // warm light concrete / plaster
+  slab:   { r: 0.62, g: 0.62, b: 0.58 }, // medium concrete
+  beam:   { r: 0.55, g: 0.45, b: 0.35 }, // structural timber/steel neutral
+  column: { r: 0.50, g: 0.50, b: 0.48 }, // structural grey
+  stair:  { r: 0.60, g: 0.60, b: 0.56 }, // stair grey
+  roof:   { r: 0.55, g: 0.18, b: 0.14 }, // roof red/brown
+  door:   { r: 0.45, g: 0.25, b: 0.12 }, // wood/brown
+  window: { r: 0.35, g: 0.60, b: 0.85 }, // glass blue
+  proxy:  { r: 0.80, g: 0.80, b: 0.80 }  // neutral fallback
+};
+
+function isDefaultMaterialName(name) {
+  const n = String(name || '').trim().toLowerCase();
+
+  if (!n) return true;
+
+  return /^(material|default|defaultmaterial|mat|none|white|blanc|blanche|untitled)([_. -]?\d+)?$/.test(n);
+}
+
+function colorLooksDefault(color) {
+  if (!color) return true;
+
+  const r = Number(color.r);
+  const g = Number(color.g);
+  const b = Number(color.b);
+
+  if (![r, g, b].every(Number.isFinite)) return true;
+
+  const almostWhite = r > 0.94 && g > 0.94 && b > 0.94;
+  const almostBlack = r < 0.03 && g < 0.03 && b < 0.03;
+  const fullyNeutralDefaultGrey =
+    Math.abs(r - g) < 0.01 &&
+    Math.abs(g - b) < 0.01 &&
+    r >= 0.78 &&
+    r <= 0.82;
+
+  return almostWhite || almostBlack || fullyNeutralDefaultGrey;
+}
+
+function sourceColorIsUseful(mesh) {
+  if (!mesh || !mesh.color) return false;
+
+  const r = Number(mesh.color.r);
+  const g = Number(mesh.color.g);
+  const b = Number(mesh.color.b);
+
+  const almostWhite = [r, g, b].every(Number.isFinite) && r > 0.94 && g > 0.94 && b > 0.94;
+
+  // If the source file explicitly contains a material and that material is
+  // white, preserve the white color instead of replacing it with a fallback.
+  if (mesh.hasSourceMaterial && almostWhite) return true;
+
+  // Keep meaningful non-default colors from the GLB.
+  if (!colorLooksDefault(mesh.color)) return true;
+
+  // For other near-default colors, keep them only when there is a real source
+  // material and its name does not look like a generic default placeholder.
+  return Boolean(mesh.hasSourceMaterial) && !isDefaultMaterialName(mesh.materialName);
+}
+
+function colorForMesh(mesh) {
+  if (sourceColorIsUseful(mesh)) {
+    mesh.usedFallbackColor = false;
+    return mesh.color;
+  }
+
+  mesh.usedFallbackColor = true;
+  return DEFAULT_CLASS_COLORS[mesh.classification] || DEFAULT_CLASS_COLORS.proxy;
+}
+
+function generateIFC(meshes, storeys, originalFilename, scaleInfo = null) {
   const lines = [];
   let id = 0;
   const nextId = () => `#${++id}`;
@@ -1324,15 +1846,17 @@ function generateIFC(meshes, storeys, originalFilename) {
 
   // Surface style cache (one IfcSurfaceStyle per unique color)
   const styleCache = new Map();
-  function getOrCreateStyle(color) {
+  function getOrCreateStyle(color, transparency = null) {
     if (!color) return null;
-    const key = `${color.r.toFixed(3)},${color.g.toFixed(3)},${color.b.toFixed(3)}`;
+    const tKey = transparency == null ? 'opaque' : Number(transparency).toFixed(3);
+    const key = `${color.r.toFixed(3)},${color.g.toFixed(3)},${color.b.toFixed(3)},${tKey}`;
     if (styleCache.has(key)) return styleCache.get(key);
 
     const colourRgb = nextId();
     lines.push(`${colourRgb}=IFCCOLOURRGB($,${color.r.toFixed(4)},${color.g.toFixed(4)},${color.b.toFixed(4)});`);
     const surfShading = nextId();
-    lines.push(`${surfShading}=IFCSURFACESTYLESHADING(${colourRgb},$);`);
+    const transparencyValue = transparency == null ? '$' : Number(transparency).toFixed(4);
+    lines.push(`${surfShading}=IFCSURFACESTYLESHADING(${colourRgb},${transparencyValue});`);
     const surfStyle = nextId();
     lines.push(`${surfStyle}=IFCSURFACESTYLE($,.BOTH.,(${surfShading}));`);
     const presStyle = nextId();
@@ -1343,10 +1867,280 @@ function generateIFC(meshes, storeys, originalFilename) {
     return ref;
   }
 
+  const materialCache = new Map();
+  const materialGroups = new Map();
+
+  function materialNameFromSource(mesh) {
+    const raw = String(mesh.materialName || '').trim();
+
+    if (!raw || isDefaultMaterialName(raw)) return null;
+
+    return raw
+      .replace(/[\r\n\t]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .slice(0, 120);
+  }
+
+  function inferredMaterialName(mesh) {
+    const text = searchableText(mesh);
+
+    if (/(glass|glazing|vitre|vitrage|verre)/i.test(text) || mesh.classification === 'window') {
+      return 'Glass';
+    }
+
+    if (/(wood|timber|bois|chene|chêne|pin|sapin|porte)/i.test(text) || mesh.classification === 'door') {
+      return 'Wood';
+    }
+
+    if (/(steel|metal|acier|fer|alu|aluminium|inox|ipe|hea|heb|ipn)/i.test(text)) {
+      return 'Metal';
+    }
+
+    if (/(concrete|beton|béton|cement|ciment)/i.test(text)) {
+      return 'Concrete';
+    }
+
+    if (/(brick|brique|masonry|maconnerie|maçonnerie|stone|pierre)/i.test(text)) {
+      return 'Masonry';
+    }
+
+    if (/(tile|tuile|ardoise|zinc|roof|toit|toiture|couverture)/i.test(text) || mesh.classification === 'roof') {
+      return 'Roof Material';
+    }
+
+    if (mesh.classification === 'wall') return mesh.isExternal ? 'Exterior Wall Material' : 'Interior Wall Material';
+    if (mesh.classification === 'slab') return 'Slab Material';
+    if (mesh.classification === 'beam') return 'Beam Material';
+    if (mesh.classification === 'column') return 'Column Material';
+    if (mesh.classification === 'stair') return 'Stair Material';
+
+    return 'Generic Material';
+  }
+
+  function materialNameForMesh(mesh) {
+    return materialNameFromSource(mesh) || inferredMaterialName(mesh);
+  }
+
+  function getOrCreateMaterial(materialName) {
+    const safeName = materialName || 'Generic Material';
+
+    if (materialCache.has(safeName)) {
+      return materialCache.get(safeName);
+    }
+
+    const materialId = nextId();
+    lines.push(`${materialId}=IFCMATERIAL('${escapeIFCString(safeName)}',$,$);`);
+    materialCache.set(safeName, materialId);
+
+    return materialId;
+  }
+
+  function queueMaterialAssociation(mesh, elementId) {
+    const materialName = materialNameForMesh(mesh);
+    const materialId = getOrCreateMaterial(materialName);
+
+    if (!materialGroups.has(materialId)) {
+      materialGroups.set(materialId, {
+        materialName,
+        elementIds: []
+      });
+    }
+
+    materialGroups.get(materialId).elementIds.push(elementId);
+  }
+
+  function addMaterialAssociations() {
+    const counts = {};
+
+    for (const [materialId, group] of materialGroups.entries()) {
+      if (group.elementIds.length === 0) continue;
+
+      lines.push(`${nextId()}=IFCRELASSOCIATESMATERIAL('${ifcGuid()}',${ownerHistory},'Material ${escapeIFCString(group.materialName)}',$,(${group.elementIds.join(',')}),${materialId});`);
+      counts[group.materialName] = (counts[group.materialName] || 0) + group.elementIds.length;
+    }
+
+    return counts;
+  }
+
+  const PRESENTATION_LAYER_MAP = {
+    wall:   { name: 'A-WALL',   description: 'Walls' },
+    slab:   { name: 'A-SLAB',   description: 'Slabs and floors' },
+    door:   { name: 'A-DOOR',   description: 'Doors' },
+    window: { name: 'A-WINDOW', description: 'Windows and glazing' },
+    roof:   { name: 'A-ROOF',   description: 'Roofs' },
+    stair:  { name: 'A-STAIR',  description: 'Stairs' },
+    space:  { name: 'A-SPACE',  description: 'Approximate spaces' },
+    beam:   { name: 'S-BEAM',   description: 'Structural beams' },
+    column: { name: 'S-COLUMN', description: 'Structural columns' },
+    proxy:  { name: 'Z-PROXY',  description: 'Unclassified proxy geometry' }
+  };
+
+  const presentationLayerGroups = new Map();
+
+  function queuePresentationLayer(mesh, layeredItemId) {
+    const info = PRESENTATION_LAYER_MAP[mesh.classification] || PRESENTATION_LAYER_MAP.proxy;
+
+    if (!presentationLayerGroups.has(info.name)) {
+      presentationLayerGroups.set(info.name, {
+        info,
+        itemIds: []
+      });
+    }
+
+    presentationLayerGroups.get(info.name).itemIds.push(layeredItemId);
+  }
+
+  function addPresentationLayerAssignments() {
+    const counts = {};
+
+    for (const group of presentationLayerGroups.values()) {
+      if (group.itemIds.length === 0) continue;
+
+      // Assign the layer to the shape representation. This keeps products
+      // semantically classified while still allowing IFC viewers to toggle
+      // visibility by category/layer.
+      lines.push(`${nextId()}=IFCPRESENTATIONLAYERASSIGNMENT('${escapeIFCString(group.info.name)}','${escapeIFCString(group.info.description)}',(${group.itemIds.join(',')}),'${escapeIFCString(group.info.name)}');`);
+      counts[group.info.name] = group.itemIds.length;
+    }
+
+    return counts;
+  }
+
   function addPropertySingleValue(name, typedValue) {
     const prop = nextId();
     lines.push(`${prop}=IFCPROPERTYSINGLEVALUE('${escapeIFCString(name)}',$,${typedValue},$);`);
     return prop;
+  }
+
+  function validMeasure(value) {
+    return Number.isFinite(value) && value > 0;
+  }
+
+  function formatMeasure(value) {
+    return Number(value).toFixed(4);
+  }
+
+  function addQuantityLength(name, value) {
+    if (!validMeasure(value)) return null;
+    const q = nextId();
+    lines.push(`${q}=IFCQUANTITYLENGTH('${escapeIFCString(name)}',$,$,${formatMeasure(value)},$);`);
+    return q;
+  }
+
+  function addQuantityArea(name, value) {
+    if (!validMeasure(value)) return null;
+    const q = nextId();
+    lines.push(`${q}=IFCQUANTITYAREA('${escapeIFCString(name)}',$,$,${formatMeasure(value)},$);`);
+    return q;
+  }
+
+  function addQuantityVolume(name, value) {
+    if (!validMeasure(value)) return null;
+    const q = nextId();
+    lines.push(`${q}=IFCQUANTITYVOLUME('${escapeIFCString(name)}',$,$,${formatMeasure(value)},$);`);
+    return q;
+  }
+
+  function addElementQuantity(elementId, qtoName, quantityIds) {
+    const qs = quantityIds.filter(Boolean);
+    if (qs.length === 0) return false;
+
+    const qto = nextId();
+    lines.push(`${qto}=IFCELEMENTQUANTITY('${ifcGuid()}',${ownerHistory},'${escapeIFCString(qtoName)}',$,$,(${qs.join(',')}));`);
+    lines.push(`${nextId()}=IFCRELDEFINESBYPROPERTIES('${ifcGuid()}',${ownerHistory},$,$,(${elementId}),${qto});`);
+    return true;
+  }
+
+  function approximateElementQuantities(mesh, elementId) {
+    const s = bboxStats(mesh);
+    const f = triangleFaceAnalysis(mesh);
+
+    const length = s.horizontal;
+    const width = s.minHoriz;
+    const height = s.sizeY;
+    const planArea = s.areaXZ;
+    const bboxVolume = s.sizeX * s.sizeY * s.sizeZ;
+    const perimeter = 2 * (s.sizeX + s.sizeZ);
+    const crossSectionArea = Math.max(0, width * height);
+
+    if (mesh.classification === 'wall') {
+      return addElementQuantity(elementId, 'Qto_WallBaseQuantities', [
+        addQuantityLength('Length', length),
+        addQuantityLength('Width', width),
+        addQuantityLength('Height', height),
+        addQuantityArea('GrossSideArea', length * height),
+        addQuantityArea('NetSideArea', length * height),
+        addQuantityVolume('GrossVolume', length * width * height)
+      ]);
+    }
+
+    if (mesh.classification === 'slab') {
+      return addElementQuantity(elementId, 'Qto_SlabBaseQuantities', [
+        addQuantityLength('Thickness', height),
+        addQuantityArea('GrossArea', planArea),
+        addQuantityArea('NetArea', planArea),
+        addQuantityLength('Perimeter', perimeter),
+        addQuantityVolume('GrossVolume', planArea * height)
+      ]);
+    }
+
+    if (mesh.classification === 'beam') {
+      return addElementQuantity(elementId, 'Qto_BeamBaseQuantities', [
+        addQuantityLength('Length', length),
+        addQuantityLength('Width', width),
+        addQuantityLength('Height', height),
+        addQuantityArea('CrossSectionArea', crossSectionArea),
+        addQuantityArea('GrossSurfaceArea', f.totalArea),
+        addQuantityVolume('GrossVolume', length * width * height)
+      ]);
+    }
+
+    if (mesh.classification === 'column') {
+      return addElementQuantity(elementId, 'Qto_ColumnBaseQuantities', [
+        addQuantityLength('Height', height),
+        addQuantityLength('Width', s.sizeX),
+        addQuantityLength('Depth', s.sizeZ),
+        addQuantityArea('CrossSectionArea', planArea),
+        addQuantityArea('GrossSurfaceArea', f.totalArea),
+        addQuantityVolume('GrossVolume', bboxVolume)
+      ]);
+    }
+
+    if (mesh.classification === 'roof') {
+      return addElementQuantity(elementId, 'Qto_RoofBaseQuantities', [
+        addQuantityArea('GrossArea', f.totalArea),
+        addQuantityArea('ProjectedArea', planArea),
+        addQuantityVolume('GrossVolume', bboxVolume)
+      ]);
+    }
+
+    if (mesh.classification === 'door') {
+      return addElementQuantity(elementId, 'Qto_DoorBaseQuantities', [
+        addQuantityLength('Height', height),
+        addQuantityLength('Width', length),
+        addQuantityArea('Area', height * length)
+      ]);
+    }
+
+    if (mesh.classification === 'window') {
+      return addElementQuantity(elementId, 'Qto_WindowBaseQuantities', [
+        addQuantityLength('Height', height),
+        addQuantityLength('Width', length),
+        addQuantityArea('Area', height * length)
+      ]);
+    }
+
+    if (mesh.classification === 'stair') {
+      return addElementQuantity(elementId, 'Qto_StairBaseQuantities', [
+        addQuantityLength('Height', height),
+        addQuantityLength('Length', length),
+        addQuantityLength('Width', width),
+        addQuantityArea('GrossSurfaceArea', f.totalArea),
+        addQuantityVolume('GrossVolume', bboxVolume)
+      ]);
+    }
+
+    return false;
   }
 
   function addWallCommonPset(wallElementId, mesh) {
@@ -1409,6 +2203,18 @@ function generateIFC(meshes, storeys, originalFilename) {
     const pset = nextId();
     lines.push(`${pset}=IFCPROPERTYSET('${ifcGuid()}',${ownerHistory},'Pset_RoofCommon',$,(${props.join(',')}));`);
     lines.push(`${nextId()}=IFCRELDEFINESBYPROPERTIES('${ifcGuid()}',${ownerHistory},$,$,(${roofElementId}),${pset});`);
+  }
+
+  function addSpaceCommonPset(spaceElementId) {
+    const props = [
+      addPropertySingleValue('Reference', `IFCIDENTIFIER('')`),
+      addPropertySingleValue('IsExternal', `IFCBOOLEAN(.F.)`),
+      addPropertySingleValue('OccupancyType', `IFCLABEL('Approximate storey space')`)
+    ];
+
+    const pset = nextId();
+    lines.push(`${pset}=IFCPROPERTYSET('${ifcGuid()}',${ownerHistory},'Pset_SpaceCommon',$,(${props.join(',')}));`);
+    lines.push(`${nextId()}=IFCRELDEFINESBYPROPERTIES('${ifcGuid()}',${ownerHistory},$,$,(${spaceElementId}),${pset});`);
   }
 
 
@@ -1575,9 +2381,1442 @@ function generateIFC(meshes, storeys, originalFilename) {
     return counts;
   }
 
+  function boundsFromMeshes(sourceMeshes) {
+    if (!sourceMeshes || sourceMeshes.length === 0) return null;
+
+    return {
+      minX: Math.min(...sourceMeshes.map(m => m.bbox.min[0])),
+      maxX: Math.max(...sourceMeshes.map(m => m.bbox.max[0])),
+      minY: Math.min(...sourceMeshes.map(m => m.bbox.min[1])),
+      maxY: Math.max(...sourceMeshes.map(m => m.bbox.max[1])),
+      minZ: Math.min(...sourceMeshes.map(m => m.bbox.min[2])),
+      maxZ: Math.max(...sourceMeshes.map(m => m.bbox.max[2]))
+    };
+  }
+
+  function estimateSpaceHeight(storeyIndex, storeyMeshes) {
+    const current = storeys[storeyIndex];
+    const next = storeys[storeyIndex + 1];
+    const previous = storeys[storeyIndex - 1];
+
+    if (next) {
+      const delta = next.elevation - current.elevation;
+      if (delta >= 1.8 && delta <= 6.0) return delta;
+    }
+
+    if (previous) {
+      const delta = current.elevation - previous.elevation;
+      if (delta >= 1.8 && delta <= 6.0) return delta;
+    }
+
+    const bounds = boundsFromMeshes(storeyMeshes);
+    if (bounds) {
+      const detectedHeight = bounds.maxY - current.elevation;
+      if (detectedHeight >= 1.8 && detectedHeight <= 5.0) {
+        return detectedHeight;
+      }
+    }
+
+    return 2.8;
+  }
+
+  function makeBoxTriangulatedFaceSet(bounds) {
+    const points = [
+      [bounds.minX, bounds.minY, bounds.minZ],
+      [bounds.maxX, bounds.minY, bounds.minZ],
+      [bounds.maxX, bounds.minY, bounds.maxZ],
+      [bounds.minX, bounds.minY, bounds.maxZ],
+      [bounds.minX, bounds.maxY, bounds.minZ],
+      [bounds.maxX, bounds.maxY, bounds.minZ],
+      [bounds.maxX, bounds.maxY, bounds.maxZ],
+      [bounds.minX, bounds.maxY, bounds.maxZ]
+    ];
+
+    // glTF is Y-up. IFC is exported as Z-up, using the same convention as the
+    // converted elements: IFC (X, Y, Z) = glTF (X, -Z, Y).
+    const coords = points.map(([x, y, z]) => `(${x.toFixed(6)},${(-z).toFixed(6)},${y.toFixed(6)})`);
+
+    const faces = [
+      [1, 2, 3], [1, 3, 4], // bottom
+      [5, 7, 6], [5, 8, 7], // top
+      [1, 5, 6], [1, 6, 2],
+      [2, 6, 7], [2, 7, 3],
+      [3, 7, 8], [3, 8, 4],
+      [4, 8, 5], [4, 5, 1]
+    ];
+
+    const pointList = nextId();
+    lines.push(`${pointList}=IFCCARTESIANPOINTLIST3D((${coords.join(',')}));`);
+
+    const faceSet = nextId();
+    lines.push(`${faceSet}=IFCTRIANGULATEDFACESET(${pointList},$,$,(${faces.map(f => `(${f.join(',')})`).join(',')}),$);`);
+
+    return faceSet;
+  }
+
+  function makeVariableTopBoxTriangulatedFaceSet(bounds, topYByCorner) {
+    const bottomY = bounds.minY;
+    const top = {
+      p0: Number.isFinite(topYByCorner?.p0) ? topYByCorner.p0 : bounds.maxY,
+      p1: Number.isFinite(topYByCorner?.p1) ? topYByCorner.p1 : bounds.maxY,
+      p2: Number.isFinite(topYByCorner?.p2) ? topYByCorner.p2 : bounds.maxY,
+      p3: Number.isFinite(topYByCorner?.p3) ? topYByCorner.p3 : bounds.maxY
+    };
+
+    const points = [
+      [bounds.minX, bottomY, bounds.minZ],
+      [bounds.maxX, bottomY, bounds.minZ],
+      [bounds.maxX, bottomY, bounds.maxZ],
+      [bounds.minX, bottomY, bounds.maxZ],
+      [bounds.minX, top.p0, bounds.minZ],
+      [bounds.maxX, top.p1, bounds.minZ],
+      [bounds.maxX, top.p2, bounds.maxZ],
+      [bounds.minX, top.p3, bounds.maxZ]
+    ];
+
+    const coords = points.map(([x, y, z]) => `(${x.toFixed(6)},${(-z).toFixed(6)},${y.toFixed(6)})`);
+
+    const faces = [
+      [1, 2, 3], [1, 3, 4],
+      [5, 7, 6], [5, 8, 7],
+      [1, 5, 6], [1, 6, 2],
+      [2, 6, 7], [2, 7, 3],
+      [3, 7, 8], [3, 8, 4],
+      [4, 8, 5], [4, 5, 1]
+    ];
+
+    const pointList = nextId();
+    lines.push(`${pointList}=IFCCARTESIANPOINTLIST3D((${coords.join(',')}));`);
+
+    const faceSet = nextId();
+    lines.push(`${faceSet}=IFCTRIANGULATEDFACESET(${pointList},$,$,(${faces.map(f => `(${f.join(',')})`).join(',')}),$);`);
+
+    return faceSet;
+  }
+
+  function pointInTriangle2D(px, pz, a, b, c, tolerance = 1e-8) {
+    const v0x = c[0] - a[0];
+    const v0z = c[2] - a[2];
+    const v1x = b[0] - a[0];
+    const v1z = b[2] - a[2];
+    const v2x = px - a[0];
+    const v2z = pz - a[2];
+
+    const dot00 = v0x * v0x + v0z * v0z;
+    const dot01 = v0x * v1x + v0z * v1z;
+    const dot02 = v0x * v2x + v0z * v2z;
+    const dot11 = v1x * v1x + v1z * v1z;
+    const dot12 = v1x * v2x + v1z * v2z;
+
+    const denom = dot00 * dot11 - dot01 * dot01;
+    if (Math.abs(denom) < tolerance) return null;
+
+    const invDenom = 1 / denom;
+    const u = (dot11 * dot02 - dot01 * dot12) * invDenom;
+    const v = (dot00 * dot12 - dot01 * dot02) * invDenom;
+
+    if (u >= -0.001 && v >= -0.001 && u + v <= 1.001) {
+      return { u, v, w: 1 - u - v };
+    }
+
+    return null;
+  }
+
+  function interpolateTriangleY(px, pz, a, b, c) {
+    const bary = pointInTriangle2D(px, pz, a, b, c);
+    if (!bary) return null;
+
+    return bary.w * a[1] + bary.v * b[1] + bary.u * c[1];
+  }
+
+  function roofHeightAtPoint(x, z, minY, fallbackMaxY) {
+    let best = null;
+
+    for (const roof of meshes) {
+      if (roof.classification !== 'roof') continue;
+      if (roof.bbox.max[1] < minY + 0.25) continue;
+      if (roof.bbox.min[1] > fallbackMaxY + 3.0) continue;
+      if (x < roof.bbox.min[0] - 0.25 || x > roof.bbox.max[0] + 0.25) continue;
+      if (z < roof.bbox.min[2] - 0.25 || z > roof.bbox.max[2] + 0.25) continue;
+
+      for (let i = 0; i < roof.indices.length; i += 3) {
+        const ia = roof.indices[i] * 3;
+        const ib = roof.indices[i + 1] * 3;
+        const ic = roof.indices[i + 2] * 3;
+
+        const a = [roof.positions[ia], roof.positions[ia + 1], roof.positions[ia + 2]];
+        const b = [roof.positions[ib], roof.positions[ib + 1], roof.positions[ib + 2]];
+        const c = [roof.positions[ic], roof.positions[ic + 1], roof.positions[ic + 2]];
+
+        const y = interpolateTriangleY(x, z, a, b, c);
+        if (!Number.isFinite(y)) continue;
+        if (y < minY + 1.20) continue;
+        if (y > fallbackMaxY + 2.5) continue;
+
+        if (best == null || y < best) {
+          best = y;
+        }
+      }
+    }
+
+    return best;
+  }
+
+  function slopedBeamSlopeInfo(mesh) {
+    if (mesh.classification !== 'beam') return null;
+
+    const s = bboxStats(mesh);
+    const useZLongAxis = s.sizeZ >= s.sizeX && s.sizeZ >= 0.85 && s.sizeY >= 0.15;
+    const useXLongAxis = s.sizeX > s.sizeZ && s.sizeX >= 0.85 && s.sizeY >= 0.15;
+
+    if (!useZLongAxis && !useXLongAxis) return null;
+
+    const samples = [];
+    for (let i = 0; i < mesh.positions.length; i += 3) {
+      samples.push({
+        h: useZLongAxis ? mesh.positions[i + 2] : mesh.positions[i],
+        side: useZLongAxis ? mesh.positions[i] : mesh.positions[i + 2],
+        y: mesh.positions[i + 1]
+      });
+    }
+
+    if (samples.length < 2) return null;
+
+    const n = samples.length;
+    const meanH = samples.reduce((sum, p) => sum + p.h, 0) / n;
+    const meanY = samples.reduce((sum, p) => sum + p.y, 0) / n;
+    const denom = samples.reduce((sum, p) => sum + Math.pow(p.h - meanH, 2), 0);
+
+    if (denom <= 1e-8) return null;
+
+    const slope = samples.reduce((sum, p) => sum + (p.h - meanH) * (p.y - meanY), 0) / denom;
+    const intercept = meanY - slope * meanH;
+
+    const hValues = samples.map(p => p.h);
+    const yValues = samples.map(p => p.y);
+    const sideValues = samples.map(p => p.side);
+
+    const minH = Math.min(...hValues);
+    const maxH = Math.max(...hValues);
+    const minY = Math.min(...yValues);
+    const maxY = Math.max(...yValues);
+    const sideCenter = sideValues.reduce((sum, value) => sum + value, 0) / sideValues.length;
+    const sideSpan = Math.max(...sideValues) - Math.min(...sideValues);
+
+    const hSpan = maxH - minH;
+    const ySpan = maxY - minY;
+
+    if (hSpan < 0.85 || ySpan < 0.12 || Math.abs(slope) < 0.025) return null;
+
+    return {
+      useZLongAxis,
+      minH,
+      maxH,
+      slope,
+      intercept,
+      sideCenter,
+      sideSpan,
+      hSpan,
+      ySpan
+    };
+  }
+
+  function roofBeamHeightAtPoint(x, z, bounds, fallbackMaxY) {
+    let best = null;
+
+    for (const beam of meshes) {
+      if (beam.classification !== 'beam') continue;
+
+      // Prefer beams that are already identified as roof construction. This
+      // lets chevrons / pannes / roof beams drive the attic space slope instead
+      // of relying on a broad roof mesh whose triangle orientation can be
+      // ambiguous.
+      if (typeof isRoofConstructionBeam === 'function' && !isRoofConstructionBeam(beam) && !hasRoofStructureHint(beam)) {
+        continue;
+      }
+
+      if (beam.bbox.max[1] < bounds.minY + 0.45) continue;
+      if (beam.bbox.min[1] > fallbackMaxY + 3.0) continue;
+      if (!bboxOverlapsXZ(beam, { bbox: { min: [bounds.minX, bounds.minY, bounds.minZ], max: [bounds.maxX, fallbackMaxY, bounds.maxZ] } }, 1.25)) {
+        continue;
+      }
+
+      const info = slopedBeamSlopeInfo(beam);
+      if (!info) continue;
+
+      const h = info.useZLongAxis ? z : x;
+      const side = info.useZLongAxis ? x : z;
+
+      const extension = 0.85;
+      if (h < info.minH - extension || h > info.maxH + extension) continue;
+
+      const sideDistance = Math.abs(side - info.sideCenter);
+      const sideTolerance = Math.max(1.20, info.sideSpan + 0.90);
+      if (sideDistance > sideTolerance) continue;
+
+      const y = info.slope * h + info.intercept;
+      if (!Number.isFinite(y)) continue;
+      if (y < bounds.minY + 1.20) continue;
+      if (y > fallbackMaxY + 2.5) continue;
+
+      const hPenalty = h < info.minH || h > info.maxH ? 0.45 : 0;
+      const score = sideDistance + hPenalty;
+
+      if (!best || score < best.score) {
+        best = {
+          y,
+          score,
+          beam
+        };
+      }
+    }
+
+    return best;
+  }
+
+  function variableTopFromRoof(bounds, fallbackMaxY) {
+    const clearance = 0.12;
+    let usedBeam = false;
+    let usedRoof = false;
+
+    const sample = (x, z) => {
+      const beamHit = roofBeamHeightAtPoint(x, z, bounds, fallbackMaxY);
+      if (beamHit && Number.isFinite(beamHit.y)) {
+        usedBeam = true;
+        return Math.max(bounds.minY + 1.35, beamHit.y - clearance);
+      }
+
+      const roofY = roofHeightAtPoint(x, z, bounds.minY, fallbackMaxY);
+      if (Number.isFinite(roofY)) {
+        usedRoof = true;
+        return Math.max(bounds.minY + 1.35, roofY - clearance);
+      }
+
+      return fallbackMaxY;
+    };
+
+    const top = {
+      p0: sample(bounds.minX, bounds.minZ),
+      p1: sample(bounds.maxX, bounds.minZ),
+      p2: sample(bounds.maxX, bounds.maxZ),
+      p3: sample(bounds.minX, bounds.maxZ)
+    };
+
+    const values = Object.values(top);
+    const usable = values.some(v => Math.abs(v - fallbackMaxY) > 0.08);
+    const minTop = Math.min(...values);
+
+    if (!usable || minTop <= bounds.minY + 1.20) {
+      return null;
+    }
+
+    top.source = usedBeam ? 'beam' : (usedRoof ? 'roof' : 'fallback');
+
+    return top;
+  }
+
+  function rectArea(rect) {
+    return Math.max(0, rect.maxX - rect.minX) * Math.max(0, rect.maxZ - rect.minZ);
+  }
+
+  function rectIntersectionArea(a, b, tolerance = 0) {
+    const minX = Math.max(a.minX, b.minX) - tolerance;
+    const maxX = Math.min(a.maxX, b.maxX) + tolerance;
+    const minZ = Math.max(a.minZ, b.minZ) - tolerance;
+    const maxZ = Math.min(a.maxZ, b.maxZ) + tolerance;
+
+    return Math.max(0, maxX - minX) * Math.max(0, maxZ - minZ);
+  }
+
+  function rectsTouchOrOverlap(a, b, tolerance = 0.18) {
+    return !(
+      a.maxX + tolerance < b.minX ||
+      b.maxX + tolerance < a.minX ||
+      a.maxZ + tolerance < b.minZ ||
+      b.maxZ + tolerance < a.minZ
+    );
+  }
+
+  function median(values) {
+    const arr = values.filter(Number.isFinite).sort((a, b) => a - b);
+    if (arr.length === 0) return null;
+    const mid = Math.floor(arr.length / 2);
+    return arr.length % 2 ? arr[mid] : (arr[mid - 1] + arr[mid]) / 2;
+  }
+
+  function normalizedRectKey(rect, grid = 0.05) {
+    return [
+      Math.round(rect.minX / grid),
+      Math.round(rect.maxX / grid),
+      Math.round(rect.minZ / grid),
+      Math.round(rect.maxZ / grid)
+    ].join(':');
+  }
+
+  function slabRectFromMesh(mesh) {
+    const widthX = mesh.bbox.max[0] - mesh.bbox.min[0];
+    const depthZ = mesh.bbox.max[2] - mesh.bbox.min[2];
+
+    if (widthX < 0.35 || depthZ < 0.35) return null;
+
+    const area = widthX * depthZ;
+
+    return {
+      mesh,
+      minX: mesh.bbox.min[0],
+      maxX: mesh.bbox.max[0],
+      minZ: mesh.bbox.min[2],
+      maxZ: mesh.bbox.max[2],
+      minY: mesh.bbox.min[1],
+      maxY: mesh.bbox.max[1],
+      centerX: (mesh.bbox.min[0] + mesh.bbox.max[0]) / 2,
+      centerZ: (mesh.bbox.min[2] + mesh.bbox.max[2]) / 2,
+      widthX,
+      depthZ,
+      area
+    };
+  }
+
+  function slabRectsForStorey(storeyIndex) {
+    const storey = storeys[storeyIndex];
+
+    const slabs = meshes
+      .filter(m => m.storeyIndex === storeyIndex && m.classification === 'slab')
+      .map(slabRectFromMesh)
+      .filter(Boolean);
+
+    if (slabs.length === 0) return [];
+
+    // Prefer slabs whose top is close to the detected storey level. This avoids
+    // creating spaces from ceiling/roof slabs that may be assigned to the same
+    // storey in imperfect source models.
+    const nearFloor = slabs.filter(rect => Math.abs(rect.maxY - storey.elevation) <= 0.80);
+    const candidates = nearFloor.length > 0 ? nearFloor : slabs;
+
+    // Remove near-duplicate slab rectangles, keeping the larger footprint.
+    const sorted = [...candidates].sort((a, b) => rectArea(b) - rectArea(a));
+    const kept = [];
+
+    for (const rect of sorted) {
+      const duplicate = kept.some(existing => {
+        const overlap = rectIntersectionArea(rect, existing, 0.03);
+        const ratio = overlap / Math.max(0.0001, Math.min(rectArea(rect), rectArea(existing)));
+        return ratio > 0.88;
+      });
+
+      if (!duplicate) kept.push(rect);
+    }
+
+    if (kept.length === 0) return [];
+
+    // Filter parasitic slab fragments with adaptive thresholds. Small landings
+    // can still be kept if they are explicitly stair-like, but tiny isolated
+    // fragments should not create spaces.
+    const maxArea = Math.max(...kept.map(r => r.area));
+
+    // Stronger filter against tiny slab fragments:
+    // - normal spaces should not be generated from tiny isolated slabs;
+    // - small stair landings / balcony / terrace pieces may still be kept only
+    //   if their naming clearly indicates that intent;
+    // - tiny pieces that merely touch a larger slab are no longer allowed to
+    //   create their own space. They are useful as geometry, but too noisy as
+    //   IfcSpace seeds.
+    const absoluteMinArea = 2.50;
+    const relativeMinArea = Math.max(absoluteMinArea, maxArea * 0.025);
+
+    const filtered = kept.filter(rect => {
+      const text = searchableText(rect.mesh);
+      const stairLike = hasStairHint(rect.mesh) || /(palier|landing|marche|stair|escalier)/i.test(text);
+      const terraceLike = /(terrace|terrasse|balcony|balcon|loggia|deck|patio)/i.test(text);
+
+      if (rect.area >= relativeMinArea) return true;
+      if ((stairLike || terraceLike) && rect.area >= 1.20) return true;
+
+      return false;
+    });
+
+    return filtered;
+  }
+
+  function clusterSlabRects(rects) {
+    const clusters = [];
+
+    for (const rect of rects) {
+      const touched = [];
+
+      for (let i = 0; i < clusters.length; i++) {
+        if (clusters[i].some(existing => rectsTouchOrOverlap(existing, rect, 0.22))) {
+          touched.push(i);
+        }
+      }
+
+      if (touched.length === 0) {
+        clusters.push([rect]);
+        continue;
+      }
+
+      const merged = [rect];
+      for (const idx of touched.reverse()) {
+        merged.push(...clusters[idx]);
+        clusters.splice(idx, 1);
+      }
+      clusters.push(merged);
+    }
+
+    return clusters;
+  }
+
+  function boundsFromRects(rects) {
+    if (!rects || rects.length === 0) return null;
+
+    return {
+      minX: Math.min(...rects.map(r => r.minX)),
+      maxX: Math.max(...rects.map(r => r.maxX)),
+      minY: Math.min(...rects.map(r => r.minY)),
+      maxY: Math.max(...rects.map(r => r.maxY)),
+      minZ: Math.min(...rects.map(r => r.minZ)),
+      maxZ: Math.max(...rects.map(r => r.maxZ))
+    };
+  }
+
+  function mergeRectsIntoCells(rects, tolerance = 0.10) {
+    if (!rects || rects.length === 0) return [];
+
+    // Grid-merge the union of adjacent slab rectangles. This avoids rendering a
+    // separate box per slab when several slabs form a continuous floor area.
+    const xs = [];
+    const zs = [];
+
+    for (const r of rects) {
+      xs.push(r.minX, r.maxX);
+      zs.push(r.minZ, r.maxZ);
+    }
+
+    xs.sort((a, b) => a - b);
+    zs.sort((a, b) => a - b);
+
+    function compact(values) {
+      const out = [];
+      for (const value of values) {
+        if (out.length === 0 || Math.abs(value - out[out.length - 1]) > tolerance) {
+          out.push(value);
+        } else {
+          out[out.length - 1] = (out[out.length - 1] + value) / 2;
+        }
+      }
+      return out;
+    }
+
+    const ux = compact(xs);
+    const uz = compact(zs);
+    const cells = [];
+
+    for (let xi = 0; xi < ux.length - 1; xi++) {
+      for (let zi = 0; zi < uz.length - 1; zi++) {
+        const cell = {
+          minX: ux[xi],
+          maxX: ux[xi + 1],
+          minZ: uz[zi],
+          maxZ: uz[zi + 1]
+        };
+
+        const area = rectArea(cell);
+        if (area < 0.05) continue;
+
+        const covered = rects.some(rect => {
+          const overlap = rectIntersectionArea(cell, rect, 0.015);
+          return overlap / Math.max(0.0001, area) >= 0.65;
+        });
+
+        if (covered) {
+          cells.push({
+            ...cell,
+            area
+          });
+        }
+      }
+    }
+
+    // Merge horizontally aligned cells into larger rectangles.
+    let merged = cells;
+    let changed = true;
+
+    while (changed) {
+      changed = false;
+
+      outer:
+      for (let i = 0; i < merged.length; i++) {
+        for (let j = i + 1; j < merged.length; j++) {
+          const a = merged[i];
+          const b = merged[j];
+
+          const sameZ = Math.abs(a.minZ - b.minZ) <= tolerance && Math.abs(a.maxZ - b.maxZ) <= tolerance;
+          const touchX = Math.abs(a.maxX - b.minX) <= tolerance || Math.abs(b.maxX - a.minX) <= tolerance;
+
+          if (sameZ && touchX) {
+            const combined = {
+              minX: Math.min(a.minX, b.minX),
+              maxX: Math.max(a.maxX, b.maxX),
+              minZ: Math.min(a.minZ, b.minZ),
+              maxZ: Math.max(a.maxZ, b.maxZ)
+            };
+
+            merged.splice(j, 1);
+            merged.splice(i, 1, { ...combined, area: rectArea(combined) });
+            changed = true;
+            break outer;
+          }
+
+          const sameX = Math.abs(a.minX - b.minX) <= tolerance && Math.abs(a.maxX - b.maxX) <= tolerance;
+          const touchZ = Math.abs(a.maxZ - b.minZ) <= tolerance || Math.abs(b.maxZ - a.minZ) <= tolerance;
+
+          if (sameX && touchZ) {
+            const combined = {
+              minX: Math.min(a.minX, b.minX),
+              maxX: Math.max(a.maxX, b.maxX),
+              minZ: Math.min(a.minZ, b.minZ),
+              maxZ: Math.max(a.maxZ, b.maxZ)
+            };
+
+            merged.splice(j, 1);
+            merged.splice(i, 1, { ...combined, area: rectArea(combined) });
+            changed = true;
+            break outer;
+          }
+        }
+      }
+    }
+
+    // One final duplicate guard after grid merging.
+    const byKey = new Map();
+    for (const rect of merged) {
+      byKey.set(normalizedRectKey(rect), rect);
+    }
+
+    return [...byKey.values()].sort((a, b) => rectArea(b) - rectArea(a));
+  }
+
+  function classifySpaceCluster(storeyIndex, cluster, clusterBounds, totalStoreyArea) {
+    const text = cluster.map(r => searchableText(r.mesh)).join(' ');
+    const area = cluster.reduce((sum, r) => sum + r.area, 0);
+    const areaRatio = area / Math.max(totalStoreyArea, 0.0001);
+
+    const lower = text.toLowerCase();
+
+    const hasTerraceText = /(terrace|terrasse|roof terrace|toit terrasse|patio|deck)/i.test(lower);
+    const hasBalconyText = /(balcony|balcon|loggia)/i.test(lower);
+    const hasStairText = /(stair|stairs|staircase|escalier|escaliers|palier|landing|marche|marches)/i.test(lower);
+
+    const stairNearby = meshes.some(m => {
+      if (m.storeyIndex !== storeyIndex || m.classification !== 'stair') return false;
+      const s = {
+        minX: m.bbox.min[0],
+        maxX: m.bbox.max[0],
+        minZ: m.bbox.min[2],
+        maxZ: m.bbox.max[2]
+      };
+      return rectsTouchOrOverlap(clusterBounds, s, 0.70);
+    });
+
+    const verySmall = area < Math.max(2.5, totalStoreyArea * 0.04);
+    const narrow = Math.min(clusterBounds.maxX - clusterBounds.minX, clusterBounds.maxZ - clusterBounds.minZ) < 1.25;
+    const externalHint = /(outside|extérieur|exterieur|external|terrace|terrasse|balcony|balcon|loggia|patio|deck)/i.test(lower);
+
+    if (hasStairText || (stairNearby && verySmall)) {
+      return {
+        key: 'stair',
+        label: 'Stair Space',
+        zoneLabel: 'Stair Zone',
+        predefinedType: '.INTERNAL.'
+      };
+    }
+
+    if (hasBalconyText || (externalHint && narrow && areaRatio < 0.25)) {
+      return {
+        key: 'balcony',
+        label: 'Balcony Space',
+        zoneLabel: 'Balcony Zone',
+        predefinedType: '.EXTERNAL.'
+      };
+    }
+
+    if (hasTerraceText || (externalHint && areaRatio >= 0.08)) {
+      return {
+        key: 'terrace',
+        label: 'Terrace Space',
+        zoneLabel: 'Terrace Zone',
+        predefinedType: '.EXTERNAL.'
+      };
+    }
+
+    return {
+      key: 'main',
+      label: 'Main Space',
+      zoneLabel: 'Main Zone',
+      predefinedType: '.INTERNAL.'
+    };
+  }
+
+  function clusterHasExplicitSmallSpaceIntent(cluster) {
+    return cluster.some(rect => {
+      const text = searchableText(rect.mesh);
+      return hasStairHint(rect.mesh) || /(palier|landing|marche|stair|escalier|terrace|terrasse|balcony|balcon|loggia|deck|patio)/i.test(text);
+    });
+  }
+
+  function minimumSpaceAreaForCategory(category, totalStoreyArea, explicitIntent = false) {
+    const relative = Math.max(1.0, totalStoreyArea * 0.012);
+
+    if (category.key === 'main') {
+      return Math.max(4.00, totalStoreyArea * 0.020);
+    }
+
+    if (category.key === 'terrace') {
+      return explicitIntent ? 1.80 : Math.max(3.00, relative);
+    }
+
+    if (category.key === 'balcony') {
+      return explicitIntent ? 1.20 : Math.max(2.00, relative);
+    }
+
+    if (category.key === 'stair') {
+      return explicitIntent ? 1.20 : Math.max(2.00, relative);
+    }
+
+    return Math.max(3.00, relative);
+  }
+
+  function selectRoomPrototypeStoreyIndex() {
+    let best = -1;
+    let bestScore = -Infinity;
+
+    for (let i = 0; i < storeys.length; i++) {
+      const slabs = slabRectsForStorey(i);
+      const floorArea = slabs.reduce((sum, slab) => sum + slab.area, 0);
+      const wallCount = meshes.filter(m => m.storeyIndex === i && m.classification === 'wall').length;
+      const score = floorArea + wallCount * 1.5;
+
+      if (floorArea >= 12 && wallCount >= 2 && score > bestScore) {
+        best = i;
+        bestScore = score;
+      }
+    }
+
+    return best;
+  }
+
+  const roomPrototypeStoreyIndex = selectRoomPrototypeStoreyIndex();
+
+  function rectCoverageRatioByRects(rect, coveringRects) {
+    const area = rectArea(rect);
+    if (area <= 0) return 0;
+
+    let covered = 0;
+    for (const source of coveringRects) {
+      covered += rectIntersectionArea(rect, source, 0.01);
+    }
+
+    return Math.min(1, covered / area);
+  }
+
+  function interiorWallCutsForCluster(storeyIndex, bounds) {
+    const xCuts = [];
+    const zCuts = [];
+
+    const width = bounds.maxX - bounds.minX;
+    const depth = bounds.maxZ - bounds.minZ;
+
+    for (const wall of meshes) {
+      if (wall.storeyIndex !== storeyIndex || wall.classification !== 'wall') continue;
+
+      const w = {
+        minX: wall.bbox.min[0],
+        maxX: wall.bbox.max[0],
+        minZ: wall.bbox.min[2],
+        maxZ: wall.bbox.max[2]
+      };
+
+      if (!rectsTouchOrOverlap(bounds, w, 0.05)) continue;
+
+      const sx = w.maxX - w.minX;
+      const sz = w.maxZ - w.minZ;
+      const centerX = (w.minX + w.maxX) / 2;
+      const centerZ = (w.minZ + w.maxZ) / 2;
+
+      const awayFromOuterX = centerX > bounds.minX + 0.55 && centerX < bounds.maxX - 0.55;
+      const awayFromOuterZ = centerZ > bounds.minZ + 0.55 && centerZ < bounds.maxZ - 0.55;
+
+      if (sz > sx * 2.2 && sx <= 0.75 && awayFromOuterX && sz >= depth * 0.38) {
+        xCuts.push(centerX);
+      }
+
+      if (sx > sz * 2.2 && sz <= 0.75 && awayFromOuterZ && sx >= width * 0.38) {
+        zCuts.push(centerZ);
+      }
+    }
+
+    function compactCuts(values, minDistance = 0.90) {
+      const sorted = [...values].sort((a, b) => a - b);
+      const out = [];
+
+      for (const value of sorted) {
+        if (out.length === 0 || Math.abs(value - out[out.length - 1]) >= minDistance) {
+          out.push(value);
+        }
+      }
+
+      return out.slice(0, 5);
+    }
+
+    return {
+      xCuts: compactCuts(xCuts),
+      zCuts: compactCuts(zCuts)
+    };
+  }
+
+  function wallBlocksSharedBoundary(a, b, storeyIndex, tolerance = 0.32) {
+    const verticalShare =
+      Math.abs(a.maxX - b.minX) <= tolerance ||
+      Math.abs(b.maxX - a.minX) <= tolerance;
+
+    const horizontalShare =
+      Math.abs(a.maxZ - b.minZ) <= tolerance ||
+      Math.abs(b.maxZ - a.minZ) <= tolerance;
+
+    for (const wall of meshes) {
+      if (wall.storeyIndex !== storeyIndex || wall.classification !== 'wall') continue;
+
+      const w = {
+        minX: wall.bbox.min[0],
+        maxX: wall.bbox.max[0],
+        minZ: wall.bbox.min[2],
+        maxZ: wall.bbox.max[2]
+      };
+
+      const wallWidthX = w.maxX - w.minX;
+      const wallWidthZ = w.maxZ - w.minZ;
+      const wallCenterX = (w.minX + w.maxX) / 2;
+      const wallCenterZ = (w.minZ + w.maxZ) / 2;
+
+      if (verticalShare) {
+        const boundaryX = Math.abs(a.maxX - b.minX) <= tolerance
+          ? (a.maxX + b.minX) / 2
+          : (b.maxX + a.minX) / 2;
+
+        const sharedMinZ = Math.max(a.minZ, b.minZ);
+        const sharedMaxZ = Math.min(a.maxZ, b.maxZ);
+        const sharedLength = Math.max(0, sharedMaxZ - sharedMinZ);
+        const overlapZ = Math.max(0, Math.min(sharedMaxZ, w.maxZ) - Math.max(sharedMinZ, w.minZ));
+
+        const wallOnBoundary = Math.abs(wallCenterX - boundaryX) <= Math.max(tolerance, wallWidthX / 2 + 0.12);
+        const wallLongEnough = overlapZ >= Math.max(0.65, sharedLength * 0.45);
+        const wallIsVerticalDivider = wallWidthX <= 0.95 && wallWidthZ >= Math.max(0.80, sharedLength * 0.35);
+
+        if (wallOnBoundary && wallLongEnough && wallIsVerticalDivider) {
+          return true;
+        }
+      }
+
+      if (horizontalShare) {
+        const boundaryZ = Math.abs(a.maxZ - b.minZ) <= tolerance
+          ? (a.maxZ + b.minZ) / 2
+          : (b.maxZ + a.minZ) / 2;
+
+        const sharedMinX = Math.max(a.minX, b.minX);
+        const sharedMaxX = Math.min(a.maxX, b.maxX);
+        const sharedLength = Math.max(0, sharedMaxX - sharedMinX);
+        const overlapX = Math.max(0, Math.min(sharedMaxX, w.maxX) - Math.max(sharedMinX, w.minX));
+
+        const wallOnBoundary = Math.abs(wallCenterZ - boundaryZ) <= Math.max(tolerance, wallWidthZ / 2 + 0.12);
+        const wallLongEnough = overlapX >= Math.max(0.65, sharedLength * 0.45);
+        const wallIsHorizontalDivider = wallWidthZ <= 0.95 && wallWidthX >= Math.max(0.80, sharedLength * 0.35);
+
+        if (wallOnBoundary && wallLongEnough && wallIsHorizontalDivider) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  function cellsCanMerge(a, b, storeyIndex, tolerance = 0.12) {
+    const sameZ = Math.abs(a.minZ - b.minZ) <= tolerance && Math.abs(a.maxZ - b.maxZ) <= tolerance;
+    const touchX = Math.abs(a.maxX - b.minX) <= tolerance || Math.abs(b.maxX - a.minX) <= tolerance;
+
+    if (sameZ && touchX && !wallBlocksSharedBoundary(a, b, storeyIndex)) {
+      return true;
+    }
+
+    const sameX = Math.abs(a.minX - b.minX) <= tolerance && Math.abs(a.maxX - b.maxX) <= tolerance;
+    const touchZ = Math.abs(a.maxZ - b.minZ) <= tolerance || Math.abs(b.maxZ - a.minZ) <= tolerance;
+
+    if (sameX && touchZ && !wallBlocksSharedBoundary(a, b, storeyIndex)) {
+      return true;
+    }
+
+    return false;
+  }
+
+  function mergeRoomCellsByOpenBoundaries(cells, storeyIndex) {
+    let merged = [...cells];
+    let changed = true;
+
+    while (changed) {
+      changed = false;
+
+      outer:
+      for (let i = 0; i < merged.length; i++) {
+        for (let j = i + 1; j < merged.length; j++) {
+          const a = merged[i];
+          const b = merged[j];
+
+          if (!cellsCanMerge(a, b, storeyIndex)) continue;
+
+          const combined = {
+            minX: Math.min(a.minX, b.minX),
+            maxX: Math.max(a.maxX, b.maxX),
+            minZ: Math.min(a.minZ, b.minZ),
+            maxZ: Math.max(a.maxZ, b.maxZ)
+          };
+
+          merged.splice(j, 1);
+          merged.splice(i, 1, {
+            ...combined,
+            area: rectArea(combined)
+          });
+
+          changed = true;
+          break outer;
+        }
+      }
+    }
+
+    return merged.sort((a, b) => rectArea(b) - rectArea(a));
+  }
+
+  function snapRectToNearbyWalls(rect, storeyIndex, maxGap = 1.10) {
+    const snapped = { ...rect };
+
+    const walls = meshes.filter(m => m.storeyIndex === storeyIndex && m.classification === 'wall');
+
+    function currentDepth() {
+      return Math.max(0.001, snapped.maxZ - snapped.minZ);
+    }
+
+    function currentWidth() {
+      return Math.max(0.001, snapped.maxX - snapped.minX);
+    }
+
+    function overlapZ(wall) {
+      return Math.max(0, Math.min(snapped.maxZ, wall.bbox.max[2]) - Math.max(snapped.minZ, wall.bbox.min[2]));
+    }
+
+    function overlapX(wall) {
+      return Math.max(0, Math.min(snapped.maxX, wall.bbox.max[0]) - Math.max(snapped.minX, wall.bbox.min[0]));
+    }
+
+    let bestLeft = null;
+    let bestRight = null;
+    let bestBottom = null;
+    let bestTop = null;
+
+    for (const wall of walls) {
+      const wx = wall.bbox.max[0] - wall.bbox.min[0];
+      const wz = wall.bbox.max[2] - wall.bbox.min[2];
+
+      // Snap X edges to nearby Z-oriented walls.
+      if (wz >= Math.max(0.80, currentDepth() * 0.35) && overlapZ(wall) >= Math.max(0.55, currentDepth() * 0.25)) {
+        const leftGap = snapped.minX - wall.bbox.max[0];
+        if (leftGap > 0.05 && leftGap <= maxGap) {
+          if (!bestLeft || leftGap < bestLeft.gap) bestLeft = { value: wall.bbox.max[0], gap: leftGap };
+        }
+
+        const rightGap = wall.bbox.min[0] - snapped.maxX;
+        if (rightGap > 0.05 && rightGap <= maxGap) {
+          if (!bestRight || rightGap < bestRight.gap) bestRight = { value: wall.bbox.min[0], gap: rightGap };
+        }
+      }
+
+      // Snap Z edges to nearby X-oriented walls.
+      if (wx >= Math.max(0.80, currentWidth() * 0.35) && overlapX(wall) >= Math.max(0.55, currentWidth() * 0.25)) {
+        const bottomGap = snapped.minZ - wall.bbox.max[2];
+        if (bottomGap > 0.05 && bottomGap <= maxGap) {
+          if (!bestBottom || bottomGap < bestBottom.gap) bestBottom = { value: wall.bbox.max[2], gap: bottomGap };
+        }
+
+        const topGap = wall.bbox.min[2] - snapped.maxZ;
+        if (topGap > 0.05 && topGap <= maxGap) {
+          if (!bestTop || topGap < bestTop.gap) bestTop = { value: wall.bbox.min[2], gap: topGap };
+        }
+      }
+    }
+
+    if (bestLeft) snapped.minX = bestLeft.value;
+    if (bestRight) snapped.maxX = bestRight.value;
+    if (bestBottom) snapped.minZ = bestBottom.value;
+    if (bestTop) snapped.maxZ = bestTop.value;
+
+    // New in v7: clamp, not only expand. If a generated space slightly crosses
+    // a nearby wall face, pull the boundary back to the wall. This targets cases
+    // where room prototype cells extend a bit beyond a real partition wall.
+    // v8: stronger clamp for real partition walls.
+    // v7 only corrected small overruns. Some generated room spaces can cross a
+    // thick wall by 1.5-2.5m when the source slab footprint is larger than the
+    // actual room. Allow a larger correction, but only for walls that satisfy
+    // the divider tests below.
+    const maxOverrun = Math.max(1.05, Math.min(2.60, Math.max(currentWidth(), currentDepth()) * 0.32));
+    let clampLeft = null;
+    let clampRight = null;
+    let clampBottom = null;
+    let clampTop = null;
+
+    for (const wall of walls) {
+      const wx = wall.bbox.max[0] - wall.bbox.min[0];
+      const wz = wall.bbox.max[2] - wall.bbox.min[2];
+
+      const zOverlap = overlapZ(wall);
+      const xOverlap = overlapX(wall);
+
+      const zDivider =
+        wz >= Math.max(0.80, currentDepth() * 0.30) &&
+        zOverlap >= Math.max(0.55, currentDepth() * 0.25) &&
+        wx <= 1.10;
+
+      if (zDivider) {
+        const leftOverrun = wall.bbox.max[0] - snapped.minX;
+        if (leftOverrun > 0.05 && leftOverrun <= maxOverrun && wall.bbox.max[0] < snapped.maxX - 1.00) {
+          if (!clampLeft || leftOverrun < clampLeft.overrun) clampLeft = { value: wall.bbox.max[0], overrun: leftOverrun };
+        }
+
+        const rightOverrun = snapped.maxX - wall.bbox.min[0];
+        if (rightOverrun > 0.05 && rightOverrun <= maxOverrun && wall.bbox.min[0] > snapped.minX + 1.00) {
+          if (!clampRight || rightOverrun < clampRight.overrun) clampRight = { value: wall.bbox.min[0], overrun: rightOverrun };
+        }
+      }
+
+      const xDivider =
+        wx >= Math.max(0.80, currentWidth() * 0.30) &&
+        xOverlap >= Math.max(0.55, currentWidth() * 0.25) &&
+        wz <= 1.10;
+
+      if (xDivider) {
+        const bottomOverrun = wall.bbox.max[2] - snapped.minZ;
+        if (bottomOverrun > 0.05 && bottomOverrun <= maxOverrun && wall.bbox.max[2] < snapped.maxZ - 1.00) {
+          if (!clampBottom || bottomOverrun < clampBottom.overrun) clampBottom = { value: wall.bbox.max[2], overrun: bottomOverrun };
+        }
+
+        const topOverrun = snapped.maxZ - wall.bbox.min[2];
+        if (topOverrun > 0.05 && topOverrun <= maxOverrun && wall.bbox.min[2] > snapped.minZ + 1.00) {
+          if (!clampTop || topOverrun < clampTop.overrun) clampTop = { value: wall.bbox.min[2], overrun: topOverrun };
+        }
+      }
+    }
+
+    if (clampLeft && clampLeft.value < snapped.maxX - 1.00) snapped.minX = clampLeft.value;
+    if (clampRight && clampRight.value > snapped.minX + 1.00) snapped.maxX = clampRight.value;
+    if (clampBottom && clampBottom.value < snapped.maxZ - 1.00) snapped.minZ = clampBottom.value;
+    if (clampTop && clampTop.value > snapped.minZ + 1.00) snapped.maxZ = clampTop.value;
+
+    snapped.area = rectArea(snapped);
+    return snapped;
+  }
+
+  function roomPrototypeRectsForCluster(storeyIndex, cluster, clusterBounds) {
+    const cuts = interiorWallCutsForCluster(storeyIndex, clusterBounds);
+    if (cuts.xCuts.length + cuts.zCuts.length === 0) return null;
+
+    const xs = [clusterBounds.minX, ...cuts.xCuts, clusterBounds.maxX].sort((a, b) => a - b);
+    const zs = [clusterBounds.minZ, ...cuts.zCuts, clusterBounds.maxZ].sort((a, b) => a - b);
+
+    const cells = [];
+    for (let xi = 0; xi < xs.length - 1; xi++) {
+      for (let zi = 0; zi < zs.length - 1; zi++) {
+        const cell = {
+          minX: xs[xi],
+          maxX: xs[xi + 1],
+          minZ: zs[zi],
+          maxZ: zs[zi + 1]
+        };
+
+        const area = rectArea(cell);
+        if (area < 4.0) continue;
+
+        const coverage = rectCoverageRatioByRects(cell, cluster);
+        if (coverage < 0.55) continue;
+
+        cells.push({
+          ...cell,
+          area
+        });
+      }
+    }
+
+    if (cells.length < 2 || cells.length > 24) return null;
+
+    const merged = mergeRoomCellsByOpenBoundaries(cells, storeyIndex);
+
+    if (merged.length < 2 || merged.length > 18) return null;
+
+    return merged;
+  }
+
+  function createSpacePrismBoundsForRect(rect, minY, maxY) {
+    const widthX = rect.maxX - rect.minX;
+    const depthZ = rect.maxZ - rect.minZ;
+
+    // Tiny inset to avoid exact coplanar overlap with slab/wall faces while
+    // keeping spaces visually aligned to the slab footprint.
+    const inset = Math.min(0.06, Math.max(0.01, Math.min(widthX, depthZ) * 0.008));
+
+    return {
+      minX: rect.minX + inset,
+      maxX: rect.maxX - inset,
+      minY,
+      maxY,
+      minZ: rect.minZ + inset,
+      maxZ: rect.maxZ - inset
+    };
+  }
+
+  function addZoneCommonPset(zoneId, area, categoryLabel) {
+    const props = [
+      addPropertySingleValue('Reference', `IFCIDENTIFIER('')`),
+      addPropertySingleValue('Category', `IFCLABEL('${escapeIFCString(categoryLabel)}')`),
+      addPropertySingleValue('IsExternal', `IFCBOOLEAN(${/(Terrace|Balcony)/.test(categoryLabel) ? '.T.' : '.F.'})`),
+      addPropertySingleValue('GrossPlannedArea', `IFCAREAMEASURE(${formatMeasure(area)})`),
+      addPropertySingleValue('NetPlannedArea', `IFCAREAMEASURE(${formatMeasure(area)})`)
+    ];
+
+    const pset = nextId();
+    lines.push(`${pset}=IFCPROPERTYSET('${ifcGuid()}',${ownerHistory},'Pset_ZoneCommon',$,(${props.join(',')}));`);
+    lines.push(`${nextId()}=IFCRELDEFINESBYPROPERTIES('${ifcGuid()}',${ownerHistory},$,$,(${zoneId}),${pset});`);
+  }
+
+  function createZoneForStorey(storeyIndex, spaceIds, area, category) {
+    if (!spaceIds || spaceIds.length === 0) return null;
+
+    const zoneName = escapeIFCString(`${category.zoneLabel} - ${storeys[storeyIndex].name}`);
+    const zoneId = nextId();
+
+    // IFC4 IfcZone has no geometric representation here. It acts as a parent
+    // grouping object for generated spaces of the same semantic category.
+    lines.push(`${zoneId}=IFCZONE('${ifcGuid()}',${ownerHistory},'${zoneName}',$,'${escapeIFCString(category.key)}','${zoneName}');`);
+    addZoneCommonPset(zoneId, area, category.zoneLabel);
+
+    lines.push(`${nextId()}=IFCRELASSIGNSTOGROUP('${ifcGuid()}',${ownerHistory},'${zoneName} assignment',$,(${spaceIds.join(',')}),$,${zoneId});`);
+
+    return zoneId;
+  }
+
+  function createSlabDrivenSpacesForStorey(storeyIndex) {
+    const storey = storeys[storeyIndex];
+    const rects = slabRectsForStorey(storeyIndex);
+
+    if (rects.length === 0) return [];
+
+    const totalStoreyArea = rects.reduce((sum, rect) => sum + rect.area, 0);
+    const clusters = clusterSlabRects(rects);
+    const created = [];
+    const counters = { main: 0, terrace: 0, balcony: 0, stair: 0 };
+
+    for (const cluster of clusters) {
+      const raw = boundsFromRects(cluster);
+      if (!raw) continue;
+
+      const widthX = raw.maxX - raw.minX;
+      const depthZ = raw.maxZ - raw.minZ;
+      if (widthX < 1.0 || depthZ < 1.0) continue;
+
+      const category = classifySpaceCluster(storeyIndex, cluster, raw, totalStoreyArea);
+      const clusterArea = cluster.reduce((sum, rect) => sum + rect.area, 0);
+      const explicitSmallSpaceIntent = clusterHasExplicitSmallSpaceIntent(cluster);
+      const minSpaceArea = minimumSpaceAreaForCategory(category, totalStoreyArea, explicitSmallSpaceIntent);
+
+      if (clusterArea < minSpaceArea) {
+        continue;
+      }
+
+      counters[category.key] = (counters[category.key] || 0) + 1;
+
+      const slabTop = median(cluster.map(r => r.maxY));
+      const minY = (Number.isFinite(slabTop) ? slabTop : storey.elevation) + 0.05;
+
+      const nextStorey = storeys[storeyIndex + 1];
+      let maxY;
+
+      if (nextStorey && nextStorey.elevation - minY >= 1.60) {
+        maxY = nextStorey.elevation - 0.12;
+      } else {
+        const estimated = estimateSpaceHeight(storeyIndex, cluster.map(r => r.mesh));
+        maxY = minY + Math.max(1.80, Math.min(estimated - 0.15, category.key === 'stair' ? 4.20 : 3.80));
+      }
+
+      if (maxY <= minY + 1.20) continue;
+
+      const roomPrototypeRects =
+        category.key === 'main'
+          ? roomPrototypeRectsForCluster(storeyIndex, cluster, raw)
+          : null;
+
+      const spaceParts = roomPrototypeRects || [null];
+
+      for (const partRect of spaceParts) {
+        const rawSourceRects = partRect ? [partRect] : mergeRectsIntoCells(cluster);
+        const sourceRects = rawSourceRects
+          .map(rect => snapRectToNearbyWalls(rect, storeyIndex))
+          .filter(rect => rectArea(rect) >= 0.80);
+
+        const faceSets = [];
+        const boundaryRects = [];
+        let grossArea = 0;
+        let weightedHeight = 0;
+        let hasSlopedRoofTop = false;
+        let roofTopSource = null;
+
+        for (const rect of sourceRects) {
+          const bounds = createSpacePrismBoundsForRect(rect, minY, maxY);
+          if (bounds.maxX <= bounds.minX || bounds.maxZ <= bounds.minZ) continue;
+
+          const area = (bounds.maxX - bounds.minX) * (bounds.maxZ - bounds.minZ);
+          if (area < 0.80) continue;
+
+          const roofTop = !storeys[storeyIndex + 1]
+            ? variableTopFromRoof(bounds, maxY)
+            : null;
+
+          const faceSet = roofTop
+            ? makeVariableTopBoxTriangulatedFaceSet(bounds, roofTop)
+            : makeBoxTriangulatedFaceSet(bounds);
+
+          const topAverage = roofTop
+            ? (roofTop.p0 + roofTop.p1 + roofTop.p2 + roofTop.p3) / 4
+            : bounds.maxY;
+
+          grossArea += area;
+          weightedHeight += area * Math.max(0, topAverage - bounds.minY);
+          hasSlopedRoofTop = hasSlopedRoofTop || Boolean(roofTop);
+          if (roofTop?.source === 'beam') {
+            roofTopSource = 'beam';
+          } else if (roofTop && !roofTopSource) {
+            roofTopSource = 'roof';
+          }
+          faceSets.push(faceSet);
+          boundaryRects.push({
+            minX: bounds.minX,
+            maxX: bounds.maxX,
+            minZ: bounds.minZ,
+            maxZ: bounds.maxZ,
+            minY: bounds.minY,
+            maxY: topAverage
+          });
+        }
+
+        if (faceSets.length === 0 || grossArea < minSpaceArea) {
+          continue;
+        }
+
+        const styleByCategory = {
+          main: { r: 0.45, g: 0.72, b: 1.00 },
+          terrace: { r: 0.62, g: 0.82, b: 0.52 },
+          balcony: { r: 0.60, g: 0.80, b: 0.92 },
+          stair: { r: 0.90, g: 0.68, b: 0.42 }
+        };
+
+        const spaceStyle = getOrCreateStyle(styleByCategory[category.key] || styleByCategory.main, 0.82);
+        if (spaceStyle) {
+          for (const faceSet of faceSets) {
+            lines.push(`${nextId()}=IFCSTYLEDITEM(${faceSet},(${spaceStyle.presStyle}),$);`);
+          }
+        }
+
+        const shapeRep = nextId();
+        lines.push(`${shapeRep}=IFCSHAPEREPRESENTATION(${styleContext},'Body','Tessellation',(${faceSets.join(',')}));`);
+        queuePresentationLayer({ classification: 'space' }, shapeRep);
+
+        const productShape = nextId();
+        lines.push(`${productShape}=IFCPRODUCTDEFINITIONSHAPE($,$,(${shapeRep}));`);
+
+        const placement = nextId();
+        lines.push(`${placement}=IFCLOCALPLACEMENT(${storeyPlacements[storeyIndex]},${axis});`);
+
+        const spaceId = nextId();
+        const roomPrototype = Boolean(roomPrototypeRects);
+        const roomCount = created.filter(s => s.roomPrototype).length + 1;
+        const localSuffix = roomPrototype
+          ? ` Room ${String(roomCount).padStart(2, '0')}`
+          : (counters[category.key] > 1 ? ` ${String(counters[category.key]).padStart(2, '0')}` : '');
+
+        const label = roomPrototype ? 'Room Prototype Space' : category.label;
+        const semanticKey = roomPrototype ? 'room_prototype' : category.key;
+        const spaceName = escapeIFCString(`${label} - ${storey.name}${localSuffix}`);
+        lines.push(`${spaceId}=IFCSPACE('${ifcGuid()}',${ownerHistory},'${spaceName}',$,'${escapeIFCString(semanticKey)}',${placement},${productShape},'${spaceName}',.ELEMENT.,${category.predefinedType},$);`);
+
+        addSpaceCommonPset(spaceId);
+
+        const averageHeight = weightedHeight / Math.max(grossArea, 0.0001);
+        const volume = grossArea * averageHeight;
+
+        const hasQuantities = addElementQuantity(spaceId, 'Qto_SpaceBaseQuantities', [
+          addQuantityArea('GrossFloorArea', grossArea),
+          addQuantityArea('NetFloorArea', grossArea),
+          addQuantityLength('Height', averageHeight),
+          addQuantityVolume('GrossVolume', volume),
+          addQuantityVolume('NetVolume', volume)
+        ]);
+
+        created.push({
+          id: spaceId,
+          area: grossArea,
+          volume,
+          category: roomPrototype
+            ? { key: 'room', label: 'Room Prototype Space', zoneLabel: 'Room Prototype Zone', predefinedType: '.INTERNAL.' }
+            : category,
+          hasQuantities,
+          rects: boundaryRects,
+          storeyIndex,
+          roomPrototype,
+          hasSlopedRoofTop,
+          roofTopSource
+        });
+      }
+    }
+
+    return created;
+  }
+
+  function rectTouchesRectBoundary(a, b, tolerance = 0.28) {
+    const zOverlap = Math.max(0, Math.min(a.maxZ, b.maxZ) - Math.max(a.minZ, b.minZ));
+    const xOverlap = Math.max(0, Math.min(a.maxX, b.maxX) - Math.max(a.minX, b.minX));
+
+    const depthA = Math.max(0.001, a.maxZ - a.minZ);
+    const widthA = Math.max(0.001, a.maxX - a.minX);
+
+    const touchesLeft = Math.abs(a.minX - b.maxX) <= tolerance && zOverlap >= depthA * 0.18;
+    const touchesRight = Math.abs(a.maxX - b.minX) <= tolerance && zOverlap >= depthA * 0.18;
+    const touchesBottom = Math.abs(a.minZ - b.maxZ) <= tolerance && xOverlap >= widthA * 0.18;
+    const touchesTop = Math.abs(a.maxZ - b.minZ) <= tolerance && xOverlap >= widthA * 0.18;
+
+    return touchesLeft || touchesRight || touchesBottom || touchesTop;
+  }
+
+  function addApproximateSpaceBoundaries(spaceRecords, elementIdByMesh) {
+    let count = 0;
+
+    function addBoundary(spaceId, elementId, boundaryType = '.INTERNAL.') {
+      if (!elementId) return;
+      lines.push(`${nextId()}=IFCRELSPACEBOUNDARY('${ifcGuid()}',${ownerHistory},$,$,${spaceId},${elementId},$,.PHYSICAL.,${boundaryType});`);
+      count++;
+    }
+
+    for (const space of spaceRecords) {
+      const seen = new Set();
+
+      const addForMesh = (mesh, boundaryType = '.INTERNAL.') => {
+        const elementId = elementIdByMesh.get(mesh);
+        if (!elementId || seen.has(elementId)) return;
+        seen.add(elementId);
+        addBoundary(space.id, elementId, boundaryType);
+      };
+
+      for (const rect of space.rects || []) {
+        for (const mesh of meshes) {
+          if (mesh.storeyIndex !== space.storeyIndex) continue;
+
+          const elementRect = {
+            minX: mesh.bbox.min[0],
+            maxX: mesh.bbox.max[0],
+            minZ: mesh.bbox.min[2],
+            maxZ: mesh.bbox.max[2]
+          };
+
+          if (mesh.classification === 'wall') {
+            const verticalOverlap =
+              Math.min(rect.maxY, mesh.bbox.max[1]) - Math.max(rect.minY, mesh.bbox.min[1]);
+
+            if (verticalOverlap > 0.40 && rectTouchesRectBoundary(rect, elementRect, 0.35)) {
+              addForMesh(mesh, mesh.isExternal ? '.EXTERNAL.' : '.INTERNAL.');
+            }
+          }
+
+          if (mesh.classification === 'slab') {
+            const overlap = rectIntersectionArea(rect, elementRect, 0.02);
+            const ratio = overlap / Math.max(0.0001, rectArea(rect));
+
+            if (ratio > 0.25 && Math.abs(mesh.bbox.max[1] - rect.minY) < 0.45) {
+              addForMesh(mesh, '.INTERNAL.');
+            }
+          }
+
+          if (mesh.classification === 'roof' && space.hasSlopedRoofTop) {
+            const overlap = rectIntersectionArea(rect, elementRect, 0.20);
+            const ratio = overlap / Math.max(0.0001, rectArea(rect));
+
+            if (ratio > 0.15) {
+              addForMesh(mesh, '.EXTERNAL.');
+            }
+          }
+        }
+
+        if (space.hasSlopedRoofTop) {
+          for (const roof of meshes.filter(m => m.classification === 'roof')) {
+            const roofRect = {
+              minX: roof.bbox.min[0],
+              maxX: roof.bbox.max[0],
+              minZ: roof.bbox.min[2],
+              maxZ: roof.bbox.max[2]
+            };
+
+            const overlap = rectIntersectionArea(rect, roofRect, 0.20);
+            const ratio = overlap / Math.max(0.0001, rectArea(rect));
+
+            if (ratio > 0.15) {
+              addForMesh(roof, '.EXTERNAL.');
+            }
+          }
+        }
+      }
+    }
+
+    return count;
+  }
+
   // Build elements grouped by storey
   const elementsByStorey = Array.from({ length: storeys.length }, () => []);
-  const stats = { wall: 0, slab: 0, beam: 0, column: 0, stair: 0, roof: 0, door: 0, window: 0, proxy: 0, externalWall: 0 };
+  const stats = {
+    wall: 0,
+    slab: 0,
+    beam: 0,
+    column: 0,
+    stair: 0,
+    roof: 0,
+    door: 0,
+    window: 0,
+    proxy: 0,
+    externalWall: 0,
+    fallbackColors: 0,
+    quantities: 0,
+    materials: 0,
+    layers: 0,
+    spaces: 0,
+    zones: 0,
+    roomPrototypeSpaces: 0,
+    slopedRoofSpaces: 0,
+    beamGuidedRoofSpaces: 0,
+    spaceBoundaries: 0,
+    openRoomCellMerge: true,
+    wallSnapping: true,
+    wallClamp: true,
+    strongWallClamp: true,
+    tinySpacesFiltered: true,
+    inputScaleApplied: Boolean(scaleInfo?.applied),
+    inputScale: Number(scaleInfo?.scale || 1),
+    assumedInputUnit: scaleInfo?.assumedInputUnit || 'metre',
+    outputUnit: scaleInfo?.outputUnit || 'metre',
+    scaleReason: scaleInfo?.reason || '',
+    originalMaxDimension: Number(scaleInfo?.originalMaxDimension || 0),
+    normalizedMaxDimension: Number(scaleInfo?.normalizedMaxDimension || 0)
+  };
 
   const nameCounters = { wall: 0, slab: 0, beam: 0, column: 0, stair: 0, roof: 0, door: 0, window: 0, proxy: 0 };
   const nameLabels = {
@@ -1599,6 +3838,53 @@ function generateIFC(meshes, storeys, originalFilename) {
 
     nameCounters[key] += 1;
     return `${nameLabels[key]} ${String(nameCounters[key]).padStart(3, '0')}`;
+  }
+
+  const spaceEntitiesByStorey = Array.from({ length: storeys.length }, () => []);
+  const zoneEntitiesByStorey = Array.from({ length: storeys.length }, () => []);
+  const allSpaceRecords = [];
+  const elementIdByMesh = new Map();
+
+  for (let i = 0; i < storeys.length; i++) {
+    const spaces = createSlabDrivenSpacesForStorey(i);
+    if (spaces.length === 0) continue;
+
+    const ids = spaces.map(space => space.id);
+
+    allSpaceRecords.push(...spaces);
+    spaceEntitiesByStorey[i].push(...ids);
+    stats.spaces += spaces.length;
+    stats.roomPrototypeSpaces += spaces.filter(space => space.roomPrototype).length;
+    stats.slopedRoofSpaces += spaces.filter(space => space.hasSlopedRoofTop).length;
+    stats.beamGuidedRoofSpaces += spaces.filter(space => space.roofTopSource === 'beam').length;
+
+    for (const space of spaces) {
+      if (space.hasQuantities) stats.quantities++;
+    }
+
+    const byCategory = new Map();
+    for (const space of spaces) {
+      const key = space.category.key;
+      if (!byCategory.has(key)) {
+        byCategory.set(key, {
+          category: space.category,
+          ids: [],
+          area: 0
+        });
+      }
+
+      const group = byCategory.get(key);
+      group.ids.push(space.id);
+      group.area += space.area;
+    }
+
+    for (const group of byCategory.values()) {
+      const zone = createZoneForStorey(i, group.ids, group.area, group.category);
+      if (zone) {
+        zoneEntitiesByStorey[i].push(zone);
+        stats.zones++;
+      }
+    }
   }
 
   for (const mesh of meshes) {
@@ -1625,14 +3911,21 @@ function generateIFC(meshes, storeys, originalFilename) {
     const faceSet = nextId();
     lines.push(`${faceSet}=IFCTRIANGULATEDFACESET(${pointList},$,$,(${faces.join(',')}),$);`);
 
-    // Apply color via IfcStyledItem
-    const style = getOrCreateStyle(mesh.color);
+    // Apply color via IfcStyledItem. Keep source GLB colors when they look
+    // meaningful; otherwise apply a readable fallback color by IFC class so
+    // unstyled models do not appear completely white in IFC viewers.
+    const displayColor = colorForMesh(mesh);
+    if (mesh.usedFallbackColor) stats.fallbackColors++;
+
+    const style = getOrCreateStyle(displayColor);
     if (style) {
       lines.push(`${nextId()}=IFCSTYLEDITEM(${faceSet},(${style.presStyle}),$);`);
     }
 
     const shapeRep = nextId();
     lines.push(`${shapeRep}=IFCSHAPEREPRESENTATION(${styleContext},'Body','Tessellation',(${faceSet}));`);
+    queuePresentationLayer(mesh, shapeRep);
+
     const productShape = nextId();
     lines.push(`${productShape}=IFCPRODUCTDEFINITIONSHAPE($,$,(${shapeRep}));`);
 
@@ -1641,6 +3934,7 @@ function generateIFC(meshes, storeys, originalFilename) {
     lines.push(`${placement}=IFCLOCALPLACEMENT(${storeyPlacement},${axis});`);
 
     const elemId = nextId();
+    elementIdByMesh.set(mesh, elemId);
     const safeName = escapeIFCString(generatedElementName(mesh));
 
     // IfcDoor (13 attrs in IFC4): GlobalId, Owner, Name, Desc, ObjType, Placement,
@@ -1674,6 +3968,11 @@ function generateIFC(meshes, storeys, originalFilename) {
       }
     }
 
+    if (approximateElementQuantities(mesh, elemId)) {
+      stats.quantities++;
+    }
+
+    queueMaterialAssociation(mesh, elemId);
     queueUniformatAssociation(mesh, elemId);
     elementsByStorey[mesh.storeyIndex].push(elemId);
   }
@@ -1684,6 +3983,24 @@ function generateIFC(meshes, storeys, originalFilename) {
     if (elems.length === 0) continue;
     lines.push(`${nextId()}=IFCRELCONTAINEDINSPATIALSTRUCTURE('${ifcGuid()}',${ownerHistory},$,$,(${elems.join(',')}),${storeyEntities[i]});`);
   }
+
+  // Spaces are spatial elements, so relate them to their storey through
+  // IfcRelAggregates rather than element containment.
+  for (let i = 0; i < storeys.length; i++) {
+    const spaces = spaceEntitiesByStorey[i];
+    if (spaces.length === 0) continue;
+    lines.push(`${nextId()}=IFCRELAGGREGATES('${ifcGuid()}',${ownerHistory},$,$,${storeyEntities[i]},(${spaces.join(',')}));`);
+  }
+
+  stats.spaceBoundaries = addApproximateSpaceBoundaries(allSpaceRecords, elementIdByMesh);
+
+  const layerCounts = addPresentationLayerAssignments();
+  stats.layers = Object.keys(layerCounts).length;
+  stats.layerNames = layerCounts;
+
+  const materialCounts = addMaterialAssociations();
+  stats.materials = Object.keys(materialCounts).length;
+  stats.materialNames = materialCounts;
 
   const uniformatCounts = addUniformatAssociations();
   stats.uniformat = uniformatCounts;
@@ -1713,6 +4030,14 @@ app.post('/api/convert', upload.single('glb'), async (req, res) => {
     const meshes = await extractMeshesFromGLB(glbPath);
     console.log(`  Extracted ${meshes.length} meshes`);
     if (meshes.length === 0) throw new Error('No meshes found in GLB file');
+
+    const scaleInfo = normalizeMeshUnits(meshes);
+    if (scaleInfo.applied) {
+      console.log(`  Input scale normalization: ${scaleInfo.assumedInputUnit} → metre (x${scaleInfo.scale})`);
+      console.log(`  Scale reason: ${scaleInfo.reason}`);
+    } else {
+      console.log(`  Input scale normalization: none (${scaleInfo.reason})`);
+    }
 
     for (const mesh of meshes) mesh.classification = classifyMeshFirstPass(mesh);
 
@@ -1748,9 +4073,44 @@ app.post('/api/convert', upload.single('glb'), async (req, res) => {
     const externalWalls = meshes.filter(m => m.classification === 'wall' && m.isExternal).length;
     console.log(`  Detected ${externalWalls} external wall(s)`);
 
-    const { content, stats, storeyCount } = generateIFC(meshes, storeys, originalName);
+    const { content, stats, storeyCount } = generateIFC(meshes, storeys, originalName, scaleInfo);
     console.log(`  Classified: ${stats.wall} walls, ${stats.slab} slabs, ${stats.beam} beams, ${stats.column} columns, ${stats.stair} stairs, ${stats.roof} roofs, ${stats.door} doors, ${stats.window} windows, ${stats.proxy} proxies`);
+    if (stats.inputScaleApplied) {
+      console.log(`  IFC unit normalization: ${stats.assumedInputUnit} → ${stats.outputUnit}, x${stats.inputScale}`);
+      console.log(`  Max dimension: ${stats.originalMaxDimension.toFixed(2)} → ${stats.normalizedMaxDimension.toFixed(2)} m`);
+    }
     console.log(`  Pset_WallCommon IsExternal=true on ${stats.externalWall || 0} wall(s)`);
+    if (stats.quantities != null) {
+      console.log(`  IFC quantity sets: ${stats.quantities || 0}`);
+    }
+    console.log(`  IFC materials: ${stats.materials || 0}`);
+    console.log(`  IFC spaces: ${stats.spaces || 0}`);
+    console.log(`  IFC zones: ${stats.zones || 0}`);
+    console.log(`  Room prototype spaces: ${stats.roomPrototypeSpaces || 0}`);
+    console.log(`  Sloped roof spaces: ${stats.slopedRoofSpaces || 0}`);
+    console.log(`  Beam-guided roof spaces: ${stats.beamGuidedRoofSpaces || 0}`);
+    console.log(`  IfcRelSpaceBoundary: ${stats.spaceBoundaries || 0}`);
+    console.log(`  Open room-cell merge: enabled`);
+    console.log(`  Space wall snapping: enabled`);
+    console.log(`  Space wall clamp: enabled`);
+    console.log(`  Strong wall clamp: enabled`);
+    console.log(`  Tiny space filter: enabled`);
+    console.log(`  IFC presentation layers: ${stats.layers || 0}`);
+    if (stats.layers > 0 && stats.layerNames) {
+      const layerPreview = Object.entries(stats.layerNames)
+        .map(([name, count]) => `${name}: ${count}`)
+        .join(', ');
+      console.log(`  Presentation layers: ${layerPreview}`);
+    }
+    if (stats.materials > 0 && stats.materialNames) {
+      const materialPreview = Object.entries(stats.materialNames)
+        .slice(0, 8)
+        .map(([name, count]) => `${name}: ${count}`)
+        .join(', ');
+      console.log(`  Material associations: ${materialPreview}${Object.keys(stats.materialNames).length > 8 ? '...' : ''}`);
+    }
+    console.log(`  IFC quantity sets: ${stats.quantities || 0}`);
+    console.log(`  Applied fallback colors on ${stats.fallbackColors || 0} element(s)`);
     if (stats.uniformatCodes > 0) {
       const uniformatPreview = Object.entries(stats.uniformat)
         .map(([code, info]) => `${code} ${info.name}: ${info.count}`)
