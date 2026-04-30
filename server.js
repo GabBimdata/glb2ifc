@@ -7,6 +7,8 @@ import { NodeIO } from '@gltf-transform/core';
 import { ALL_EXTENSIONS } from '@gltf-transform/extensions';
 import draco3d from 'draco3dgltf';
 import { createServer as createViteServer } from 'vite';
+import { applyReclassifications, IFC_TYPES, reclassifiableTypeNames } from './src/ifc-patcher.js';
+import { IFC_CATEGORIES } from './src/ifc-catalog.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -46,6 +48,11 @@ async function createGLTFReader() {
   const p = path.join(__dirname, dir);
   if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
 });
+
+
+// Allow large IFC payloads for the /api/reexport endpoint
+app.use(express.json({ limit: '200mb' }));
+app.use(express.urlencoded({ limit: '200mb', extended: true }));
 
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -4131,6 +4138,42 @@ app.post('/api/convert', upload.single('glb'), async (req, res) => {
   } finally {
     fs.unlink(glbPath, () => {});
   }
+});
+
+app.post('/api/reexport', async (req, res) => {
+  const { ifcText, edits, fileName } = req.body || {};
+
+  if (!ifcText || typeof ifcText !== 'string') {
+    return res.status(400).json({ error: 'Missing ifcText' });
+  }
+  if (!Array.isArray(edits)) {
+    return res.status(400).json({ error: 'Missing or invalid edits array' });
+  }
+
+  try {
+    console.log(`[${new Date().toISOString()}] Reexport with ${edits.length} edit(s)`);
+    const result = applyReclassifications(ifcText, edits);
+    console.log(`  Applied ${result.applied}/${edits.length} edit(s)`);
+    if (result.errors.length > 0) {
+      console.log(`  Errors:`, result.errors);
+    }
+
+    const outputName = (fileName || 'edited.ifc').replace(/\.ifc$/i, '') + '.edited.ifc';
+
+    res.setHeader('Content-Type', 'application/x-step');
+    res.setHeader('Content-Disposition', `attachment; filename="${outputName}"`);
+    res.setHeader('X-Edits-Applied', String(result.applied));
+    res.setHeader('X-Edits-Errors', String(result.errors.length));
+    res.send(result.ifcText);
+
+  } catch (err) {
+    console.error('Reexport error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/reclassifiable-types', (req, res) => {
+  res.json({ types: reclassifiableTypeNames() });
 });
 
 app.listen(PORT, () => {
