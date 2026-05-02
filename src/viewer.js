@@ -2409,24 +2409,145 @@ function renderReclassifyBlock(localId) {
         <span class="arrow">▾</span>
       </button>
       <div class="original">Type d'origine : ${escapeHtml(prettyIfcType(original))}</div>
+      <div class="qwen-suggest-row">
+        <button type="button" class="qwen-suggest-button" id="qwen-suggest-trigger" data-local-id="${localId}">✨ Suggérer avec Qwen</button>
+      </div>
+      <div class="qwen-suggestions" id="qwen-suggestions"></div>
     </div>
   `;
 }
 
+function qwenReasonLabel(code) {
+  const labels = {
+    name_hint_wall: 'nom lié à un mur',
+    name_hint_door: 'nom lié à une porte',
+    name_hint_window_or_glass: 'nom lié à une fenêtre / vitrage',
+    name_hint_slab: 'nom lié à une dalle / plancher',
+    name_hint_roof: 'nom lié à une toiture',
+    name_hint_beam: 'nom lié à une poutre',
+    name_hint_column: 'nom lié à un poteau',
+    name_hint_stair: 'nom lié à un escalier',
+    thin_vertical_bbox: 'bbox verticale et mince',
+    flat_horizontal_bbox: 'bbox horizontale et plate',
+    vertical_faces_high: 'faces verticales dominantes',
+    horizontal_faces_high: 'faces horizontales dominantes',
+    inclined_faces_present: 'faces inclinées présentes',
+    semantic_rerank_match: 'match sémantique Qwen',
+  };
+  return labels[code] || code;
+}
+
+function renderQwenSuggestionCards(localId, data) {
+  const container = document.getElementById('qwen-suggestions');
+  if (!container) return;
+
+  const suggestions = Array.isArray(data?.suggestions) ? data.suggestions : [];
+  if (!suggestions.length) {
+    container.innerHTML = '<div class="qwen-note">Aucune suggestion exploitable.</div>';
+    return;
+  }
+
+  const note = data.llmAvailable
+    ? `<div class="qwen-note">Qwen actif · ${escapeHtml(String(data.candidateCount || suggestions.length))} candidat(s) scoré(s).</div>`
+    : `<div class="qwen-note">Qwen indisponible : fallback heuristique local.${data.qwenError ? `<br><span class="qwen-error">${escapeHtml(data.qwenError)}</span>` : ''}</div>`;
+
+  container.innerHTML = note + suggestions.map((suggestion, index) => {
+    const pct = Math.round(Number(suggestion.score || 0) * 100);
+    const reasons = (suggestion.reasonCodes || []).map(qwenReasonLabel).join(' · ');
+    return `
+      <div class="qwen-card">
+        <div class="qwen-card-header">
+          <span class="qwen-type">${index + 1}. ${escapeHtml(suggestion.type)}</span>
+          <span class="qwen-score">${pct}%</span>
+        </div>
+        <div class="qwen-reasons">${escapeHtml(suggestion.label || '')}${reasons ? ` · ${escapeHtml(reasons)}` : ''}</div>
+        <button type="button" class="qwen-apply" data-local-id="${localId}" data-type="${escapeHtml(suggestion.type)}">Appliquer ${escapeHtml(suggestion.type)}</button>
+      </div>
+    `;
+  }).join('');
+
+  container.querySelectorAll('.qwen-apply').forEach((button) => {
+    button.addEventListener('click', () => {
+      const id = Number(button.dataset.localId);
+      const type = button.dataset.type;
+      if (type) applyTypeChange(id, type);
+    });
+  });
+}
+
+async function requestQwenSuggestions(localId, button) {
+  if (!state.lastIfcText) {
+    setStatus('Charge un IFC avant de demander une suggestion Qwen.', 'error');
+    return;
+  }
+
+  const container = document.getElementById('qwen-suggestions');
+  if (container) container.innerHTML = '<div class="qwen-note">Analyse Qwen en cours…</div>';
+  if (button) {
+    button.disabled = true;
+    button.classList.add('loading');
+    button.textContent = 'Analyse Qwen…';
+  }
+
+  try {
+    const response = await fetch('/api/qwen-suggest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ifcText: state.lastIfcText,
+        localId,
+        currentType: currentTypeForEntity(localId),
+        maxSuggestions: 3,
+        maxCandidates: 80,
+      }),
+    });
+
+    const data = await response.json().catch(() => null);
+    if (!response.ok) throw new Error(data?.error || 'Erreur Qwen');
+
+    renderQwenSuggestionCards(localId, data);
+    setStatus(data.llmAvailable
+      ? `Suggestions Qwen prêtes pour #${localId}.`
+      : `Qwen indisponible : suggestions heuristiques affichées pour #${localId}.`, data.llmAvailable ? 'ok' : '');
+  } catch (error) {
+    console.error(error);
+    if (container) container.innerHTML = `<div class="qwen-error">${escapeHtml(error.message || error)}</div>`;
+    setStatus(`Erreur suggestion Qwen : ${error.message || error}`, 'error');
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.classList.remove('loading');
+      button.textContent = '✨ Suggérer avec Qwen';
+    }
+  }
+}
+
+function attachQwenSuggestionHandler() {
+  const btn = document.getElementById('qwen-suggest-trigger');
+  if (!btn) return;
+  btn.addEventListener('click', () => {
+    const localId = Number(btn.dataset.localId);
+    requestQwenSuggestions(localId, btn);
+  });
+}
+
 function attachReclassifyHandler() {
   const btn = document.getElementById('reclassify-trigger');
-  if (!btn) return;
-  btn.addEventListener('click', async () => {
-    const localId = Number(btn.dataset.localId);
-    const current = currentTypeForEntity(localId);
-    const newType = await openTypePicker({
-      anchor: btn,
-      currentType: current,
-      catalog: state.ifcCatalog,
+  if (btn) {
+    btn.addEventListener('click', async () => {
+      const localId = Number(btn.dataset.localId);
+      const current = currentTypeForEntity(localId);
+      const newType = await openTypePicker({
+        anchor: btn,
+        currentType: current,
+        catalog: state.ifcCatalog,
+      });
+      if (!newType) return;
+      applyTypeChange(localId, newType);
     });
-    if (!newType) return;
-    applyTypeChange(localId, newType);
-  });
+  }
+
+  attachQwenSuggestionHandler();
 }
 
 function applyTypeChange(localId, newType) {

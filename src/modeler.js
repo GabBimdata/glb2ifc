@@ -337,26 +337,87 @@ function createGLTFLoader() {
 
 function indexMeshes(root) {
   state.meshes = [];
-  let index = 1;
+  const editableObjects = [];
 
   root.traverse((object) => {
     if (!object.isMesh && !object.isInstancedMesh) return;
+    editableObjects.push(object);
+  });
 
+  // Some GLB exporters reuse the same BufferGeometry for several nodes. We clone
+  // shared geometries before normalising pivots, otherwise moving one origin would
+  // silently move vertices used by another mesh.
+  const geometryUseCount = new Map();
+  for (const object of editableObjects) {
+    if (!object.geometry) continue;
+    geometryUseCount.set(object.geometry, (geometryUseCount.get(object.geometry) || 0) + 1);
+  }
+
+  let index = 1;
+
+  for (const object of editableObjects) {
     object.name = object.name || object.parent?.name || `Mesh_${index}`;
     object.userData.__modelerId = index++;
+
+    if (object.geometry) {
+      if (!object.isInstancedMesh && geometryUseCount.get(object.geometry) > 1) {
+        object.geometry = object.geometry.clone();
+      }
+
+      normalizeEditablePivotToGeometryCenter(object);
+      object.geometry.computeBoundingBox();
+      object.geometry.computeBoundingSphere();
+    }
+
+    // Store the reset transform after pivot normalisation. Visually the mesh is
+    // still in the same place, but its local origin is now useful for editing.
     object.userData.__originalTransform = {
       position: object.position.clone(),
       quaternion: object.quaternion.clone(),
       scale: object.scale.clone(),
     };
 
-    if (object.geometry) {
-      object.geometry.computeBoundingBox();
-      object.geometry.computeBoundingSphere();
-    }
-
     state.meshes.push(object);
-  });
+  }
+}
+
+function normalizeEditablePivotToGeometryCenter(object) {
+  if (!object?.isMesh || object.isInstancedMesh || !object.geometry) return;
+
+  const geometry = object.geometry;
+  const position = geometry.getAttribute("position");
+  if (!position || position.count === 0) return;
+
+  geometry.computeBoundingBox();
+  const box = geometry.boundingBox;
+  if (!box || box.isEmpty()) return;
+
+  const localCenter = new THREE.Vector3();
+  box.getCenter(localCenter);
+
+  if (localCenter.lengthSq() < 1e-18) {
+    object.userData.__pivotNormalized = false;
+    return;
+  }
+
+  // Re-center vertices around the local origin, then compensate the object local
+  // transform so the mesh does not visually move. TransformControls attaches to
+  // object.position, so this puts the gizmo at the geometry/bbox centre instead
+  // of at an arbitrary exporter origin.
+  geometry.translate(-localCenter.x, -localCenter.y, -localCenter.z);
+  geometry.computeBoundingBox();
+  geometry.computeBoundingSphere();
+
+  object.updateMatrix();
+  const compensatedLocalMatrix = object.matrix.clone().multiply(
+    new THREE.Matrix4().makeTranslation(localCenter.x, localCenter.y, localCenter.z)
+  );
+  compensatedLocalMatrix.decompose(object.position, object.quaternion, object.scale);
+  object.updateMatrix();
+  object.updateMatrixWorld(true);
+
+  object.userData.__pivotNormalized = true;
+  object.userData.__pivotOffset = localCenter.toArray();
 }
 
 function clearScene(options = {}) {

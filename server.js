@@ -3,15 +3,43 @@ import multer from 'multer';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
+import { spawn } from 'child_process';
 import { NodeIO } from '@gltf-transform/core';
 import { ALL_EXTENSIONS } from '@gltf-transform/extensions';
 import draco3d from 'draco3dgltf';
 import { createServer as createViteServer } from 'vite';
 import { applyReclassifications, IFC_TYPES, reclassifiableTypeNames } from './src/ifc-patcher.js';
 import { IFC_CATEGORIES } from './src/ifc-catalog.js';
+import { candidateDocumentForIfcType } from './src/ifc-classification-kb.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+function loadLocalEnvFiles() {
+  for (const filename of ['.env', '.env.local']) {
+    const envPath = path.join(__dirname, filename);
+    if (!fs.existsSync(envPath)) continue;
+
+    const lines = fs.readFileSync(envPath, 'utf8').split(/\r?\n/);
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+
+      const match = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+      if (!match) continue;
+
+      const key = match[1];
+      let value = match[2].trim();
+      if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+        value = value.slice(1, -1);
+      }
+
+      if (!(key in process.env)) process.env[key] = value;
+    }
+  }
+}
+
+loadLocalEnvFiles();
 
 const app = express();
 const PORT = 3737;
@@ -1706,21 +1734,27 @@ const IFC_TYPE_MAP = {
 };
 
 
-// Default visual colors used only when the source GLB does not provide a
-// usable color signal. Important rule: if the file explicitly contains a white
-// material/color, keep it white and do not force a fallback class color.
+// Default visual colors used when the source GLB has no meaningful color
+// signal. Many GLBs contain a generic white material on every mesh; treating
+// that as an intentional source color makes the IFC look all-white. By default
+// we now preserve real/non-neutral GLB colors and fallback to IFC class colors
+// for default-looking white/black/grey materials.
 // Values are normalized RGB in the 0..1 range for IfcColourRgb.
 const DEFAULT_CLASS_COLORS = {
-  wall:   { r: 0.78, g: 0.78, b: 0.74 }, // warm light concrete / plaster
-  slab:   { r: 0.62, g: 0.62, b: 0.58 }, // medium concrete
-  beam:   { r: 0.55, g: 0.45, b: 0.35 }, // structural timber/steel neutral
-  column: { r: 0.50, g: 0.50, b: 0.48 }, // structural grey
-  stair:  { r: 0.60, g: 0.60, b: 0.56 }, // stair grey
-  roof:   { r: 0.55, g: 0.18, b: 0.14 }, // roof red/brown
+  wall:   { r: 0.76, g: 0.70, b: 0.58 }, // warm plaster / masonry
+  slab:   { r: 0.58, g: 0.62, b: 0.66 }, // concrete blue-grey
+  beam:   { r: 0.54, g: 0.44, b: 0.32 }, // structural timber/steel neutral
+  column: { r: 0.55, g: 0.50, b: 0.62 }, // structural violet-grey
+  stair:  { r: 0.74, g: 0.66, b: 0.50 }, // stair sand-grey
+  roof:   { r: 0.58, g: 0.17, b: 0.12 }, // roof red/brown
   door:   { r: 0.45, g: 0.25, b: 0.12 }, // wood/brown
-  window: { r: 0.35, g: 0.60, b: 0.85 }, // glass blue
-  proxy:  { r: 0.80, g: 0.80, b: 0.80 }  // neutral fallback
+  window: { r: 0.35, g: 0.62, b: 0.88 }, // glass blue
+  proxy:  { r: 0.68, g: 0.72, b: 0.78 }  // neutral blue-grey fallback
 };
+
+const PRESERVE_DEFAULT_SOURCE_COLORS = /^(1|true|yes|on)$/i.test(
+  String(process.env.GLB2IFC_PRESERVE_DEFAULT_COLORS || '')
+);
 
 function isDefaultMaterialName(name) {
   const n = String(name || '').trim().toLowerCase();
@@ -1753,21 +1787,15 @@ function colorLooksDefault(color) {
 function sourceColorIsUseful(mesh) {
   if (!mesh || !mesh.color) return false;
 
-  const r = Number(mesh.color.r);
-  const g = Number(mesh.color.g);
-  const b = Number(mesh.color.b);
-
-  const almostWhite = [r, g, b].every(Number.isFinite) && r > 0.94 && g > 0.94 && b > 0.94;
-
-  // If the source file explicitly contains a material and that material is
-  // white, preserve the white color instead of replacing it with a fallback.
-  if (mesh.hasSourceMaterial && almostWhite) return true;
-
   // Keep meaningful non-default colors from the GLB.
   if (!colorLooksDefault(mesh.color)) return true;
 
-  // For other near-default colors, keep them only when there is a real source
-  // material and its name does not look like a generic default placeholder.
+  // Default-looking white/black/grey materials are usually placeholders in
+  // imported GLBs. Use the IFC class palette by default. If a project really
+  // wants to preserve those neutral source colors, opt in with:
+  // GLB2IFC_PRESERVE_DEFAULT_COLORS=1 bun dev
+  if (!PRESERVE_DEFAULT_SOURCE_COLORS) return false;
+
   return Boolean(mesh.hasSourceMaterial) && !isDefaultMaterialName(mesh.materialName);
 }
 
@@ -4035,6 +4063,936 @@ function generateIFC(meshes, storeys, originalFilename, scaleInfo = null) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Qwen / llama.cpp IFC classification assistant
+// ─────────────────────────────────────────────────────────────────────────────
+
+function executableExists(filePath) {
+  if (!filePath) return false;
+  try {
+    fs.accessSync(filePath, fs.constants.X_OK);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function findExecutableInPath(name) {
+  const pathEntries = String(process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  for (const entry of pathEntries) {
+    const candidate = path.join(entry, name);
+    if (executableExists(candidate)) return candidate;
+  }
+  return null;
+}
+
+function resolveLlamaServerBin() {
+  if (process.env.QWEN_LLAMA_SERVER_BIN) {
+    return path.resolve(__dirname, process.env.QWEN_LLAMA_SERVER_BIN);
+  }
+
+  const candidates = [
+    path.join(__dirname, '.tools', 'llama.cpp', 'build', 'bin', 'llama-server'),
+    path.join(__dirname, 'tools', 'llama.cpp', 'build', 'bin', 'llama-server'),
+    path.resolve(__dirname, '..', 'llama.cpp', 'build', 'bin', 'llama-server'),
+    path.resolve(__dirname, '..', 'llama.cpp', 'build', 'bin', 'Release', 'llama-server'),
+    findExecutableInPath('llama-server'),
+  ].filter(Boolean);
+
+  return candidates.find(executableExists) || 'llama-server';
+}
+
+function resolveQwenModelPath() {
+  if (process.env.QWEN_MODEL_PATH) {
+    return path.resolve(__dirname, process.env.QWEN_MODEL_PATH);
+  }
+
+  const modelsDir = path.join(__dirname, 'models');
+  const defaultModelPath = path.join(modelsDir, 'Qwen3-Reranker-0.6B-Q4_K_M.gguf');
+  if (fs.existsSync(defaultModelPath)) return defaultModelPath;
+
+  if (!fs.existsSync(modelsDir)) return defaultModelPath;
+
+  const files = fs.readdirSync(modelsDir)
+    .filter((name) => name.toLowerCase().endsWith('.gguf'))
+    .map((name) => path.join(modelsDir, name));
+
+  const exactLower = files.find((file) => path.basename(file).toLowerCase() === 'qwen3-reranker-0.6b-q4_k_m.gguf');
+  if (exactLower) return exactLower;
+
+  const preferred = files.find((file) => /qwen3.*reranker.*0[._-]?6b.*q4.*k.*m.*\.gguf$/i.test(path.basename(file)));
+  if (preferred) return preferred;
+
+  const anyQwenReranker = files.find((file) => /qwen3.*reranker.*\.gguf$/i.test(path.basename(file)));
+  if (anyQwenReranker) return anyQwenReranker;
+
+  return files.length === 1 ? files[0] : defaultModelPath;
+}
+
+const QWEN_LLAMA_HOST = process.env.QWEN_LLAMA_HOST || '127.0.0.1';
+const QWEN_LLAMA_PORT = Number(process.env.QWEN_LLAMA_PORT || 8081);
+const QWEN_LLAMA_BASE_URL = process.env.QWEN_LLAMA_BASE_URL || `http://${QWEN_LLAMA_HOST}:${QWEN_LLAMA_PORT}`;
+
+const DEFAULT_QWEN_RERANKER_URLS = [
+  `${QWEN_LLAMA_BASE_URL}/v1/rerank`,
+  `${QWEN_LLAMA_BASE_URL}/rerank`,
+  `${QWEN_LLAMA_BASE_URL}/v1/reranking`,
+  `${QWEN_LLAMA_BASE_URL}/reranking`,
+];
+
+const QWEN_RERANK_TIMEOUT_MS = Number(process.env.QWEN_RERANK_TIMEOUT_MS || 120000);
+const QWEN_STARTUP_TIMEOUT_MS = Number(process.env.QWEN_STARTUP_TIMEOUT_MS || 120000);
+const QWEN_RERANKER_URL = process.env.QWEN_RERANKER_URL || '';
+const QWEN_AUTO_START = !['0', 'false', 'off', 'no'].includes(String(process.env.QWEN_AUTO_START ?? '1').toLowerCase());
+const QWEN_LLAMA_SERVER_BIN = resolveLlamaServerBin();
+const QWEN_MODEL_PATH = resolveQwenModelPath();
+const QWEN_LLAMA_CONTEXT = Number(process.env.QWEN_LLAMA_CONTEXT || 4096);
+// llama.cpp rerank pairs include the shared query plus each candidate document.
+// The default physical batch size can be 512 on some builds, which is too
+// small once geometry/context is included. 1024 keeps the setup light while
+// avoiding "input tokens too large; increase physical batch size" errors.
+const QWEN_LLAMA_BATCH = Number(process.env.QWEN_LLAMA_BATCH || process.env.QWEN_BATCH_SIZE || 1024);
+const QWEN_LLAMA_UBATCH = Number(process.env.QWEN_LLAMA_UBATCH || process.env.QWEN_UBATCH_SIZE || 0);
+const QWEN_LLAMA_THREADS = process.env.QWEN_LLAMA_THREADS || '';
+const QWEN_GPU_LAYERS_RAW = process.env.QWEN_GPU_LAYERS || process.env.QWEN_LLAMA_GPU_LAYERS || '';
+const QWEN_ALLOW_PROXY_TARGET = ['1', 'true', 'on', 'yes'].includes(String(process.env.QWEN_ALLOW_PROXY_TARGET || '').toLowerCase());
+const QWEN_EXCLUDED_TARGET_TYPES = new Set(QWEN_ALLOW_PROXY_TARGET ? [] : ['IFCBUILDINGELEMENTPROXY']);
+const QWEN_GPU_LAYERS = String(QWEN_GPU_LAYERS_RAW).toLowerCase() === 'auto' ? '99' : String(QWEN_GPU_LAYERS_RAW || '');
+
+
+let qwenProcess = null;
+let qwenShutdownHandlersAttached = false;
+const qwenState = {
+  mode: QWEN_RERANKER_URL ? 'external' : 'managed',
+  status: QWEN_RERANKER_URL ? 'external' : 'not_started',
+  modelPath: QWEN_MODEL_PATH,
+  baseUrl: QWEN_LLAMA_BASE_URL,
+  pid: null,
+  startedAt: null,
+  lastError: null,
+  lastLog: '',
+};
+
+function appendQwenLog(chunk) {
+  const text = String(chunk || '').trim();
+  if (!text) return;
+  qwenState.lastLog = `${qwenState.lastLog}
+${text}`.slice(-4000);
+  if (/listening|server is listening|http server|reranking/i.test(text)) {
+    qwenState.status = 'ready';
+  }
+}
+
+function qwenRuntimeStatus() {
+  return {
+    autoStart: QWEN_AUTO_START,
+    mode: qwenState.mode,
+    status: qwenState.status,
+    baseUrl: qwenState.baseUrl,
+    modelPath: qwenState.modelPath,
+    llamaServerBin: QWEN_LLAMA_SERVER_BIN,
+    gpuLayers: QWEN_GPU_LAYERS || null,
+    batchSize: Number.isFinite(QWEN_LLAMA_BATCH) && QWEN_LLAMA_BATCH > 0 ? QWEN_LLAMA_BATCH : null,
+    microBatchSize: Number.isFinite(QWEN_LLAMA_UBATCH) && QWEN_LLAMA_UBATCH > 0 ? QWEN_LLAMA_UBATCH : null,
+    rerankTimeoutMs: QWEN_RERANK_TIMEOUT_MS,
+    startupTimeoutMs: QWEN_STARTUP_TIMEOUT_MS,
+    pid: qwenState.pid,
+    startedAt: qwenState.startedAt,
+    lastError: qwenState.lastError,
+    lastLog: qwenState.lastLog.slice(-1200),
+    externalUrl: QWEN_RERANKER_URL || null,
+  };
+}
+
+function attachQwenShutdownHandlers() {
+  if (qwenShutdownHandlersAttached) return;
+  qwenShutdownHandlersAttached = true;
+
+  const stop = () => {
+    if (qwenProcess && !qwenProcess.killed) {
+      try { qwenProcess.kill('SIGTERM'); } catch (_) { /* noop */ }
+    }
+  };
+
+  process.once('SIGINT', () => {
+    stop();
+    process.exit(130);
+  });
+  process.once('SIGTERM', () => {
+    stop();
+    process.exit(143);
+  });
+  process.once('exit', stop);
+}
+
+function startManagedQwenServer() {
+  if (QWEN_RERANKER_URL) {
+    qwenState.mode = 'external';
+    qwenState.status = 'external';
+    qwenState.baseUrl = QWEN_RERANKER_URL;
+    return qwenState;
+  }
+
+  if (!QWEN_AUTO_START) {
+    qwenState.mode = 'disabled';
+    qwenState.status = 'disabled';
+    return qwenState;
+  }
+
+  if (qwenProcess) return qwenState;
+
+  if (!fs.existsSync(QWEN_MODEL_PATH)) {
+    qwenState.status = 'missing_model';
+    qwenState.lastError = `Model not found: ${QWEN_MODEL_PATH}`;
+    console.warn(`\n  Qwen reranker not started: model not found`);
+    console.warn(`  Expected GGUF: ${QWEN_MODEL_PATH}`);
+    console.warn(`  Tip: any qwen3-reranker*.gguf file in ./models is now auto-detected.`);
+    console.warn(`  The viewer will keep using heuristic suggestions.\n`);
+    return qwenState;
+  }
+
+  const args = [
+    '-m', QWEN_MODEL_PATH,
+    '--reranking',
+    '--embedding',
+    '--pooling', 'rank',
+    '--ctx-size', String(QWEN_LLAMA_CONTEXT),
+    '--host', QWEN_LLAMA_HOST,
+    '--port', String(QWEN_LLAMA_PORT),
+  ];
+
+  if (Number.isFinite(QWEN_LLAMA_BATCH) && QWEN_LLAMA_BATCH > 0) {
+    args.push('--batch-size', String(QWEN_LLAMA_BATCH));
+  }
+
+  if (Number.isFinite(QWEN_LLAMA_UBATCH) && QWEN_LLAMA_UBATCH > 0) {
+    args.push('--ubatch-size', String(QWEN_LLAMA_UBATCH));
+  }
+
+  if (QWEN_LLAMA_THREADS) {
+    args.push('--threads', String(QWEN_LLAMA_THREADS));
+  }
+
+  if (QWEN_GPU_LAYERS && QWEN_GPU_LAYERS !== '0') {
+    args.push('--n-gpu-layers', QWEN_GPU_LAYERS);
+  }
+
+  console.log(`\n  Starting managed Qwen reranker`);
+  console.log(`  ─────────────────────────────`);
+  console.log(`  ${QWEN_LLAMA_SERVER_BIN} ${args.map((arg) => arg.includes(' ') ? JSON.stringify(arg) : arg).join(' ')}`);
+
+  try {
+    qwenProcess = spawn(QWEN_LLAMA_SERVER_BIN, args, {
+      cwd: __dirname,
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (error) {
+    qwenState.status = 'failed';
+    qwenState.lastError = error.message || String(error);
+    console.warn(`  Could not start llama-server: ${qwenState.lastError}`);
+    return qwenState;
+  }
+
+  qwenState.mode = 'managed';
+  qwenState.status = 'starting';
+  qwenState.pid = qwenProcess.pid;
+  qwenState.startedAt = new Date().toISOString();
+  qwenState.lastError = null;
+
+  qwenProcess.stdout.on('data', (chunk) => appendQwenLog(chunk));
+  qwenProcess.stderr.on('data', (chunk) => appendQwenLog(chunk));
+  qwenProcess.on('error', (error) => {
+    qwenState.status = 'failed';
+    qwenState.lastError = error.message || String(error);
+    console.warn(`  llama-server error: ${qwenState.lastError}`);
+    if (String(error?.code || '').toUpperCase() === 'ENOENT') {
+      console.warn(`  Tip: run "bun run qwen:setup" or set QWEN_LLAMA_SERVER_BIN in .env.local.`);
+    }
+  });
+  qwenProcess.on('exit', (code, signal) => {
+    qwenState.status = code === 0 ? 'stopped' : 'failed';
+    qwenState.lastError = code === 0 ? null : `llama-server exited with code=${code} signal=${signal || ''}`.trim();
+    qwenState.pid = null;
+    qwenProcess = null;
+    if (code !== 0) console.warn(`  ${qwenState.lastError}`);
+  });
+
+  attachQwenShutdownHandlers();
+  return qwenState;
+}
+
+function splitStepArgs(text) {
+  const args = [];
+  let current = '';
+  let depth = 0;
+  let inString = false;
+
+  for (let i = 0; i < String(text || '').length; i++) {
+    const char = text[i];
+
+    if (char === "'") {
+      current += char;
+      if (inString && text[i + 1] === "'") {
+        current += text[i + 1];
+        i++;
+      } else {
+        inString = !inString;
+      }
+      continue;
+    }
+
+    if (!inString && char === '(') {
+      depth++;
+      current += char;
+      continue;
+    }
+
+    if (!inString && char === ')') {
+      depth = Math.max(0, depth - 1);
+      current += char;
+      continue;
+    }
+
+    if (!inString && depth === 0 && char === ',') {
+      args.push(current.trim());
+      current = '';
+      continue;
+    }
+
+    current += char;
+  }
+
+  if (current.trim()) args.push(current.trim());
+  return args;
+}
+
+function parseStepString(arg) {
+  const text = String(arg || '').trim();
+  if (!text || text === '$' || text === '*') return '';
+  if (text.startsWith("'") && text.endsWith("'")) return text.slice(1, -1).replace(/''/g, "'");
+  return '';
+}
+
+function parseStepRef(arg) {
+  const match = String(arg || '').match(/#(\d+)/);
+  return match ? Number(match[1]) : null;
+}
+
+function parseStepRefs(arg) {
+  return [...String(arg || '').matchAll(/#(\d+)/g)].map((m) => Number(m[1]));
+}
+
+function normalizeText(value) {
+  return String(value || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim();
+}
+
+function clamp01(value) {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(1, value));
+}
+
+function parseIfcEntityMap(ifcText) {
+  const entities = new Map();
+  const lines = String(ifcText || '').split(/\r?\n/);
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    const match = trimmed.match(/^#(\d+)\s*=\s*([A-Z0-9_]+)\s*\(([\s\S]*)\)\s*;$/i);
+    if (!match) continue;
+    const id = Number(match[1]);
+    const type = match[2].toUpperCase();
+    const argsText = match[3];
+    const rawArgs = splitStepArgs(argsText);
+    entities.set(id, { id, type, rawArgs, raw: trimmed });
+  }
+
+  return entities;
+}
+
+function refsFromEntity(entity) {
+  if (!entity) return [];
+  return parseStepRefs(entity.rawArgs.join(','));
+}
+
+function collectReachableEntities(entities, startRefs, maxDepth = 7) {
+  const visited = new Set();
+  const queue = [];
+  for (const ref of startRefs || []) {
+    if (Number.isFinite(ref)) queue.push({ id: ref, depth: 0 });
+  }
+
+  const out = [];
+  while (queue.length > 0) {
+    const { id, depth } = queue.shift();
+    if (visited.has(id) || depth > maxDepth) continue;
+    visited.add(id);
+    const entity = entities.get(id);
+    if (!entity) continue;
+    out.push(entity);
+    for (const ref of refsFromEntity(entity)) {
+      if (!visited.has(ref)) queue.push({ id: ref, depth: depth + 1 });
+    }
+  }
+  return out;
+}
+
+function parsePointList3D(entity) {
+  if (!entity || entity.type !== 'IFCCARTESIANPOINTLIST3D') return [];
+  const numbers = [...String(entity.rawArgs[0] || '').matchAll(/[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][+-]?\d+)?/g)]
+    .map((match) => Number(match[0]))
+    .filter(Number.isFinite);
+
+  const points = [];
+  for (let i = 0; i + 2 < numbers.length; i += 3) {
+    points.push([numbers[i], numbers[i + 1], numbers[i + 2]]);
+  }
+  return points;
+}
+
+function parseIndexTriples(arg) {
+  const triples = [];
+  const groups = String(arg || '').match(/\([^()]*\)/g) || [];
+  for (const group of groups) {
+    const nums = [...group.matchAll(/\d+/g)].map((m) => Number(m[0]));
+    if (nums.length >= 3) triples.push(nums.slice(0, 3));
+  }
+  return triples;
+}
+
+function bboxFromPoints(points) {
+  if (!points?.length) return null;
+
+  // Coordinates read from the generated IFC are Z-up because the converter
+  // writes glTF Y-up positions as IFC (x, -z, y). The rest of the classifier
+  // and the Qwen prompt use the internal GLB-style convention where `sizeY`
+  // is the vertical dimension. Normalize the IFC bounds back to that convention
+  // here so slabs/columns/walls are not interpreted as rotated by 90°.
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  for (const point of points) {
+    for (let i = 0; i < 3; i++) {
+      min[i] = Math.min(min[i], point[i]);
+      max[i] = Math.max(max[i], point[i]);
+    }
+  }
+
+  const ifcSizeX = max[0] - min[0]; // plan X
+  const ifcSizeY = max[1] - min[1]; // plan Y, generated from -glTF Z
+  const ifcSizeZ = max[2] - min[2]; // vertical, generated from glTF Y
+
+  return {
+    coordinateSystem: 'IFC_Z_UP_NORMALIZED_TO_Y_UP',
+    verticalAxisInSource: 'Z',
+    min,
+    max,
+    sourceSize: [ifcSizeX, ifcSizeY, ifcSizeZ],
+    sourceSizeX: ifcSizeX,
+    sourceSizeY: ifcSizeY,
+    sourceSizeZ: ifcSizeZ,
+
+    // Normalized dimensions used by the reranker/heuristics:
+    // X = plan X, Y = vertical, Z = plan Y.
+    size: [ifcSizeX, ifcSizeZ, ifcSizeY],
+    sizeX: ifcSizeX,
+    sizeY: ifcSizeZ,
+    sizeZ: ifcSizeY,
+    verticalSize: ifcSizeZ,
+    planSizeX: ifcSizeX,
+    planSizeY: ifcSizeY,
+    horizontal: Math.max(ifcSizeX, ifcSizeY),
+    minHoriz: Math.min(ifcSizeX, ifcSizeY),
+    planArea: Math.max(0, ifcSizeX) * Math.max(0, ifcSizeY),
+    areaXZ: Math.max(0, ifcSizeX) * Math.max(0, ifcSizeY),
+  };
+}
+
+function faceRatiosFromTriangulatedSets(reachable, pointsByListId) {
+  let totalArea = 0;
+  let verticalArea = 0;
+  let horizontalArea = 0;
+  let inclinedArea = 0;
+
+  for (const entity of reachable) {
+    if (entity.type !== 'IFCTRIANGULATEDFACESET') continue;
+    const pointListId = parseStepRef(entity.rawArgs[0]);
+    const points = pointsByListId.get(pointListId) || [];
+    const coordIndex = parseIndexTriples(entity.rawArgs[2]);
+    if (!points.length || !coordIndex.length) continue;
+
+    for (const tri of coordIndex) {
+      const a = points[tri[0] - 1];
+      const b = points[tri[1] - 1];
+      const c = points[tri[2] - 1];
+      if (!a || !b || !c) continue;
+
+      const ux = b[0] - a[0];
+      const uy = b[1] - a[1];
+      const uz = b[2] - a[2];
+      const vx = c[0] - a[0];
+      const vy = c[1] - a[1];
+      const vz = c[2] - a[2];
+      const nx = uy * vz - uz * vy;
+      const ny = uz * vx - ux * vz;
+      const nz = ux * vy - uy * vx;
+      const nLen = Math.hypot(nx, ny, nz);
+      if (nLen < 1e-9) continue;
+
+      const area = nLen / 2;
+      // The generated IFC is Z-up. A horizontal face has a mostly vertical
+      // normal, therefore abs(normal.z) is high. The previous version used
+      // abs(normal.y), which made vertical columns look like flat slabs.
+      const anz = Math.abs(nz / nLen);
+      totalArea += area;
+      if (anz < 0.35) verticalArea += area;
+      if (anz > 0.75) horizontalArea += area;
+      if (anz >= 0.25 && anz <= 0.95) inclinedArea += area;
+    }
+  }
+
+  if (totalArea <= 0) return null;
+  return {
+    verticalFaces: verticalArea / totalArea,
+    horizontalFaces: horizontalArea / totalArea,
+    inclinedFaces: inclinedArea / totalArea,
+  };
+}
+
+function extractIfcElementFeatures(ifcText, localId, currentTypeHint = '') {
+  const entities = parseIfcEntityMap(ifcText);
+  const entity = entities.get(Number(localId));
+  if (!entity) throw new Error(`Entité IFC #${localId} introuvable.`);
+
+  const name = parseStepString(entity.rawArgs[2]);
+  const objectType = parseStepString(entity.rawArgs[4]);
+  const representationId = parseStepRef(entity.rawArgs[6]);
+  const tag = parseStepString(entity.rawArgs[7]);
+  const currentType = String(currentTypeHint || entity.type || '').toUpperCase();
+
+  const startRefs = representationId ? [representationId] : refsFromEntity(entity);
+  const reachable = collectReachableEntities(entities, startRefs, 8);
+  const pointsByListId = new Map();
+  const allPoints = [];
+
+  for (const refEntity of reachable) {
+    if (refEntity.type !== 'IFCCARTESIANPOINTLIST3D') continue;
+    const points = parsePointList3D(refEntity);
+    if (!points.length) continue;
+    pointsByListId.set(refEntity.id, points);
+    allPoints.push(...points);
+  }
+
+  const bbox = bboxFromPoints(allPoints);
+  let ratios = faceRatiosFromTriangulatedSets(reachable, pointsByListId);
+
+  if (!ratios && bbox) {
+    const thin = bbox.minHoriz <= Math.max(0.08, bbox.horizontal * 0.12);
+    const flat = bbox.sizeY <= Math.max(0.12, bbox.horizontal * 0.08);
+    const tall = bbox.sizeY >= Math.max(1.0, bbox.horizontal * 0.35);
+    ratios = {
+      verticalFaces: tall || thin ? 0.65 : 0.25,
+      horizontalFaces: flat ? 0.65 : 0.25,
+      inclinedFaces: 0,
+    };
+  }
+
+  const searchable = normalizeText([name, objectType, tag, currentType].join(' '));
+  const hints = {
+    hasWallHint: /\b(wall|walls|mur|murs|cloison|partition|facade|facades)\b/.test(searchable),
+    hasDoorHint: /\b(door|doors|porte|portes|ouvrant|battant)\b/.test(searchable),
+    hasWindowHint: /\b(window|windows|fenetre|fenetres|vitre|vitrage|glass|glazing|baie)\b/.test(searchable),
+    hasSlabHint: /\b(slab|floor|floors|plancher|dalle|ceiling|plafond)\b/.test(searchable),
+    hasRoofHint: /\b(roof|roofs|toit|toits|toiture|couverture)\b/.test(searchable),
+    hasBeamHint: /\b(beam|beams|poutre|poutres|joist|lintel|linteau|ipe|hea|heb|ipn)\b/.test(searchable),
+    hasColumnHint: /\b(column|columns|pillar|post|colonne|poteau|poteaux|pilier)\b/.test(searchable),
+    hasStairHint: /\b(stair|stairs|escalier|escaliers|marche|marches|volee|volée)\b/.test(searchable),
+    hasFurnitureHint: /\b(furniture|furnishing|mobilier|table|chair|chaise|cabinet|armoire)\b/.test(searchable),
+    hasMepHint: /\b(pipe|tube|tuyau|duct|gaine|cable|wire|fil|ventilation|cvc|hvac|mep|plumbing|sanitary|wc|toilet|lavabo|sink|luminaire|light)\b/.test(searchable),
+  };
+
+  return {
+    localId: Number(localId),
+    currentType,
+    originalType: entity.type,
+    name,
+    objectType,
+    tag,
+    bbox,
+    ratios: ratios || { verticalFaces: 0, horizontalFaces: 0, inclinedFaces: 0 },
+    hints,
+    geometryPointCount: allPoints.length,
+  };
+}
+
+function aliasScoreForEntry(entry, features) {
+  const text = normalizeText([features.name, features.objectType, features.tag, features.currentType].join(' '));
+  let score = 0;
+  for (const alias of entry.aliases || []) {
+    const a = normalizeText(alias);
+    if (!a) continue;
+    if (text === a || text.includes(` ${a} `) || text.startsWith(`${a} `) || text.endsWith(` ${a}`)) score = Math.max(score, 1);
+    else if (text.includes(a)) score = Math.max(score, 0.65);
+  }
+  const typeBody = normalizeText(String(entry.type || '').replace(/^IFC/i, ''));
+  if (typeBody && text.includes(typeBody)) score = Math.max(score, 0.85);
+  return score;
+}
+
+function heuristicScoreForIfcType(entry, features) {
+  const type = String(entry.type || '').toUpperCase();
+  const b = features.bbox || {};
+  const r = features.ratios || {};
+  const h = features.hints || {};
+  const sx = Math.abs(b.sizeX || 0);
+  const sy = Math.abs(b.sizeY || 0);
+  const sz = Math.abs(b.sizeZ || 0);
+  const horizontal = Math.max(sx, sz);
+  const minHoriz = Math.min(sx || Infinity, sz || Infinity);
+  const thinness = horizontal > 0 ? minHoriz / horizontal : 1;
+  const verticalFaces = r.verticalFaces || 0;
+  const horizontalFaces = r.horizontalFaces || 0;
+  const inclinedFaces = r.inclinedFaces || 0;
+  const alias = aliasScoreForEntry(entry, features);
+
+  let score = 0.08 + alias * 0.24;
+
+  if (type === features.currentType) score += 0.04;
+  if (entry.tier === 'unsupported') score -= 0.5;
+
+  switch (type) {
+    case 'IFCWALL':
+      score += (h.hasWallHint ? 0.35 : 0) + (sy >= 1.6 ? 0.18 : 0) + (thinness <= 0.18 ? 0.18 : 0) + (verticalFaces >= 0.45 ? 0.16 : 0);
+      if (h.hasDoorHint || h.hasWindowHint || h.hasSlabHint) score -= 0.25;
+      break;
+    case 'IFCCURTAINWALL':
+      score += ((h.hasWallHint || h.hasWindowHint) ? 0.22 : 0) + (sy >= 1.8 ? 0.15 : 0) + (thinness <= 0.18 ? 0.12 : 0) + (verticalFaces >= 0.45 ? 0.12 : 0);
+      break;
+    case 'IFCPLATE':
+      score += (thinness <= 0.10 ? 0.28 : 0) + ((h.hasWindowHint || h.hasWallHint) ? 0.12 : 0) + (Math.max(verticalFaces, horizontalFaces) >= 0.5 ? 0.10 : 0);
+      break;
+    case 'IFCSLAB':
+      score += (h.hasSlabHint ? 0.35 : 0) + (sy <= 0.65 && horizontal >= 0.8 ? 0.22 : 0) + (horizontalFaces >= 0.45 ? 0.18 : 0);
+      if (h.hasWallHint || h.hasDoorHint || h.hasWindowHint) score -= 0.22;
+      break;
+    case 'IFCROOF':
+      score += (h.hasRoofHint ? 0.36 : 0) + (inclinedFaces >= 0.18 ? 0.22 : 0) + (horizontalFaces >= 0.45 && horizontal >= 1.2 ? 0.12 : 0);
+      break;
+    case 'IFCDOOR':
+      score += (h.hasDoorHint ? 0.45 : 0) + (sy >= 1.5 && sy <= 2.8 ? 0.18 : 0) + (minHoriz <= 0.35 ? 0.12 : 0) + (verticalFaces >= 0.35 ? 0.10 : 0);
+      if (h.hasWindowHint && !h.hasDoorHint) score -= 0.24;
+      break;
+    case 'IFCWINDOW':
+      score += (h.hasWindowHint ? 0.45 : 0) + (sy >= 0.35 && sy <= 2.8 ? 0.13 : 0) + (minHoriz <= 0.35 ? 0.12 : 0) + (verticalFaces >= 0.35 ? 0.10 : 0);
+      if (h.hasDoorHint && !h.hasWindowHint) score -= 0.20;
+      break;
+    case 'IFCBEAM':
+      score += (h.hasBeamHint ? 0.42 : 0) + (horizontal >= Math.max(1.0, sy * 2.0) ? 0.20 : 0) + (minHoriz <= 0.8 ? 0.10 : 0);
+      if (h.hasWallHint && sy >= 1.6) score -= 0.22;
+      break;
+    case 'IFCCOLUMN':
+      score += (h.hasColumnHint ? 0.42 : 0) + (sy >= 1.2 ? 0.18 : 0) + (horizontal <= 1.4 ? 0.14 : 0) + (thinness >= 0.35 ? 0.08 : 0);
+      if (h.hasWallHint && horizontal > 1.5) score -= 0.25;
+      break;
+    case 'IFCSTAIR':
+    case 'IFCSTAIRFLIGHT':
+      score += (h.hasStairHint ? 0.46 : 0) + (sy >= 0.35 && horizontal >= 0.8 ? 0.14 : 0) + (horizontalFaces >= 0.25 ? 0.08 : 0);
+      break;
+    case 'IFCRAILING':
+      score += (/railing|garde|handrail|main courante/i.test(`${features.name} ${features.objectType}`) ? 0.46 : 0) + (horizontal >= 0.8 && sy >= 0.4 && sy <= 1.4 ? 0.14 : 0);
+      break;
+    case 'IFCFURNISHINGELEMENT':
+      score += (h.hasFurnitureHint ? 0.46 : 0) + (!h.hasWallHint && !h.hasSlabHint && !h.hasDoorHint && !h.hasWindowHint && sy < 2.4 ? 0.10 : 0);
+      break;
+    case 'IFCSANITARYTERMINAL':
+    case 'IFCLIGHTFIXTURE':
+    case 'IFCFLOWTERMINAL':
+    case 'IFCDUCTSEGMENT':
+    case 'IFCPIPESEGMENT':
+    case 'IFCCABLESEGMENT':
+      score += (h.hasMepHint ? 0.34 : 0) + alias * 0.20;
+      break;
+    case 'IFCBUILDINGELEMENTPROXY':
+      score += 0.18;
+      if (alias > 0.2 || h.hasWallHint || h.hasSlabHint || h.hasDoorHint || h.hasWindowHint || h.hasBeamHint || h.hasColumnHint || h.hasRoofHint) score -= 0.12;
+      break;
+    default:
+      score += alias * 0.20;
+  }
+
+  return clamp01(score);
+}
+
+function buildCandidateEntries(features, maxCandidates = 80) {
+  const supported = IFC_TYPES.filter((entry) =>
+    entry.tier !== 'unsupported' &&
+    !QWEN_EXCLUDED_TARGET_TYPES.has(entry.type)
+  );
+
+  // The assistant is mainly used to replace generic proxies with a real IFC
+  // family. Keep the current type in the context, but do not rank
+  // IFCBUILDINGELEMENTPROXY as a target class unless explicitly enabled with
+  // QWEN_ALLOW_PROXY_TARGET=1.
+  const required = new Set([
+    features.currentType,
+    'IFCWALL',
+    'IFCSLAB',
+    'IFCDOOR',
+    'IFCWINDOW',
+    'IFCROOF',
+    'IFCPLATE',
+    'IFCBEAM',
+    'IFCCOLUMN',
+    'IFCSTAIR',
+  ]
+    .filter(Boolean)
+    .filter((type) => !QWEN_EXCLUDED_TARGET_TYPES.has(type)));
+
+  const ranked = supported
+    .map((entry) => ({ entry, score: heuristicScoreForIfcType(entry, features), required: required.has(entry.type) }))
+    .sort((a, b) => (b.required - a.required) || b.score - a.score);
+
+  const out = [];
+  const seen = new Set();
+  for (const item of ranked) {
+    if (seen.has(item.entry.type)) continue;
+    if (QWEN_EXCLUDED_TARGET_TYPES.has(item.entry.type)) continue;
+    // V10: send the full requested candidate pool to the reranker.
+    // Earlier versions stopped around 18 low-heuristic entries, which made
+    // Qwen repeatedly see the same small set even when the catalog had ~80
+    // applicable targets. maxCandidates still bounds latency.
+    out.push(item.entry);
+    seen.add(item.entry.type);
+    if (out.length >= maxCandidates) break;
+  }
+  return out;
+}
+
+function compactNumber(value, digits = 3) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Number(n.toFixed(digits)) : null;
+}
+
+function trueHintNames(hints = {}) {
+  return Object.entries(hints)
+    .filter(([, value]) => Boolean(value))
+    .map(([key]) => key.replace(/^has/, '').replace(/Hint$/, '').toLowerCase());
+}
+
+function buildRerankerQuery(features) {
+  const b = features.bbox || {};
+  const r = features.ratios || {};
+  const compact = {
+    id: features.localId,
+    currentType: features.currentType,
+    sourceType: features.originalType,
+    name: features.name || '',
+    objectType: features.objectType || '',
+    tag: features.tag || '',
+    axes: 'IFC source is Z-up; values below are normalized: height=sizeY, plan=sizeX/sizeZ',
+    bbox: b ? {
+      sizeX: compactNumber(b.sizeX),
+      sizeY_height: compactNumber(b.sizeY),
+      sizeZ: compactNumber(b.sizeZ),
+      planLong: compactNumber(b.horizontal),
+      planShort: compactNumber(b.minHoriz),
+      planArea: compactNumber(b.planArea),
+    } : null,
+    faceRatios: {
+      vertical: compactNumber(r.verticalFaces, 2),
+      horizontal: compactNumber(r.horizontalFaces, 2),
+      inclined: compactNumber(r.inclinedFaces, 2),
+    },
+    trueHints: trueHintNames(features.hints),
+  };
+
+  return [
+    'Rank the candidate IFC class for this BIM mesh.',
+    'Use physical semantics, name hints and geometry. A current proxy means unknown source; do not choose proxy as target.',
+    'Axes: normalized Y-up; sizeY_height is vertical height; sizeX/sizeZ are plan dimensions.',
+    `Element=${JSON.stringify(compact)}`,
+    'Question: is the candidate IFC type a good match?',
+  ].join('\n');
+}
+
+function normalizeRerankScores(results, count) {
+  const scores = new Array(count).fill(null);
+  for (const result of results || []) {
+    const index = Number(result.index ?? result.document_index ?? result.id);
+    const score = Number(result.relevance_score ?? result.score ?? result.logit ?? result.value);
+    if (Number.isInteger(index) && index >= 0 && index < count && Number.isFinite(score)) scores[index] = score;
+  }
+
+  const finite = scores.filter(Number.isFinite);
+  if (!finite.length) return null;
+
+  const min = Math.min(...finite);
+  const max = Math.max(...finite);
+  return scores.map((score) => {
+    if (!Number.isFinite(score)) return 0;
+    if (score >= 0 && score <= 1 && min >= 0 && max <= 1) return score;
+    if (Math.abs(max - min) < 1e-9) return 0.5;
+    return (score - min) / (max - min);
+  });
+}
+
+function extractRerankResults(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload?.results)) return payload.results;
+  if (Array.isArray(payload?.data)) return payload.data;
+  if (Array.isArray(payload?.scores)) return payload.scores.map((score, index) => ({ index, score }));
+  return [];
+}
+
+async function postJsonWithTimeout(url, payload, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    const text = await response.text();
+    let json = null;
+    try { json = text ? JSON.parse(text) : null; } catch (_) { /* keep text */ }
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}: ${text.slice(0, 240)}`);
+    return json;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function getWithTimeout(url, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForManagedQwenServerReady(timeoutMs = QWEN_STARTUP_TIMEOUT_MS) {
+  if (QWEN_RERANKER_URL || !QWEN_AUTO_START) return true;
+
+  const deadline = Date.now() + timeoutMs;
+  const healthUrl = `${QWEN_LLAMA_BASE_URL}/health`;
+
+  while (Date.now() < deadline) {
+    if (qwenState.status === 'failed') {
+      try {
+        const response = await getWithTimeout(healthUrl, 1500);
+        if (response.ok) {
+          qwenState.status = 'ready';
+          return true;
+        }
+      } catch (_) {
+        throw new Error(qwenState.lastError || 'llama-server failed to start');
+      }
+    }
+
+    try {
+      const response = await getWithTimeout(healthUrl, 1500);
+      if (response.ok) {
+        qwenState.status = 'ready';
+        return true;
+      }
+    } catch (_) {
+      // Server is still booting or not listening yet.
+    }
+
+    await sleep(750);
+  }
+
+  throw new Error(`llama-server not ready after ${timeoutMs}ms`);
+}
+
+async function callQwenReranker(query, documents) {
+  if (!QWEN_RERANKER_URL && QWEN_AUTO_START && ['not_started', 'stopped'].includes(qwenState.status)) {
+    startManagedQwenServer();
+  }
+
+  if (!QWEN_RERANKER_URL && QWEN_AUTO_START && ['starting', 'failed'].includes(qwenState.status)) {
+    await waitForManagedQwenServerReady();
+  }
+
+  const urls = QWEN_RERANKER_URL ? [QWEN_RERANKER_URL] : DEFAULT_QWEN_RERANKER_URLS;
+  const payload = { query, documents };
+  let lastError = null;
+
+  for (const url of urls) {
+    try {
+      const json = await postJsonWithTimeout(url, payload, QWEN_RERANK_TIMEOUT_MS);
+      const results = extractRerankResults(json);
+      const scores = normalizeRerankScores(results, documents.length);
+      if (!scores) throw new Error('Réponse reranker sans scores exploitables.');
+      return { scores, endpoint: url };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError || new Error('Qwen reranker indisponible.');
+}
+
+function reasonCodesForSuggestion(type, features) {
+  const h = features.hints || {};
+  const b = features.bbox || {};
+  const r = features.ratios || {};
+  const reasons = [];
+  if (h.hasWallHint && ['IFCWALL', 'IFCCURTAINWALL', 'IFCPLATE'].includes(type)) reasons.push('name_hint_wall');
+  if (h.hasDoorHint && type === 'IFCDOOR') reasons.push('name_hint_door');
+  if (h.hasWindowHint && type === 'IFCWINDOW') reasons.push('name_hint_window_or_glass');
+  if (h.hasSlabHint && type === 'IFCSLAB') reasons.push('name_hint_slab');
+  if (h.hasRoofHint && type === 'IFCROOF') reasons.push('name_hint_roof');
+  if (h.hasBeamHint && type === 'IFCBEAM') reasons.push('name_hint_beam');
+  if (h.hasColumnHint && type === 'IFCCOLUMN') reasons.push('name_hint_column');
+  if (h.hasStairHint && type.startsWith('IFCSTAIR')) reasons.push('name_hint_stair');
+  if (b.sizeY >= 1.6 && b.minHoriz <= Math.max(0.35, b.horizontal * 0.18)) reasons.push('thin_vertical_bbox');
+  if (b.sizeY <= 0.65 && b.horizontal >= 0.8) reasons.push('flat_horizontal_bbox');
+  if ((r.verticalFaces || 0) >= 0.45) reasons.push('vertical_faces_high');
+  if ((r.horizontalFaces || 0) >= 0.45) reasons.push('horizontal_faces_high');
+  if ((r.inclinedFaces || 0) >= 0.18) reasons.push('inclined_faces_present');
+  if (!reasons.length) reasons.push('semantic_rerank_match');
+  return reasons.slice(0, 4);
+}
+
+function safeFeaturePreview(features) {
+  return {
+    localId: features.localId,
+    currentType: features.currentType,
+    name: features.name,
+    objectType: features.objectType,
+    tag: features.tag,
+    bbox: features.bbox ? {
+      coordinateSystem: features.bbox.coordinateSystem,
+      verticalAxisInSource: features.bbox.verticalAxisInSource,
+      sizeX: features.bbox.sizeX,
+      sizeY: features.bbox.sizeY,
+      sizeZ: features.bbox.sizeZ,
+      verticalSize: features.bbox.verticalSize,
+      horizontal: features.bbox.horizontal,
+      minHoriz: features.bbox.minHoriz,
+      planArea: features.bbox.planArea,
+      sourceSizeX: features.bbox.sourceSizeX,
+      sourceSizeY: features.bbox.sourceSizeY,
+      sourceSizeZ: features.bbox.sourceSizeZ,
+    } : null,
+    ratios: features.ratios,
+    hints: features.hints,
+    geometryPointCount: features.geometryPointCount,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // HTTP endpoint
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -4153,6 +5111,82 @@ app.post('/api/convert', upload.single('glb'), async (req, res) => {
   }
 });
 
+app.post('/api/qwen-suggest', async (req, res) => {
+  const { ifcText, localId, currentType, maxSuggestions = 3, maxCandidates = 80 } = req.body || {};
+
+  if (!ifcText || typeof ifcText !== 'string') {
+    return res.status(400).json({ error: 'Missing ifcText' });
+  }
+  if (!Number.isFinite(Number(localId))) {
+    return res.status(400).json({ error: 'Missing or invalid localId' });
+  }
+
+  try {
+    const features = extractIfcElementFeatures(ifcText, Number(localId), currentType);
+    const candidates = buildCandidateEntries(features, Math.max(8, Math.min(160, Number(maxCandidates) || 80)));
+    const query = buildRerankerQuery(features);
+    const documents = candidates.map(candidateDocumentForIfcType);
+
+    let qwenScores = null;
+    let qwenEndpoint = null;
+    let qwenError = null;
+
+    try {
+      const rerank = await callQwenReranker(query, documents);
+      qwenScores = rerank.scores;
+      qwenEndpoint = rerank.endpoint;
+    } catch (error) {
+      qwenError = error.message || String(error);
+      console.warn(`Qwen reranker unavailable, using heuristic fallback: ${qwenError}`);
+    }
+
+    const suggestions = candidates
+      .map((entry, index) => {
+        const heuristicScore = heuristicScoreForIfcType(entry, features);
+        const qwenScore = qwenScores ? clamp01(qwenScores[index]) : null;
+        const finalScore = qwenScore == null
+          ? heuristicScore
+          : clamp01(0.65 * qwenScore + 0.35 * heuristicScore);
+        return {
+          type: entry.type,
+          label: entry.label,
+          category: entry.category,
+          tier: entry.tier,
+          predefined: entry.predefined,
+          score: Number(finalScore.toFixed(4)),
+          qwenScore: qwenScore == null ? null : Number(qwenScore.toFixed(4)),
+          heuristicScore: Number(heuristicScore.toFixed(4)),
+          reasonCodes: reasonCodesForSuggestion(entry.type, features),
+        };
+      })
+      .filter((suggestion) => suggestion.tier !== 'unsupported')
+      .filter((suggestion) => !QWEN_EXCLUDED_TARGET_TYPES.has(suggestion.type))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, Math.max(1, Math.min(10, Number(maxSuggestions) || 3)));
+
+    res.json({
+      localId: Number(localId),
+      currentType: features.currentType,
+      llmAvailable: Boolean(qwenScores),
+      qwenEndpoint,
+      qwenError,
+      qwenRuntime: qwenRuntimeStatus(),
+      features: safeFeaturePreview(features),
+      candidateCount: candidates.length,
+      candidateTypes: candidates.map((candidate) => candidate.type),
+      excludedTargetTypes: [...QWEN_EXCLUDED_TARGET_TYPES],
+      suggestions,
+    });
+  } catch (error) {
+    console.error('Qwen suggest error:', error);
+    res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+app.get('/api/qwen-status', (req, res) => {
+  res.json(qwenRuntimeStatus());
+});
+
 app.post('/api/reexport', async (req, res) => {
   const { ifcText, edits, fileName } = req.body || {};
 
@@ -4195,6 +5229,8 @@ app.get('/api/ifc-catalog', (req, res) => {
 app.get('/api/reclassifiable-types', (req, res) => {
   res.json({ types: reclassifiableTypeNames() });
 });
+
+startManagedQwenServer();
 
 app.listen(PORT, () => {
   console.log(`\n  GLB → IFC converter`);

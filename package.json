@@ -6,7 +6,11 @@
   "main": "server.js",
   "scripts": {
     "start": "bun server.js",
-    "dev": "bun server.js"
+    "dev": "bun server.js",
+    "qwen:setup": "bash scripts/setup-qwen-linux.sh",
+    "qwen:setup:cuda": "bash scripts/setup-qwen-linux.sh --cuda",
+    "qwen:setup:vulkan": "bash scripts/setup-qwen-linux.sh --vulkan",
+    "qwen:status": "bash scripts/qwen-status.sh"
   },
   "dependencies": {
     "@gltf-transform/core": "^4.1.1",

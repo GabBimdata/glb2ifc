@@ -33,3 +33,7 @@
 - `src/viewer.js` : sauvegarde les reclassifications et ouvre le modeler avec le GLB source.
 - `src/modeler.js` : charge le GLB depuis le projet, corrige le gizmo, reconvertit et retourne au viewer.
 - `server.js` : sert `/modeler.html` et les décodeurs Draco locaux.
+
+## V3 — Suggestions IFC avec Qwen reranker
+
+Voir `README-QWEN-RERANKER.md` pour lancer `llama.cpp` / `llama-server` sans Ollama et utiliser le bouton `✨ Suggérer avec Qwen` dans le viewer IFC.
