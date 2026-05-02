@@ -24,6 +24,11 @@ const scaleButton = document.getElementById("mode-scale");
 const localButton = document.getElementById("space-local");
 const worldButton = document.getElementById("space-world");
 const resetTransformButton = document.getElementById("reset-transform");
+const objectModeButton = document.getElementById("mode-object");
+const editModeButton = document.getElementById("mode-edit");
+const vertexModeButton = document.getElementById("mode-vertex");
+const edgeModeButton = document.getElementById("mode-edge");
+const faceModeButton = document.getElementById("mode-face");
 
 const state = {
   scene: null,
@@ -50,6 +55,16 @@ const state = {
   returnToViewer: false,
   ifcOverlayGroup: null,
   ifcOverlayCount: 0,
+  edit: {
+    active: false,
+    componentMode: "vertex",
+    vertexIds: new Set(),
+    edgeKeys: new Set(),
+    faceIds: new Set(),
+    pivot: null,
+    overlayGroup: null,
+    dragStart: null,
+  },
 };
 
 const selectionMaterial = new THREE.MeshBasicMaterial({
@@ -59,6 +74,53 @@ const selectionMaterial = new THREE.MeshBasicMaterial({
   depthTest: false,
   depthWrite: false,
 });
+
+const editVertexMaterial = new THREE.PointsMaterial({
+  color: 0x74b9ff,
+  size: 5,
+  sizeAttenuation: false,
+  transparent: true,
+  opacity: 0.82,
+  depthTest: false,
+  depthWrite: false,
+});
+
+const editWireMaterial = new THREE.LineBasicMaterial({
+  color: 0x74b9ff,
+  transparent: true,
+  opacity: 0.28,
+  depthTest: false,
+  depthWrite: false,
+});
+
+const editSelectedPointMaterial = new THREE.PointsMaterial({
+  color: 0xff9248,
+  size: 9,
+  sizeAttenuation: false,
+  transparent: true,
+  opacity: 1,
+  depthTest: false,
+  depthWrite: false,
+});
+
+const editSelectedLineMaterial = new THREE.LineBasicMaterial({
+  color: 0xff9248,
+  transparent: true,
+  opacity: 0.96,
+  depthTest: false,
+  depthWrite: false,
+});
+
+const editSelectedFaceMaterial = new THREE.MeshBasicMaterial({
+  color: 0xff9248,
+  transparent: true,
+  opacity: 0.34,
+  side: THREE.DoubleSide,
+  depthTest: false,
+  depthWrite: false,
+});
+
+const MAX_VISIBLE_EDIT_VERTICES = 120000;
 
 init();
 
@@ -87,15 +149,39 @@ function init() {
   state.transform.addEventListener("dragging-changed", (event) => {
     state.isTransformDragging = event.value;
     state.controls.enabled = !event.value;
+
+    if (state.edit.active && hasEditComponentSelection()) {
+      if (event.value) beginEditTransformDrag();
+      else finishEditTransformDrag();
+    }
   });
-  state.transform.addEventListener("change", () => {
+  state.transform.addEventListener("objectChange", () => {
+    if (state.edit.active) {
+      applyEditTransformFromPivot();
+      return;
+    }
+
     updateBoxHelper();
     renderProperties();
     markDirty();
   });
+  state.transform.addEventListener("change", () => {
+    if (state.edit.active) {
+      renderProperties();
+      return;
+    }
+
+    updateBoxHelper();
+    renderProperties();
+  });
   state.transformHelper = state.transform.getHelper ? state.transform.getHelper() : state.transform;
   state.scene.add(state.transformHelper);
   state.transformHelper.visible = false;
+
+  state.edit.pivot = new THREE.Object3D();
+  state.edit.pivot.name = "Edit selection pivot";
+  state.edit.pivot.userData.__modelerOverlay = true;
+  state.scene.add(state.edit.pivot);
 
   addDefaultSceneHelpers();
   bindEvents();
@@ -157,6 +243,9 @@ function bindEvents() {
 
   state.renderer.domElement.addEventListener("pointerdown", onPointerDown);
   state.renderer.domElement.addEventListener("pointerup", onPointerUp);
+  state.renderer.domElement.addEventListener("contextmenu", (event) => {
+    if (state.edit.active) event.preventDefault();
+  });
 
   treeSearch.addEventListener("input", renderTree);
 
@@ -172,14 +261,45 @@ function bindEvents() {
   worldButton.addEventListener("click", () => setTransformSpace("world"));
   resetTransformButton.addEventListener("click", resetSelectedTransform);
 
+  objectModeButton?.addEventListener("click", () => setEditMode(false));
+  editModeButton?.addEventListener("click", () => setEditMode(!state.edit.active));
+  vertexModeButton?.addEventListener("click", () => setComponentMode("vertex"));
+  edgeModeButton?.addEventListener("click", () => setComponentMode("edge"));
+  faceModeButton?.addEventListener("click", () => setComponentMode("face"));
+
   window.addEventListener("keydown", (event) => {
     if (event.target && ["INPUT", "TEXTAREA", "SELECT"].includes(event.target.tagName)) return;
-    if (event.key === "Escape") selectMesh(null);
-    if (event.key.toLowerCase() === "t") setTransformMode("translate");
-    if (event.key.toLowerCase() === "r") setTransformMode("rotate");
-    if (event.key.toLowerCase() === "s") setTransformMode("scale");
-    if (event.key.toLowerCase() === "l") setTransformSpace("local");
-    if (event.key.toLowerCase() === "w") setTransformSpace("world");
+
+    const key = event.key.toLowerCase();
+
+    if (event.key === "Tab") {
+      event.preventDefault();
+      setEditMode(!state.edit.active);
+      return;
+    }
+
+    if (event.key === "Escape") {
+      if (state.edit.active && hasEditComponentSelection()) clearEditComponentSelection();
+      else if (state.edit.active) setEditMode(false);
+      else selectMesh(null);
+      return;
+    }
+
+    if (state.edit.active) {
+      if (event.key === "1") setComponentMode("vertex");
+      if (event.key === "2") setComponentMode("edge");
+      if (event.key === "3") setComponentMode("face");
+      if (key === "a") {
+        event.preventDefault();
+        selectAllEditComponents();
+      }
+    }
+
+    if (key === "g" || key === "t") setTransformMode("translate");
+    if (key === "r") setTransformMode("rotate");
+    if (key === "s") setTransformMode("scale");
+    if (key === "l") setTransformSpace("local");
+    if (key === "w") setTransformSpace("world");
   });
 }
 
@@ -589,6 +709,7 @@ function indexMeshes(root) {
   const editableObjects = [];
 
   root.traverse((object) => {
+    if (object.userData?.__modelerOverlay) return;
     if (!object.isMesh && !object.isInstancedMesh) return;
     editableObjects.push(object);
   });
@@ -613,6 +734,7 @@ function indexMeshes(root) {
         object.geometry = object.geometry.clone();
       }
 
+      ensureEditableBufferGeometry(object);
       normalizeEditablePivotToGeometryCenter(object);
       object.geometry.computeBoundingBox();
       object.geometry.computeBoundingSphere();
@@ -627,6 +749,32 @@ function indexMeshes(root) {
     };
 
     state.meshes.push(object);
+  }
+}
+
+function ensureEditableBufferGeometry(object) {
+  if (!object?.isMesh || object.isInstancedMesh || !object.geometry) return;
+
+  const geometry = object.geometry;
+  const position = geometry.getAttribute("position");
+  if (!position) return;
+
+  // Transforming vertices needs direct, writable Float32 positions. Some GLB
+  // files use interleaved attributes; clone them into a plain BufferAttribute.
+  if (position.isInterleavedBufferAttribute || !(position.array instanceof Float32Array)) {
+    const positions = new Float32Array(position.count * 3);
+    for (let i = 0; i < position.count; i++) {
+      positions[i * 3] = position.getX(i);
+      positions[i * 3 + 1] = position.getY(i);
+      positions[i * 3 + 2] = position.getZ(i);
+    }
+    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  }
+
+  const normal = geometry.getAttribute("normal");
+  if (normal?.isInterleavedBufferAttribute) {
+    geometry.deleteAttribute("normal");
+    geometry.computeVertexNormals();
   }
 }
 
@@ -672,6 +820,9 @@ function normalizeEditablePivotToGeometryCenter(object) {
 
 function clearScene(options = {}) {
   selectMesh(null);
+  state.edit.active = false;
+  clearEditComponentSelection();
+  removeEditOverlay();
 
   if (state.modelRoot) {
     state.scene.remove(state.modelRoot);
@@ -766,6 +917,11 @@ function onPointerUp(event) {
 }
 
 function selectFromPointer(event) {
+  if (state.edit.active) {
+    selectEditComponentFromPointer(event);
+    return;
+  }
+
   if (!state.meshes.length) return;
 
   const rect = state.renderer.domElement.getBoundingClientRect();
@@ -773,30 +929,541 @@ function selectFromPointer(event) {
   state.pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 
   state.raycaster.setFromCamera(state.pointer, state.camera);
-  const hits = state.raycaster.intersectObjects(state.meshes, true);
+  const hits = state.raycaster.intersectObjects(state.meshes, false);
   const hit = hits.find((entry) => entry.object?.isMesh || entry.object?.isInstancedMesh);
   selectMesh(hit?.object || null);
 }
 
 function selectMesh(mesh) {
+  if (state.edit.active && mesh !== state.selected) {
+    setEditMode(false);
+  }
+
   state.selected = mesh || null;
 
   if (state.selected) {
-    state.transform.enabled = true;
-    state.transform.attach(state.selected);
-    state.transform.setSize?.(1.15);
+    if (state.edit.active) {
+      updateEditPivotToSelection();
+    } else {
+      state.transform.enabled = true;
+      state.transform.attach(state.selected);
+      state.transform.setSize?.(1.15);
+    }
   } else {
+    clearEditComponentSelection();
     state.transform.detach();
   }
 
   if (state.transformHelper) {
-    state.transformHelper.visible = Boolean(state.selected);
+    state.transformHelper.visible = Boolean(state.selected) && (!state.edit.active || hasEditComponentSelection());
   }
 
   updateBoxHelper();
   renderTree();
   renderProperties();
   updateUiEnabled();
+}
+
+function setEditMode(active) {
+  const nextActive = Boolean(active);
+
+  if (nextActive) {
+    if (!state.selected) {
+      setStatus("Sélectionne d’abord un mesh, puis active le mode édition.", "warning");
+      updateUiEnabled();
+      return;
+    }
+
+    if (!canEditSubGeometry(state.selected)) {
+      setStatus("Ce mesh ne peut pas être édité au niveau vertex/edge/face. Les InstancedMesh restent éditables en mode objet.", "warning");
+      updateUiEnabled();
+      return;
+    }
+  }
+
+  if (state.edit.active === nextActive) {
+    updateUiEnabled();
+    return;
+  }
+
+  state.edit.active = nextActive;
+  clearEditComponentSelection({ keepOverlayShell: nextActive });
+
+  if (state.edit.active) {
+    state.transform.detach();
+    state.transform.setSpace("local");
+    state.transform.setMode("translate");
+    rebuildEditOverlay();
+    setStatus(`Mode édition · ${componentModeLabel(state.edit.componentMode)} · clic = sélectionner · Shift/Ctrl+clic = ajouter/retirer · A = tout sélectionner.`, "ok");
+  } else {
+    removeEditOverlay();
+    state.transform.detach();
+    if (state.selected) {
+      state.transform.attach(state.selected);
+      state.transform.setSize?.(1.15);
+    }
+  }
+
+  updateBoxHelper();
+  renderProperties();
+  updateUiEnabled();
+}
+
+function canEditSubGeometry(mesh) {
+  return Boolean(mesh?.isMesh && !mesh.isInstancedMesh && mesh.geometry?.getAttribute("position"));
+}
+
+function setComponentMode(mode) {
+  if (!["vertex", "edge", "face"].includes(mode)) return;
+  state.edit.componentMode = mode;
+  clearEditComponentSelection({ keepOverlayShell: true });
+  rebuildEditOverlay();
+  setStatus(`Mode édition · ${componentModeLabel(mode)}.`, "ok");
+  renderProperties();
+  updateUiEnabled();
+}
+
+function componentModeLabel(mode = state.edit.componentMode) {
+  if (mode === "vertex") return "Vertex";
+  if (mode === "edge") return "Edge";
+  if (mode === "face") return "Face";
+  return "Edit";
+}
+
+function clearEditComponentSelection(options = {}) {
+  state.edit.vertexIds.clear();
+  state.edit.edgeKeys.clear();
+  state.edit.faceIds.clear();
+  state.edit.dragStart = null;
+
+  if (state.edit.active && options.keepOverlayShell) {
+    updateEditPivotToSelection();
+    rebuildEditOverlay();
+  } else if (!options.keepOverlayShell) {
+    if (state.edit.active) rebuildEditOverlay();
+    state.transform.detach();
+  }
+
+  if (state.transformHelper) state.transformHelper.visible = false;
+  renderProperties();
+  updateUiEnabled();
+}
+
+function hasEditComponentSelection() {
+  return state.edit.vertexIds.size > 0 || state.edit.edgeKeys.size > 0 || state.edit.faceIds.size > 0;
+}
+
+function selectEditComponentFromPointer(event) {
+  const mesh = state.selected;
+  if (!canEditSubGeometry(mesh)) return;
+
+  const rect = state.renderer.domElement.getBoundingClientRect();
+  state.pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+  state.pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+  state.raycaster.setFromCamera(state.pointer, state.camera);
+  const hit = state.raycaster.intersectObject(mesh, false)[0];
+
+  const additiveSelect = isAdditiveSelectEvent(event);
+
+  if (!hit?.face || !Number.isFinite(hit.faceIndex)) {
+    if (!additiveSelect) clearEditComponentSelection({ keepOverlayShell: true });
+    return;
+  }
+
+  const tri = triangleVertexIds(mesh.geometry, hit.faceIndex);
+  if (!tri) return;
+
+  if (!additiveSelect) {
+    state.edit.vertexIds.clear();
+    state.edit.edgeKeys.clear();
+    state.edit.faceIds.clear();
+  }
+
+  if (state.edit.componentMode === "vertex") {
+    const vertexId = closestTriangleVertexToPoint(mesh, tri, hit.point);
+    toggleSetValue(state.edit.vertexIds, vertexId, additiveSelect);
+  } else if (state.edit.componentMode === "edge") {
+    const edgeKey = closestTriangleEdgeToPoint(mesh, tri, hit.point);
+    toggleSetValue(state.edit.edgeKeys, edgeKey, additiveSelect);
+  } else if (state.edit.componentMode === "face") {
+    toggleSetValue(state.edit.faceIds, hit.faceIndex, additiveSelect);
+  }
+
+  updateEditPivotToSelection();
+  rebuildEditOverlay();
+  renderProperties();
+  markDirty();
+  updateUiEnabled();
+}
+
+function isAdditiveSelectEvent(event) {
+  return Boolean(event?.shiftKey || event?.ctrlKey || event?.metaKey);
+}
+
+function toggleSetValue(set, value, shouldToggle) {
+  if (value === null || value === undefined) return;
+  if (shouldToggle && set.has(value)) set.delete(value);
+  else set.add(value);
+}
+
+function selectAllEditComponents() {
+  const mesh = state.selected;
+  if (!state.edit.active || !canEditSubGeometry(mesh)) return;
+
+  const geometry = mesh.geometry;
+  const position = geometry.getAttribute("position");
+  const faceCount = triangleCount(geometry);
+
+  state.edit.vertexIds.clear();
+  state.edit.edgeKeys.clear();
+  state.edit.faceIds.clear();
+
+  if (state.edit.componentMode === "vertex") {
+    for (let i = 0; i < position.count; i++) state.edit.vertexIds.add(i);
+  } else if (state.edit.componentMode === "edge") {
+    for (let faceIndex = 0; faceIndex < faceCount; faceIndex++) {
+      const tri = triangleVertexIds(geometry, faceIndex);
+      if (!tri) continue;
+      state.edit.edgeKeys.add(edgeKey(tri[0], tri[1]));
+      state.edit.edgeKeys.add(edgeKey(tri[1], tri[2]));
+      state.edit.edgeKeys.add(edgeKey(tri[2], tri[0]));
+    }
+  } else if (state.edit.componentMode === "face") {
+    for (let faceIndex = 0; faceIndex < faceCount; faceIndex++) state.edit.faceIds.add(faceIndex);
+  }
+
+  updateEditPivotToSelection();
+  rebuildEditOverlay();
+  renderProperties();
+  markDirty();
+  updateUiEnabled();
+}
+
+function selectedEditVertexIds() {
+  const mesh = state.selected;
+  const ids = new Set(state.edit.vertexIds);
+
+  for (const key of state.edit.edgeKeys) {
+    const [a, b] = parseEdgeKey(key);
+    if (Number.isFinite(a)) ids.add(a);
+    if (Number.isFinite(b)) ids.add(b);
+  }
+
+  for (const faceIndex of state.edit.faceIds) {
+    const tri = triangleVertexIds(mesh?.geometry, faceIndex);
+    if (!tri) continue;
+    ids.add(tri[0]);
+    ids.add(tri[1]);
+    ids.add(tri[2]);
+  }
+
+  return ids;
+}
+
+function updateEditPivotToSelection() {
+  if (!state.edit.active || !state.selected || !state.edit.pivot) return;
+
+  const ids = selectedEditVertexIds();
+  if (ids.size === 0) {
+    state.transform.detach();
+    if (state.transformHelper) state.transformHelper.visible = false;
+    return;
+  }
+
+  const position = state.selected.geometry.getAttribute("position");
+  const center = new THREE.Vector3();
+  const tmp = new THREE.Vector3();
+  let count = 0;
+
+  state.selected.updateMatrixWorld(true);
+  for (const id of ids) {
+    if (id < 0 || id >= position.count) continue;
+    tmp.fromBufferAttribute(position, id);
+    state.selected.localToWorld(tmp);
+    center.add(tmp);
+    count++;
+  }
+
+  if (count === 0) return;
+  center.multiplyScalar(1 / count);
+
+  state.edit.pivot.position.copy(center);
+  state.edit.pivot.quaternion.identity();
+  state.edit.pivot.scale.set(1, 1, 1);
+  state.edit.pivot.updateMatrixWorld(true);
+
+  state.transform.enabled = true;
+  state.transform.attach(state.edit.pivot);
+  state.transform.setSize?.(0.82);
+  if (state.transformHelper) state.transformHelper.visible = true;
+}
+
+function beginEditTransformDrag() {
+  const mesh = state.selected;
+  if (!state.edit.active || !canEditSubGeometry(mesh)) return;
+
+  const ids = selectedEditVertexIds();
+  if (ids.size === 0) return;
+
+  mesh.updateMatrixWorld(true);
+  state.edit.pivot.updateMatrixWorld(true);
+  const position = mesh.geometry.getAttribute("position");
+  const vertices = new Map();
+  const tmp = new THREE.Vector3();
+
+  for (const id of ids) {
+    if (id < 0 || id >= position.count) continue;
+    tmp.fromBufferAttribute(position, id);
+    vertices.set(id, tmp.clone());
+  }
+
+  state.edit.dragStart = {
+    vertices,
+    meshMatrixWorld: mesh.matrixWorld.clone(),
+    meshMatrixWorldInverse: mesh.matrixWorld.clone().invert(),
+    pivotMatrixWorld: state.edit.pivot.matrixWorld.clone(),
+  };
+}
+
+function applyEditTransformFromPivot() {
+  const mesh = state.selected;
+  const dragStart = state.edit.dragStart;
+  if (!state.edit.active || !dragStart || !canEditSubGeometry(mesh)) return;
+
+  mesh.updateMatrixWorld(true);
+  state.edit.pivot.updateMatrixWorld(true);
+
+  const deltaWorld = state.edit.pivot.matrixWorld.clone().multiply(dragStart.pivotMatrixWorld.clone().invert());
+  const position = mesh.geometry.getAttribute("position");
+  const local = new THREE.Vector3();
+  const world = new THREE.Vector3();
+
+  for (const [id, startLocal] of dragStart.vertices.entries()) {
+    world.copy(startLocal).applyMatrix4(dragStart.meshMatrixWorld).applyMatrix4(deltaWorld);
+    local.copy(world).applyMatrix4(dragStart.meshMatrixWorldInverse);
+    position.setXYZ(id, local.x, local.y, local.z);
+  }
+
+  position.needsUpdate = true;
+  mesh.geometry.computeVertexNormals();
+  mesh.geometry.computeBoundingBox();
+  mesh.geometry.computeBoundingSphere();
+  updateBoxHelper();
+  rebuildEditOverlay();
+  markDirty();
+}
+
+function finishEditTransformDrag() {
+  if (!state.edit.dragStart) return;
+  state.edit.dragStart = null;
+  updateEditPivotToSelection();
+  rebuildEditOverlay();
+  renderProperties();
+  markDirty();
+}
+
+function rebuildEditOverlay() {
+  removeEditOverlay();
+
+  const mesh = state.selected;
+  if (!state.edit.active || !canEditSubGeometry(mesh)) return;
+
+  const group = new THREE.Group();
+  group.name = "Edit mode overlay";
+  group.userData.__modelerOverlay = true;
+  group.renderOrder = 30;
+
+  const geometry = mesh.geometry;
+  const position = geometry.getAttribute("position");
+
+  if (position.count <= MAX_VISIBLE_EDIT_VERTICES) {
+    const pointsGeometry = new THREE.BufferGeometry();
+    pointsGeometry.setAttribute("position", position.clone());
+    const points = new THREE.Points(pointsGeometry, editVertexMaterial.clone());
+    points.name = "Vertices overlay";
+    points.userData.__modelerOverlay = true;
+    points.renderOrder = 31;
+    group.add(points);
+  }
+
+  const wireGeometry = new THREE.WireframeGeometry(geometry);
+  const wire = new THREE.LineSegments(wireGeometry, editWireMaterial.clone());
+  wire.name = "Edges overlay";
+  wire.userData.__modelerOverlay = true;
+  wire.renderOrder = 30;
+  group.add(wire);
+
+  addSelectedComponentsOverlay(mesh, group);
+
+  mesh.add(group);
+  state.edit.overlayGroup = group;
+}
+
+function removeEditOverlay() {
+  const overlay = state.edit.overlayGroup;
+  if (overlay?.parent) overlay.parent.remove(overlay);
+  if (overlay) disposeObject(overlay);
+  state.edit.overlayGroup = null;
+}
+
+function addSelectedComponentsOverlay(mesh, group) {
+  const geometry = mesh.geometry;
+  const position = geometry.getAttribute("position");
+  const selectedIds = selectedEditVertexIds();
+
+  if (selectedIds.size > 0) {
+    const selectedPositions = [];
+    for (const id of selectedIds) {
+      if (id < 0 || id >= position.count) continue;
+      selectedPositions.push(position.getX(id), position.getY(id), position.getZ(id));
+    }
+    if (selectedPositions.length) {
+      const g = new THREE.BufferGeometry();
+      g.setAttribute("position", new THREE.Float32BufferAttribute(selectedPositions, 3));
+      const points = new THREE.Points(g, editSelectedPointMaterial.clone());
+      points.name = "Selected vertices";
+      points.userData.__modelerOverlay = true;
+      points.renderOrder = 34;
+      group.add(points);
+    }
+  }
+
+  const selectedLines = [];
+
+  for (const key of state.edit.edgeKeys) {
+    const [a, b] = parseEdgeKey(key);
+    pushLinePositions(selectedLines, position, a, b);
+  }
+
+  for (const faceIndex of state.edit.faceIds) {
+    const tri = triangleVertexIds(geometry, faceIndex);
+    if (!tri) continue;
+    pushLinePositions(selectedLines, position, tri[0], tri[1]);
+    pushLinePositions(selectedLines, position, tri[1], tri[2]);
+    pushLinePositions(selectedLines, position, tri[2], tri[0]);
+  }
+
+  if (selectedLines.length) {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.Float32BufferAttribute(selectedLines, 3));
+    const lines = new THREE.LineSegments(g, editSelectedLineMaterial.clone());
+    lines.name = "Selected edges";
+    lines.userData.__modelerOverlay = true;
+    lines.renderOrder = 33;
+    group.add(lines);
+  }
+
+  if (state.edit.faceIds.size > 0) {
+    const facePositions = [];
+    for (const faceIndex of state.edit.faceIds) {
+      const tri = triangleVertexIds(geometry, faceIndex);
+      if (!tri) continue;
+      for (const id of tri) {
+        facePositions.push(position.getX(id), position.getY(id), position.getZ(id));
+      }
+    }
+    if (facePositions.length) {
+      const g = new THREE.BufferGeometry();
+      g.setAttribute("position", new THREE.Float32BufferAttribute(facePositions, 3));
+      g.computeVertexNormals();
+      const faces = new THREE.Mesh(g, editSelectedFaceMaterial.clone());
+      faces.name = "Selected faces";
+      faces.userData.__modelerOverlay = true;
+      faces.renderOrder = 32;
+      group.add(faces);
+    }
+  }
+}
+
+function pushLinePositions(out, position, a, b) {
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return;
+  if (a < 0 || b < 0 || a >= position.count || b >= position.count) return;
+  out.push(
+    position.getX(a), position.getY(a), position.getZ(a),
+    position.getX(b), position.getY(b), position.getZ(b),
+  );
+}
+
+function triangleCount(geometry) {
+  const position = geometry?.getAttribute("position");
+  if (!position) return 0;
+  return geometry.index ? Math.floor(geometry.index.count / 3) : Math.floor(position.count / 3);
+}
+
+function triangleVertexIds(geometry, faceIndex) {
+  if (!geometry || !Number.isFinite(faceIndex) || faceIndex < 0) return null;
+  const start = faceIndex * 3;
+  const position = geometry.getAttribute("position");
+  if (!position) return null;
+
+  if (geometry.index) {
+    if (start + 2 >= geometry.index.count) return null;
+    return [geometry.index.getX(start), geometry.index.getX(start + 1), geometry.index.getX(start + 2)];
+  }
+
+  if (start + 2 >= position.count) return null;
+  return [start, start + 1, start + 2];
+}
+
+function closestTriangleVertexToPoint(mesh, tri, worldPoint) {
+  const position = mesh.geometry.getAttribute("position");
+  const tmp = new THREE.Vector3();
+  let bestId = tri[0];
+  let bestDist = Infinity;
+
+  for (const id of tri) {
+    tmp.fromBufferAttribute(position, id);
+    mesh.localToWorld(tmp);
+    const dist = tmp.distanceToSquared(worldPoint);
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestId = id;
+    }
+  }
+
+  return bestId;
+}
+
+function closestTriangleEdgeToPoint(mesh, tri, worldPoint) {
+  const edges = [
+    [tri[0], tri[1]],
+    [tri[1], tri[2]],
+    [tri[2], tri[0]],
+  ];
+
+  let best = edges[0];
+  let bestDist = Infinity;
+
+  for (const candidate of edges) {
+    const dist = distancePointToWorldSegmentSquared(mesh, worldPoint, candidate[0], candidate[1]);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = candidate;
+    }
+  }
+
+  return edgeKey(best[0], best[1]);
+}
+
+function distancePointToWorldSegmentSquared(mesh, point, a, b) {
+  const position = mesh.geometry.getAttribute("position");
+  const pa = new THREE.Vector3().fromBufferAttribute(position, a);
+  const pb = new THREE.Vector3().fromBufferAttribute(position, b);
+  mesh.localToWorld(pa);
+  mesh.localToWorld(pb);
+
+  const ab = pb.sub(pa);
+  const t = THREE.MathUtils.clamp(point.clone().sub(pa).dot(ab) / Math.max(ab.lengthSq(), 1e-18), 0, 1);
+  return pa.add(ab.multiplyScalar(t)).distanceToSquared(point);
+}
+
+function edgeKey(a, b) {
+  return a < b ? `${a}:${b}` : `${b}:${a}`;
+}
+
+function parseEdgeKey(key) {
+  return String(key || "").split(":").map((value) => Number(value));
 }
 
 function updateBoxHelper() {
@@ -822,6 +1489,11 @@ function updateBoxHelper() {
 function renderProperties() {
   if (!state.selected) {
     properties.innerHTML = `<div class="properties-empty">Sélectionne un mesh dans la scène ou dans l’arbre.</div>`;
+    return;
+  }
+
+  if (state.edit.active) {
+    renderEditProperties();
     return;
   }
 
@@ -873,6 +1545,50 @@ function renderProperties() {
   });
 }
 
+function renderEditProperties() {
+  const mesh = state.selected;
+  if (!mesh) return;
+
+  mesh.updateMatrixWorld(true);
+  const stats = geometryStats(mesh);
+  const selectedIds = selectedEditVertexIds();
+  const selectedCount = editSelectedComponentCount();
+  const editable = canEditSubGeometry(mesh);
+  const geometry = mesh.geometry;
+
+  properties.innerHTML = `
+    <div class="prop-section">
+      <h3>Mode édition</h3>
+      <div class="prop-grid">
+        <div class="prop-row"><div class="prop-label">Mesh</div><div class="prop-value">${escapeHtml(mesh.name || `Mesh_${mesh.userData.__modelerId}`)}</div></div>
+        <div class="prop-row"><div class="prop-label">Sous-mode</div><div class="prop-value">${componentModeLabel()}</div></div>
+        <div class="prop-row"><div class="prop-label">Sélection</div><div class="prop-value">${selectedCount} ${componentModeLabel().toLowerCase()}${selectedCount > 1 ? "s" : ""}</div></div>
+        <div class="prop-row"><div class="prop-label">Vertices affectés</div><div class="prop-value">${selectedIds.size}</div></div>
+        <div class="prop-row"><div class="prop-label">Gizmo</div><div class="prop-value">${state.transform.getMode()} · ${state.transform.space}</div></div>
+      </div>
+      <div class="hint">Comme dans Blender : Tab = Objet/Édition, 1/2/3 = Vertex/Edge/Face, G/T = déplacer, R = rotation, S = scale, Shift/Ctrl+clic = multi-sélection, A = tout sélectionner.</div>
+    </div>
+
+    <div class="prop-section">
+      <h3>Géométrie source</h3>
+      <div class="prop-grid">
+        <div class="prop-row"><div class="prop-label">Éditable</div><div class="prop-value">${editable ? "oui" : "non"}</div></div>
+        <div class="prop-row"><div class="prop-label">Vertices</div><div class="prop-value">${stats.vertices}</div></div>
+        <div class="prop-row"><div class="prop-label">Triangles</div><div class="prop-value">${stats.triangles}</div></div>
+        <div class="prop-row"><div class="prop-label">Indexée</div><div class="prop-value">${geometry?.index ? "oui · topologie partagée" : "non · triangles séparés"}</div></div>
+      </div>
+      <div class="hint">Les modifications sont appliquées directement aux positions des vertices du BufferGeometry, puis baked dans le GLB exporté.</div>
+    </div>
+  `;
+}
+
+function editSelectedComponentCount() {
+  if (state.edit.componentMode === "vertex") return state.edit.vertexIds.size;
+  if (state.edit.componentMode === "edge") return state.edit.edgeKeys.size;
+  if (state.edit.componentMode === "face") return state.edit.faceIds.size;
+  return 0;
+}
+
 function geometryStats(mesh) {
   const geometry = mesh.geometry;
   if (!geometry) return { vertices: 0, triangles: 0 };
@@ -909,6 +1625,12 @@ function updateToolbarState() {
   scaleButton.classList.toggle("active", state.transform.getMode() === "scale");
   localButton.classList.toggle("active", state.transform.space === "local");
   worldButton.classList.toggle("active", state.transform.space === "world");
+
+  objectModeButton?.classList.toggle("active", !state.edit.active);
+  editModeButton?.classList.toggle("active", state.edit.active);
+  vertexModeButton?.classList.toggle("active", state.edit.active && state.edit.componentMode === "vertex");
+  edgeModeButton?.classList.toggle("active", state.edit.active && state.edit.componentMode === "edge");
+  faceModeButton?.classList.toggle("active", state.edit.active && state.edit.componentMode === "face");
 }
 
 function resetSelectedTransform() {
@@ -928,17 +1650,26 @@ function resetSelectedTransform() {
 function updateUiEnabled() {
   const hasModel = Boolean(state.modelRoot);
   const hasSelection = Boolean(state.selected);
+  const canSubEdit = hasSelection && canEditSubGeometry(state.selected);
+  const hasTransformTarget = state.edit.active ? hasEditComponentSelection() : hasSelection;
 
   fitButton.disabled = !hasModel;
   clearButton.disabled = !hasModel;
   exportGlbButton.disabled = !hasModel;
   convertIfcButton.disabled = !hasModel;
-  translateButton.disabled = !hasSelection;
-  rotateButton.disabled = !hasSelection;
-  scaleButton.disabled = !hasSelection;
-  localButton.disabled = !hasSelection;
-  worldButton.disabled = !hasSelection;
-  resetTransformButton.disabled = !hasSelection;
+
+  if (objectModeButton) objectModeButton.disabled = !hasModel;
+  if (editModeButton) editModeButton.disabled = !canSubEdit;
+  if (vertexModeButton) vertexModeButton.disabled = !state.edit.active;
+  if (edgeModeButton) edgeModeButton.disabled = !state.edit.active;
+  if (faceModeButton) faceModeButton.disabled = !state.edit.active;
+
+  translateButton.disabled = !hasTransformTarget;
+  rotateButton.disabled = !hasTransformTarget;
+  scaleButton.disabled = !hasTransformTarget;
+  localButton.disabled = !hasTransformTarget;
+  worldButton.disabled = !hasTransformTarget;
+  resetTransformButton.disabled = !hasSelection || state.edit.active;
 
   updateToolbarState();
 }
@@ -1084,6 +1815,7 @@ function createBakedExportScene(root) {
       return;
     }
 
+    if (object.userData?.__modelerOverlay) return;
     if (!object.isMesh || !object.geometry) return;
 
     const geometry = object.geometry.clone();

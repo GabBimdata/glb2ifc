@@ -2,7 +2,7 @@ import * as THREE from "three";
 import * as OBC from "@thatopen/components";
 import * as FRAGS from "@thatopen/fragments";
 import { openTypePicker } from './ifc-type-picker.js';
-import { getProject, updateProject, findProjectForIfcFile, setLastProjectId, getLastProjectId, editsMapToArray, editsArrayToMap, textToIfcFile } from './project-store.js';
+import { getProject, updateProject, findProjectForIfcFile, setLastProjectId, getLastProjectId, editsMapToArray, editsArrayToMap, textToIfcFile, safeFileName } from './project-store.js';
 
 const container = document.getElementById("container");
 const dropzone = document.getElementById("dropzone");
@@ -19,6 +19,7 @@ const exportEditedButton = document.getElementById("export-edited");
 const resetEditsButton = document.getElementById("reset-edits");
 const editCountEl = document.getElementById("edit-count");
 const reloadEditedButton = document.getElementById("reload-edited");
+const downloadCurrentIfcButton = document.getElementById("download-current-ifc");
 const modelerButton = document.getElementById("modeler-button");
 
 const state = {
@@ -50,6 +51,7 @@ const state = {
   projectId: null,
   project: null,
   restoringProjectEdits: false,
+  loadedFromModeler: false,
 };
 
 let projectPersistTimer = null;
@@ -1334,6 +1336,7 @@ async function clearModels() {
 }
 resetPendingEdits();
 updateModelerButtonState();
+updateDownloadCurrentIfcButtonState();
 }
 
 function updateModelerButtonState() {
@@ -1341,6 +1344,16 @@ function updateModelerButtonState() {
   // On laisse le bouton actif dès qu’un IFC texte est chargé : si aucun GLB
   // source n’est lié, le handler donne un message clair au lieu de masquer l’action.
   modelerButton.disabled = !state.lastIfcText;
+}
+
+function updateDownloadCurrentIfcButtonState() {
+  if (!downloadCurrentIfcButton) return;
+  downloadCurrentIfcButton.disabled = !state.lastIfcText;
+  if (state.loadedFromModeler && state.lastIfcText) {
+    downloadCurrentIfcButton.textContent = "Exporter IFC édité";
+  } else {
+    downloadCurrentIfcButton.textContent = "Télécharger IFC";
+  }
 }
 
 async function attachProjectContextForFile(fileName) {
@@ -1464,6 +1477,7 @@ async function loadProjectFromUrl() {
 
     state.projectId = project.id;
     state.project = project;
+    state.loadedFromModeler = params.get("from") === "modeler" || project.lastOpenedIn === "modeler";
     setLastProjectId(project.id);
 
     state.restoringProjectEdits = true;
@@ -1472,6 +1486,10 @@ async function loadProjectFromUrl() {
 
     restorePendingEditsFromProject(project);
     updateModelerButtonState();
+    updateDownloadCurrentIfcButtonState();
+    if (state.loadedFromModeler) {
+      setStatus(`IFC régénéré depuis le GLB édité : ${project.ifcFileName || state.currentFileName || "model.ifc"}.`, "ok");
+    }
   } catch (error) {
     state.restoringProjectEdits = false;
     console.error(error);
@@ -1539,6 +1557,7 @@ async function loadFile(file) {
     await attachProjectContextForFile(file.name);
     if (state.project?.edits?.length) restorePendingEditsFromProject(state.project);
     updateModelerButtonState();
+    updateDownloadCurrentIfcButtonState();
   } catch (error) {
     console.error(error);
     setStatus(`Erreur viewer : ${error.message || error}`, "error");
@@ -2572,54 +2591,92 @@ function applyTypeChange(localId, newType) {
 }
 
 async function exportEditedIfc() {
-  if (!state.lastIfcText || state.pendingEdits.size === 0) return;
+  if (!state.lastIfcText) return;
 
   const edits = [];
   for (const [localId, edit] of state.pendingEdits.entries()) {
     edits.push({ localId, toType: edit.toType });
   }
 
-  setStatus(`Export en cours (${edits.length} modifs)…`);
+  setStatus(edits.length > 0
+    ? `Export en cours (${edits.length} modifs)…`
+    : "Export de l'IFC courant…");
 
   try {
-    const response = await fetch('/api/reexport', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        ifcText: state.lastIfcText,
-        edits,
-        fileName: state.currentFileName,
-      }),
-    });
+    let blob;
+    let applied = 0;
+    let errors = 0;
 
-    if (!response.ok) {
-      const err = await response.json().catch(() => ({ error: 'Erreur serveur' }));
-      throw new Error(err.error);
+    if (edits.length > 0) {
+      const response = await fetch('/api/reexport', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ifcText: state.lastIfcText,
+          edits,
+          fileName: state.currentFileName,
+        }),
+      });
+
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({ error: 'Erreur serveur' }));
+        throw new Error(err.error);
+      }
+
+      applied = Number(response.headers.get('X-Edits-Applied') || 0);
+      errors = Number(response.headers.get('X-Edits-Errors') || 0);
+      blob = await response.blob();
+    } else {
+      blob = new Blob([state.lastIfcText], { type: 'application/x-step' });
     }
 
-    const applied = response.headers.get('X-Edits-Applied');
-    const errors  = response.headers.get('X-Edits-Errors');
-    const blob = await response.blob();
+    const fileName = currentIfcDownloadName(edits.length > 0);
+    downloadIfcBlob(blob, fileName);
 
-    if (state.lastEditedBlobUrl) URL.revokeObjectURL(state.lastEditedBlobUrl);
-    const url = URL.createObjectURL(blob);
-    state.lastEditedBlobUrl = url;
-
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = (state.currentFileName || 'edited.ifc').replace(/\.ifc$/i, '') + '.edited.ifc';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-
-    setStatus(`Export OK · ${applied} modif(s) appliquée(s)${errors > 0 ? ` · ${errors} erreur(s)` : ''}`, "ok");
-    if (reloadEditedButton) {
-      reloadEditedButton.disabled = false;
-      reloadEditedButton.style.display = '';
-      reloadEditedButton.dataset.blobUrl = url;
+    if (state.projectId) {
+      const ifcText = edits.length > 0 ? await blob.text() : state.lastIfcText;
+      state.project = await updateProject(state.projectId, {
+        ifcText,
+        ifcFileName: fileName,
+        edits: [],
+        lastOpenedIn: 'viewer',
+      });
+      state.lastIfcText = ifcText;
+      state.currentFileName = fileName;
+      resetPendingEdits();
+      updateDownloadCurrentIfcButtonState();
     }
+
+    setStatus(edits.length > 0
+      ? `Export OK · ${applied} modif(s) appliquée(s)${errors > 0 ? ` · ${errors} erreur(s)` : ''}`
+      : `Export OK · IFC courant téléchargé : ${fileName}`, "ok");
   } catch (err) {
     setStatus(`Erreur export : ${err.message || err}`, "error");
+  }
+}
+
+function currentIfcDownloadName(hasReclassificationEdits = false) {
+  const source = state.currentFileName || state.project?.ifcFileName || 'model.ifc';
+  if (!hasReclassificationEdits) return safeFileName(source, 'model.ifc');
+  return safeFileName(source.replace(/\.ifc$/i, '') + '.edited.ifc', 'model.edited.ifc');
+}
+
+function downloadIfcBlob(blob, fileName) {
+  if (state.lastEditedBlobUrl) URL.revokeObjectURL(state.lastEditedBlobUrl);
+  const url = URL.createObjectURL(blob);
+  state.lastEditedBlobUrl = url;
+
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = safeFileName(fileName, 'model.ifc');
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+
+  if (reloadEditedButton) {
+    reloadEditedButton.disabled = false;
+    reloadEditedButton.style.display = '';
+    reloadEditedButton.dataset.blobUrl = url;
   }
 }
 
@@ -2640,6 +2697,7 @@ async function reloadEditedIfc() {
 
 if (editModeButton) editModeButton.addEventListener('click', toggleEditMode);
 if (exportEditedButton) exportEditedButton.addEventListener('click', exportEditedIfc);
+if (downloadCurrentIfcButton) downloadCurrentIfcButton.addEventListener('click', exportEditedIfc);
 if (resetEditsButton) resetEditsButton.addEventListener('click', () => {
   if (state.pendingEdits.size === 0) return;
   if (!confirm(`Annuler ${state.pendingEdits.size} modification(s) ?`)) return;

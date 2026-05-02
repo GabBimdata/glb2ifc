@@ -415,7 +415,16 @@
       <div id="container"></div>
       <div class="toolbar">
         <div class="toolbar-group">
-          <button id="mode-translate" disabled title="T">Translate</button>
+          <button id="mode-object" disabled title="Tab">Object</button>
+          <button id="mode-edit" disabled title="Tab">Edit</button>
+        </div>
+        <div class="toolbar-group">
+          <button id="mode-vertex" disabled title="1">Vertex</button>
+          <button id="mode-edge" disabled title="2">Edge</button>
+          <button id="mode-face" disabled title="3">Face</button>
+        </div>
+        <div class="toolbar-group">
+          <button id="mode-translate" disabled title="G ou T">Move</button>
           <button id="mode-rotate" disabled title="R">Rotate</button>
           <button id="mode-scale" disabled title="S">Scale</button>
         </div>
@@ -426,9 +435,9 @@
         </div>
       </div>
       <div class="floating-help">
-        <strong>Raccourcis</strong><br />
-        Clic mesh = sélectionner · T/R/S = transform · L/W = local/world · Échap = désélectionner.<br />
-        À l’export, les transformations sont baked dans les positions des vertices pour ton pipeline IFC.
+        <strong>Raccourcis façon Blender</strong><br />
+        Tab = Object/Edit · 1/2/3 = Vertex/Edge/Face · Clic = sélectionner · Shift/Ctrl+clic = multi-sélection · A = tout sélectionner.<br />
+        G/T = move · R = rotate · S = scale · L/W = local/world · Échap = clear/exit. Les vertices modifiés sont baked dans le GLB avant conversion IFC.
       </div>
     </main>
 
