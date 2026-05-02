@@ -48,6 +48,8 @@ const state = {
   projectId: null,
   project: null,
   returnToViewer: false,
+  ifcOverlayGroup: null,
+  ifcOverlayCount: 0,
 };
 
 const selectionMaterial = new THREE.MeshBasicMaterial({
@@ -280,13 +282,23 @@ async function loadProjectFromUrl() {
   const file = blobToGlbFile(project.glbBlob, project.glbFileName || "model.glb");
   await loadFile(file, { fromProject: true });
 
+  const overlayCount = addGeneratedIfcSpacesFromProject(project.ifcText);
+  if (overlayCount > 0) {
+    indexMeshes(state.modelRoot);
+    renderTree();
+    renderProperties();
+    updateUiEnabled();
+    setStatus(`GLB source ouvert depuis le viewer · ${overlayCount} space(s) IFC généré(s) ajouté(s) comme géométries éditables.`, "ok");
+  }
+
   if (state.returnToViewer && convertIfcButton) {
     convertIfcButton.textContent = "Enregistrer → retour viewer IFC";
   }
 
   const pending = Number(project.edits?.length || 0);
   if (pending > 0) {
-    setStatus("GLB source ouvert depuis le viewer · " + pending + " reclassification(s) seront réappliquée(s) au retour.", "ok");
+    const overlaySuffix = state.ifcOverlayCount > 0 ? ` · ${state.ifcOverlayCount} space(s) IFC éditable(s)` : "";
+    setStatus("GLB source ouvert depuis le viewer · " + pending + " reclassification(s) seront réappliquée(s) au retour" + overlaySuffix + ".", "ok");
   }
 }
 
@@ -333,6 +345,243 @@ function createGLTFLoader() {
   dracoLoader.setDecoderPath("/vendor/draco/");
   loader.setDRACOLoader(dracoLoader);
   return loader;
+}
+
+function addGeneratedIfcSpacesFromProject(ifcText) {
+  if (!state.modelRoot || !ifcText) return 0;
+
+  // If the GLB already contains editable spaces from a previous modeler round-trip,
+  // do not duplicate the same IfcSpace volumes from the IFC text.
+  const alreadyHasEditableSpaces = state.meshes.some((mesh) =>
+    String(mesh.userData?.smeltIfcType || '').toUpperCase() === 'IFCSPACE'
+  );
+  if (alreadyHasEditableSpaces) return 0;
+
+  const spaces = extractIfcSpaceMeshes(ifcText);
+  if (!spaces.length) return 0;
+
+  const group = new THREE.Group();
+  group.name = "Generated IFC Spaces";
+  group.userData.smeltOverlayGroup = true;
+
+  const material = new THREE.MeshBasicMaterial({
+    color: 0x74b9ff,
+    transparent: true,
+    opacity: 0.30,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+  });
+
+  for (const space of spaces) {
+    const mesh = new THREE.Mesh(space.geometry, material.clone());
+    mesh.name = space.name || `IfcSpace_${space.localId}`;
+    mesh.frustumCulled = false;
+    mesh.renderOrder = 2;
+    mesh.userData.smeltIfcType = "IFCSPACE";
+    mesh.userData.smeltSource = "ifc-generated-overlay";
+    mesh.userData.smeltOriginalLocalId = space.localId;
+    mesh.userData.smeltPredefinedType = space.predefinedType || ".INTERNAL.";
+    mesh.userData.smeltEditableGeneratedSpace = true;
+    group.add(mesh);
+  }
+
+  state.modelRoot.add(group);
+  state.ifcOverlayGroup = group;
+  state.ifcOverlayCount = spaces.length;
+  return spaces.length;
+}
+
+function extractIfcSpaceMeshes(ifcText) {
+  const entities = parseIfcEntitiesForModeler(ifcText);
+  const out = [];
+
+  for (const entity of entities.values()) {
+    if (entity.type !== "IFCSPACE") continue;
+
+    const representationId = parseIfcRefForModeler(entity.rawArgs[6]);
+    if (!representationId) continue;
+
+    const geometries = triangulatedGeometriesForRepresentation(entities, representationId);
+    if (!geometries.length) continue;
+
+    const geometry = mergeBufferGeometriesForModeler(geometries);
+    if (!geometry) continue;
+
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
+
+    out.push({
+      localId: entity.id,
+      name: parseIfcStringForModeler(entity.rawArgs[2]) || `IfcSpace #${entity.id}`,
+      predefinedType: String(entity.rawArgs[9] || ".INTERNAL.").trim(),
+      geometry,
+    });
+  }
+
+  return out;
+}
+
+function triangulatedGeometriesForRepresentation(entities, representationId) {
+  const geometries = [];
+  const visited = new Set();
+  const queue = [representationId];
+
+  while (queue.length) {
+    const id = queue.shift();
+    if (!Number.isFinite(id) || visited.has(id)) continue;
+    visited.add(id);
+
+    const entity = entities.get(id);
+    if (!entity) continue;
+
+    if (entity.type === "IFCTRIANGULATEDFACESET") {
+      const geometry = geometryFromIfcTriangulatedFaceSet(entities, entity);
+      if (geometry) geometries.push(geometry);
+      continue;
+    }
+
+    for (const ref of refsFromIfcArgsForModeler(entity.rawArgs.join(" "))) {
+      if (!visited.has(ref)) queue.push(ref);
+    }
+  }
+
+  return geometries;
+}
+
+function geometryFromIfcTriangulatedFaceSet(entities, faceSet) {
+  const pointListId = parseIfcRefForModeler(faceSet.rawArgs[0]);
+  const pointList = entities.get(pointListId);
+  if (!pointList || pointList.type !== "IFCCARTESIANPOINTLIST3D") return null;
+
+  const points = parseIfcPointList3DForModeler(pointList.rawArgs[0]);
+  const faces = parseIfcIndexTriplesForModeler(faceSet.rawArgs[3] || faceSet.rawArgs[2]);
+  if (!points.length || !faces.length) return null;
+
+  const positions = [];
+  for (const [ifcX, ifcY, ifcZ] of points) {
+    positions.push(ifcX, ifcZ, -ifcY);
+  }
+
+  const indices = [];
+  for (const face of faces) {
+    indices.push(face[0] - 1, face[1] - 1, face[2] - 1);
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setIndex(indices);
+  return geometry;
+}
+
+function mergeBufferGeometriesForModeler(geometries) {
+  if (!geometries.length) return null;
+  if (geometries.length === 1) return geometries[0];
+
+  const positions = [];
+  const indices = [];
+  let vertexOffset = 0;
+
+  for (const geometry of geometries) {
+    const position = geometry.getAttribute("position");
+    if (!position) continue;
+    for (let i = 0; i < position.count; i++) {
+      positions.push(position.getX(i), position.getY(i), position.getZ(i));
+    }
+
+    if (geometry.index) {
+      for (let i = 0; i < geometry.index.count; i++) indices.push(geometry.index.getX(i) + vertexOffset);
+    } else {
+      for (let i = 0; i < position.count; i++) indices.push(i + vertexOffset);
+    }
+
+    vertexOffset += position.count;
+    geometry.dispose?.();
+  }
+
+  const merged = new THREE.BufferGeometry();
+  merged.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  merged.setIndex(indices);
+  return merged;
+}
+
+function parseIfcEntitiesForModeler(ifcText) {
+  const entities = new Map();
+  const re = /#(\d+)\s*=\s*([A-Z0-9_]+)\s*\(([\s\S]*?)\);/gi;
+  let match;
+  while ((match = re.exec(ifcText))) {
+    const id = Number(match[1]);
+    const type = match[2].toUpperCase();
+    const rawArgs = splitIfcArgsForModeler(match[3]);
+    entities.set(id, { id, type, rawArgs });
+  }
+  return entities;
+}
+
+function splitIfcArgsForModeler(text) {
+  const args = [];
+  let current = "";
+  let depth = 0;
+  let inString = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    if (char === "'") {
+      current += char;
+      if (inString && text[i + 1] === "'") {
+        current += text[i + 1];
+        i++;
+      } else {
+        inString = !inString;
+      }
+      continue;
+    }
+    if (!inString && char === "(") depth++;
+    if (!inString && char === ")") depth--;
+    if (!inString && depth === 0 && char === ",") {
+      args.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  if (current.trim()) args.push(current.trim());
+  return args;
+}
+
+function parseIfcRefForModeler(value) {
+  const match = String(value || "").match(/#(\d+)/);
+  return match ? Number(match[1]) : null;
+}
+
+function refsFromIfcArgsForModeler(value) {
+  return [...String(value || "").matchAll(/#(\d+)/g)].map((match) => Number(match[1]));
+}
+
+function parseIfcStringForModeler(value) {
+  const text = String(value || "").trim();
+  if (!text || text === "$" || text === "*") return "";
+  if (text.startsWith("'") && text.endsWith("'")) return text.slice(1, -1).replace(/''/g, "'");
+  return "";
+}
+
+function parseIfcPointList3DForModeler(arg) {
+  const numbers = [...String(arg || "").matchAll(/[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][+-]?\d+)?/g)]
+    .map((match) => Number(match[0]))
+    .filter(Number.isFinite);
+  const points = [];
+  for (let i = 0; i + 2 < numbers.length; i += 3) points.push([numbers[i], numbers[i + 1], numbers[i + 2]]);
+  return points;
+}
+
+function parseIfcIndexTriplesForModeler(arg) {
+  const triples = [];
+  const groups = String(arg || "").match(/\([^()]*\)/g) || [];
+  for (const group of groups) {
+    const nums = [...group.matchAll(/\d+/g)].map((m) => Number(m[0]));
+    if (nums.length >= 3) triples.push(nums.slice(0, 3));
+  }
+  return triples;
 }
 
 function indexMeshes(root) {
@@ -383,6 +632,7 @@ function indexMeshes(root) {
 
 function normalizeEditablePivotToGeometryCenter(object) {
   if (!object?.isMesh || object.isInstancedMesh || !object.geometry) return;
+  if (object.userData.__pivotNormalized) return;
 
   const geometry = object.geometry;
   const position = geometry.getAttribute("position");
@@ -434,6 +684,8 @@ function clearScene(options = {}) {
   state.modelRoot = null;
   state.currentFile = null;
   state.currentFileName = "";
+  state.ifcOverlayGroup = null;
+  state.ifcOverlayCount = 0;
   state.meshes = [];
   renderTree();
   renderProperties();

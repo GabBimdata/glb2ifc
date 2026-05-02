@@ -146,6 +146,25 @@ function computeBoundingBox(positions) {
   return { min, max };
 }
 
+function safeNodeExtras(node) {
+  try {
+    const extras = node?.getExtras?.();
+    return extras && typeof extras === 'object' ? extras : {};
+  } catch {
+    return {};
+  }
+}
+
+function manualIfcTypeFromExtras(extras, nodeName = '') {
+  const raw = String(extras?.smeltIfcType || extras?.ifcType || extras?.IFCType || '').toUpperCase();
+  if (raw === 'IFCSPACE') return 'IFCSPACE';
+
+  if (/^IFCSPACE[_\s#-]/i.test(String(nodeName || ''))) return 'IFCSPACE';
+  if (/^Generated IFC Spaces/i.test(String(nodeName || ''))) return '';
+
+  return '';
+}
+
 function extractMaterialInfo(primitive) {
   const material = primitive.getMaterial();
   if (!material) {
@@ -177,6 +196,9 @@ async function extractMeshesFromGLB(glbPath) {
     const mesh = node.getMesh();
     if (!mesh) continue;
     const worldMatrix = node.getWorldMatrix();
+    const extras = safeNodeExtras(node);
+    const nodeName = node.getName() || mesh.getName() || 'unnamed';
+    const manualIfcType = manualIfcTypeFromExtras(extras, nodeName);
 
     for (const primitive of mesh.listPrimitives()) {
       const positionAttr = primitive.getAttribute('POSITION');
@@ -198,10 +220,14 @@ async function extractMeshesFromGLB(glbPath) {
       const materialInfo = extractMaterialInfo(primitive);
 
       extracted.push({
-        name: node.getName() || mesh.getName() || 'unnamed',
+        name: nodeName,
         positions: transformed,
         indices: Array.from(indices),
         bbox: computeBoundingBox(transformed),
+        manualIfcType,
+        smeltSource: extras?.smeltSource || '',
+        smeltOriginalLocalId: extras?.smeltOriginalLocalId || null,
+        smeltPredefinedType: extras?.smeltPredefinedType || null,
         ...materialInfo
       });
     }
@@ -213,6 +239,10 @@ async function extractMeshesFromGLB(glbPath) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Mesh classification
 // ─────────────────────────────────────────────────────────────────────────────
+
+function isManualSpaceMesh(mesh) {
+  return String(mesh?.manualIfcType || '').toUpperCase() === 'IFCSPACE';
+}
 
 const STOREY_LEVEL_TOLERANCE = 0.28;
 // Tuned for older buildings: a ground-floor ceiling of ~2.18m should still
@@ -1749,6 +1779,7 @@ const DEFAULT_CLASS_COLORS = {
   roof:   { r: 0.58, g: 0.17, b: 0.12 }, // roof red/brown
   door:   { r: 0.45, g: 0.25, b: 0.12 }, // wood/brown
   window: { r: 0.35, g: 0.62, b: 0.88 }, // glass blue
+  space:  { r: 0.45, g: 0.72, b: 1.00 }, // editable/generated spaces
   proxy:  { r: 0.68, g: 0.72, b: 0.78 }  // neutral blue-grey fallback
 };
 
@@ -3847,6 +3878,7 @@ function generateIFC(meshes, storeys, originalFilename, scaleInfo = null) {
     materials: 0,
     layers: 0,
     spaces: 0,
+    manualSpaces: 0,
     zones: 0,
     roomPrototypeSpaces: 0,
     slopedRoofSpaces: 0,
@@ -3866,7 +3898,7 @@ function generateIFC(meshes, storeys, originalFilename, scaleInfo = null) {
     normalizedMaxDimension: Number(scaleInfo?.normalizedMaxDimension || 0)
   };
 
-  const nameCounters = { wall: 0, slab: 0, beam: 0, column: 0, stair: 0, roof: 0, door: 0, window: 0, proxy: 0 };
+  const nameCounters = { wall: 0, slab: 0, beam: 0, column: 0, stair: 0, roof: 0, door: 0, window: 0, proxy: 0, space: 0 };
   const nameLabels = {
     wall: 'Wall',
     slab: 'Slab',
@@ -3876,7 +3908,8 @@ function generateIFC(meshes, storeys, originalFilename, scaleInfo = null) {
     roof: 'Roof',
     door: 'Door',
     window: 'Window',
-    proxy: 'Proxy'
+    proxy: 'Proxy',
+    space: 'Space'
   };
 
   function generatedElementName(mesh) {
@@ -3892,50 +3925,119 @@ function generateIFC(meshes, storeys, originalFilename, scaleInfo = null) {
   const zoneEntitiesByStorey = Array.from({ length: storeys.length }, () => []);
   const allSpaceRecords = [];
   const elementIdByMesh = new Map();
+  const manualSpaceMeshes = meshes.filter(isManualSpaceMesh);
 
-  for (let i = 0; i < storeys.length; i++) {
-    const spaces = createSlabDrivenSpacesForStorey(i);
-    if (spaces.length === 0) continue;
-
-    const ids = spaces.map(space => space.id);
-
-    allSpaceRecords.push(...spaces);
-    spaceEntitiesByStorey[i].push(...ids);
-    stats.spaces += spaces.length;
-    stats.roomPrototypeSpaces += spaces.filter(space => space.roomPrototype).length;
-    stats.slopedRoofSpaces += spaces.filter(space => space.hasSlopedRoofTop).length;
-    stats.beamGuidedRoofSpaces += spaces.filter(space => space.roofTopSource === 'beam').length;
-
-    for (const space of spaces) {
-      if (space.hasQuantities) stats.quantities++;
+  function createManualSpaceFromMesh(mesh) {
+    const coords = [];
+    for (let i = 0; i < mesh.positions.length; i += 3) {
+      const x = mesh.positions[i];
+      const y = mesh.positions[i + 1];
+      const z = mesh.positions[i + 2];
+      coords.push(`(${x.toFixed(6)},${(-z).toFixed(6)},${y.toFixed(6)})`);
     }
 
-    const byCategory = new Map();
-    for (const space of spaces) {
-      const key = space.category.key;
-      if (!byCategory.has(key)) {
-        byCategory.set(key, {
-          category: space.category,
-          ids: [],
-          area: 0
-        });
+    const pointList = nextId();
+    lines.push(`${pointList}=IFCCARTESIANPOINTLIST3D((${coords.join(',')}));`);
+
+    const faces = [];
+    for (let i = 0; i < mesh.indices.length; i += 3) {
+      faces.push(`(${mesh.indices[i] + 1},${mesh.indices[i + 1] + 1},${mesh.indices[i + 2] + 1})`);
+    }
+
+    const faceSet = nextId();
+    lines.push(`${faceSet}=IFCTRIANGULATEDFACESET(${pointList},$,$,(${faces.join(',')}),$);`);
+
+    const style = getOrCreateStyle(mesh.color || DEFAULT_CLASS_COLORS.space, 0.35);
+    if (style) lines.push(`${nextId()}=IFCSTYLEDITEM(${faceSet},(${style.presStyle}),$);`);
+
+    const shapeRep = nextId();
+    lines.push(`${shapeRep}=IFCSHAPEREPRESENTATION(${styleContext},'Body','Tessellation',(${faceSet}));`);
+    queuePresentationLayer({ classification: 'space' }, shapeRep);
+
+    const productShape = nextId();
+    lines.push(`${productShape}=IFCPRODUCTDEFINITIONSHAPE($,$,(${shapeRep}));`);
+
+    const storeyIndex = Math.max(0, Math.min(storeys.length - 1, Number.isFinite(mesh.storeyIndex) ? mesh.storeyIndex : 0));
+    const placement = nextId();
+    lines.push(`${placement}=IFCLOCALPLACEMENT(${storeyPlacements[storeyIndex]},${axis});`);
+
+    const safeName = escapeIFCString(mesh.name || generatedElementName({ classification: 'space' }));
+    const predefinedRaw = String(mesh.smeltPredefinedType || '.INTERNAL.').trim().toUpperCase();
+    const predefined = /^\.[A-Z0-9_]+\.$/.test(predefinedRaw) ? predefinedRaw : '.INTERNAL.';
+    const spaceId = nextId();
+    lines.push(`${spaceId}=IFCSPACE('${ifcGuid()}',${ownerHistory},'${safeName}',$,'manual_space',${placement},${productShape},'${safeName}',.ELEMENT.,${predefined},$);`);
+
+    addSpaceCommonPset(spaceId);
+
+    const s = bboxStats(mesh);
+    const grossArea = Math.max(0.0001, s.sizeX * s.sizeZ);
+    const height = Math.max(0.0001, s.sizeY);
+    const volume = grossArea * height;
+    if (addElementQuantity(spaceId, 'Qto_SpaceBaseQuantities', [
+      addQuantityArea('GrossFloorArea', grossArea),
+      addQuantityArea('NetFloorArea', grossArea),
+      addQuantityLength('Height', height),
+      addQuantityVolume('GrossVolume', volume),
+      addQuantityVolume('NetVolume', volume)
+    ])) {
+      stats.quantities++;
+    }
+
+    spaceEntitiesByStorey[storeyIndex].push(spaceId);
+    stats.spaces++;
+    stats.manualSpaces++;
+    return spaceId;
+  }
+
+  if (manualSpaceMeshes.length === 0) {
+    for (let i = 0; i < storeys.length; i++) {
+      const spaces = createSlabDrivenSpacesForStorey(i);
+      if (spaces.length === 0) continue;
+
+      const ids = spaces.map(space => space.id);
+
+      allSpaceRecords.push(...spaces);
+      spaceEntitiesByStorey[i].push(...ids);
+      stats.spaces += spaces.length;
+      stats.roomPrototypeSpaces += spaces.filter(space => space.roomPrototype).length;
+      stats.slopedRoofSpaces += spaces.filter(space => space.hasSlopedRoofTop).length;
+      stats.beamGuidedRoofSpaces += spaces.filter(space => space.roofTopSource === 'beam').length;
+
+      for (const space of spaces) {
+        if (space.hasQuantities) stats.quantities++;
       }
 
-      const group = byCategory.get(key);
-      group.ids.push(space.id);
-      group.area += space.area;
-    }
+      const byCategory = new Map();
+      for (const space of spaces) {
+        const key = space.category.key;
+        if (!byCategory.has(key)) {
+          byCategory.set(key, {
+            category: space.category,
+            ids: [],
+            area: 0
+          });
+        }
 
-    for (const group of byCategory.values()) {
-      const zone = createZoneForStorey(i, group.ids, group.area, group.category);
-      if (zone) {
-        zoneEntitiesByStorey[i].push(zone);
-        stats.zones++;
+        const group = byCategory.get(key);
+        group.ids.push(space.id);
+        group.area += space.area;
+      }
+
+      for (const group of byCategory.values()) {
+        const zone = createZoneForStorey(i, group.ids, group.area, group.category);
+        if (zone) {
+          zoneEntitiesByStorey[i].push(zone);
+          stats.zones++;
+        }
       }
     }
+  } else {
+    stats.autoSpacesReplacedByManual = true;
+    for (const mesh of manualSpaceMeshes) createManualSpaceFromMesh(mesh);
   }
 
   for (const mesh of meshes) {
+    if (isManualSpaceMesh(mesh)) continue;
     stats[mesh.classification]++;
     if (mesh.classification === 'wall' && mesh.isExternal) stats.externalWall++;
 
@@ -5007,6 +5109,10 @@ app.post('/api/convert', upload.single('glb'), async (req, res) => {
 
     const meshes = await extractMeshesFromGLB(glbPath);
     console.log(`  Extracted ${meshes.length} meshes`);
+    const manualSpaceCount = meshes.filter(isManualSpaceMesh).length;
+    if (manualSpaceCount > 0) {
+      console.log(`  Manual/generated IFC space overlay meshes: ${manualSpaceCount}`);
+    }
     if (meshes.length === 0) throw new Error('No meshes found in GLB file');
 
     const scaleInfo = normalizeMeshUnits(meshes);
@@ -5017,24 +5123,30 @@ app.post('/api/convert', upload.single('glb'), async (req, res) => {
       console.log(`  Input scale normalization: none (${scaleInfo.reason})`);
     }
 
-    for (const mesh of meshes) mesh.classification = classifyMeshFirstPass(mesh);
+    for (const mesh of meshes) {
+      mesh.classification = isManualSpaceMesh(mesh) ? 'space' : classifyMeshFirstPass(mesh);
+    }
+
+    const physicalMeshes = meshes.filter(mesh => !isManualSpaceMesh(mesh));
 
     // First detect preliminary storeys, then use them to decide whether a thin
     // element starts at floor level (door) or above it (window). Re-run storey
     // detection after refinement so reclassified opening panels do not pollute
-    // the wall-base fallback.
-    let storeys = detectStoreys(meshes);
-    refineOpenings(meshes, storeys);
-    storeys = detectStoreys(meshes);
+    // the wall-base fallback. Manual IfcSpace overlays are excluded from this
+    // structural detection pass because they are spatial volumes, not building
+    // elements.
+    let storeys = detectStoreys(physicalMeshes);
+    refineOpenings(physicalMeshes, storeys);
+    storeys = detectStoreys(physicalMeshes);
     assignStoreys(meshes, storeys);
 
-    const roofRefinement = refineRoofs(meshes, storeys);
+    const roofRefinement = refineRoofs(physicalMeshes, storeys);
     if (roofRefinement.promoted > 0) {
-      storeys = detectStoreys(meshes);
+      storeys = detectStoreys(physicalMeshes);
       assignStoreys(meshes, storeys);
     }
 
-    markExternalWalls(meshes, storeys);
+    markExternalWalls(physicalMeshes, storeys);
     console.log(`  Detected ${storeys.length} storey(s) at elevations: ${storeys.map(s => s.elevation.toFixed(2)).join(', ')}`);
     for (const storey of storeys) {
       const confidence = storey.confidence != null ? ` confidence=${storey.confidence.toFixed(2)}` : '';
@@ -5063,6 +5175,9 @@ app.post('/api/convert', upload.single('glb'), async (req, res) => {
     }
     console.log(`  IFC materials: ${stats.materials || 0}`);
     console.log(`  IFC spaces: ${stats.spaces || 0}`);
+    if (stats.manualSpaces > 0) {
+      console.log(`  Manual/edited IFC spaces: ${stats.manualSpaces}`);
+    }
     console.log(`  IFC zones: ${stats.zones || 0}`);
     console.log(`  Room prototype spaces: ${stats.roomPrototypeSpaces || 0}`);
     console.log(`  Sloped roof spaces: ${stats.slopedRoofSpaces || 0}`);
