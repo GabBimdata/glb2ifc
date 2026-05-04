@@ -143,26 +143,40 @@ The modeler at `http://localhost:3737/modeler.html` can now be used both to edit
 Current authoring MVP:
 
 - `Nouveau modèle` creates an empty editable scene.
-- storey authoring: `+ Storey` creates a level above the current model, `‹` / `›` or `PageUp` / `PageDown` navigate between storeys, and `Duplicate` copies the active storey's authored walls/slabs/doors/windows to a new level above.
+- storey authoring: `+ Storey` creates a level above the current model, `‹` / `›` or `PageUp` / `PageDown` navigate between storeys, and `Duplicate` copies the active storey's authored walls/slabs/doors/windows/roofs to a new level above. `Delete Storey` removes the active storey, its authored elements, and its reference plan; the action is undoable with Ctrl/Cmd+Z. Copied doors/windows are re-linked to the copied host walls so deleting an opening restores the wall on the duplicated storey, not the source storey.
 - new Wall / Slab geometry is locked to the active storey and stores `storeyName` / `storeyElevation` metadata in the GLB user data.
 - `Plan 2D` imports an image reference for the active storey; reference planes are viewport-only overlays and are not exported to GLB / IFC.
 - `Scale plan` calibrates the reference by clicking two points on the plan and entering their real distance in metres.
-- `Wall` is a continuous polyline tool with live ghost preview: after the first click, the full wall volume, thickness, snap target, and alignment are visible before committing the next point. It supports centerline / left-face / right-face alignment; `Stop` or `Esc` ends the trace and returns to `Select`. Connected authored walls are re-trimmed by storey with a tiny anti-collision joint clearance so IFC exports do not contain overlapping wall solids at corners.
-- `Slab` creates a rectangular slab mesh from two short clicks on snapped grid corners, then returns to `Select`. Authored slabs keep the drawn construction boundary for wall snapping, but their exported/visible body is automatically inset under the wall thickness to avoid visible coplanar slab edges on exterior façades.
+- `Wall` is a continuous polyline tool with live ghost preview: after the first click, the full wall volume, thickness, snap target, and alignment are visible before committing the next point. It supports centerline / left-face / right-face alignment; holding `Shift` while placing the next point constrains the wall segment to 0° / 45° / 90° drafting guides; `Stop` or `Esc` ends the trace and returns to `Select`. Connected authored walls are re-trimmed by storey with a tiny anti-collision joint clearance so IFC exports do not contain overlapping wall solids at corners.
+- `Slab` creates a rectangular slab mesh from two short clicks on snapped grid corners, then returns to `Select`. Authored slabs keep the drawn construction boundary for wall snapping, but their exported/visible body is automatically inset under the wall thickness to avoid visible coplanar slab edges on exterior façades. The default slab thickness is now 0.12 m instead of 0.25 m for a lighter floor plate.
 - left-drag remains reserved for camera orbit while authoring; drags do not place points.
 - grid snap can be toggled and the grid step can be changed down to centimetre-level increments; the viewport now shows the active snap target (`Grille`, `Bord slab`, `Coin slab`) next to the cursor. Wall points prioritize active-storey slab boundaries/corners when close enough, and object move snaps to the grid while dragging and re-snaps X/Z on release.
 - default storey height, wall height, wall thickness, and slab thickness are editable in the right panel.
 - `Walls from slab` creates perimeter walls from the selected slab contour, using face alignment so the wall boundary hugs the slab outline.
-- `Door` and `Window` are wall-snapped placement tools. Hovering a wall shows a live preview; clicking creates a separate generic 3D door/window object and regenerates the wall geometry as split solid pieces around the opening, giving a lightweight boolean cut before GLB → IFC conversion. Selecting a door/window exposes editable width/height values in the right panel; changing them updates both the object and the wall cut.
-- created meshes are named `Wall_###`, `Slab_###`, `Door_###`, and `Window_###` so the GLB → IFC classifier can map them to wall, slab, door, and window IFC elements.
+- `Door` and `Window` are wall-snapped placement tools. Hovering a wall shows a live preview; clicking creates a separate monolithic 3D door/window mesh and regenerates the wall geometry as split solid pieces around the opening, giving a lightweight boolean cut before GLB → IFC conversion. Openings use the top of the active slab as their floor reference, so doors sit flush on the slab rather than at the raw wall base. Selecting a door/window exposes editable width/height values in the right panel; changing them updates both the object and the wall cut.
+- `Roof` is a slab-based authoring tool. Select a slab, choose `Flat`, `Shed / monopente`, or `Gable / double pente`, adjust pitch/thickness/overhang/eaves height/ridge direction in the right panel, then click `Roof from slab`. The preview shows the future roof before creation and the resulting mesh carries an `IfcRoof` hint.
+- authored doors/windows use bundled custom GLB assets when available, but are still baked as one selectable/exportable mesh each with stable `IfcDoor` / `IfcWindow` hints. The wall cut still passes through the host wall, but the visible joinery asset is no longer stretched to 100% of the wall thickness: doors use about 38% of the wall thickness and fixed windows about 45%, with sensible min/max clamps. This keeps classification cleaner than uncontrolled multi-part visual assets and avoids oversized openings in the viewport/export.
+- created meshes are named `Wall_###`, `Slab_###`, `Door_###`, `Window_###`, and `Roof_###` so the GLB → IFC classifier can map them to wall, slab, door, window, and roof IFC elements.
 - created elements remain editable with object transforms and vertex / edge / face edit mode. The modeler viewport uses a low-contrast CAD lighting setup rather than heavy ambient-occlusion-style shading, so junctions are easier to read while drafting.
 - `Suppr` / `Delete` removes the selected element and is undoable.
 - `Alt+Z` toggles Xray at any time; Xray is viewport-only and exported GLB materials keep their original opacity.
 - Numpad views switch to orthographic front/right/top/opposite views; zoom and pan stay orthographic, while starting a plain left-drag orbit returns to perspective.
-- authoring tools live in a bottom floating dock (`Select`, `Slab`, `Wall`, `Door`, `Window`) while view/storey/edit controls stay in the top toolbar; the shortcuts panel is hidden by default and can be opened from the `?` help button.
+- authoring tools live in a bottom floating dock (`Select`, `Slab`, `Wall`, `Door`, `Window`, `Roof`) while view/storey/edit controls stay in the top toolbar; the shortcuts panel is hidden by default and can be opened from the `?` help button.
 - exports remain GLB baked, then the existing converter regenerates IFC.
 
 This is intentionally a lightweight mesh authoring layer, not a full parametric BIM kernel yet.
+
+### Custom authored asset guidance
+
+For future custom door/window assets, prefer clean GLB files designed for BIM classification rather than decorative scene assets:
+
+- one root object per element, named with a semantic prefix such as `Door_` or `Window_`;
+- dimensions in metres, Z-up after import/export, origin at the centre of the opening footprint unless documented otherwise;
+- avoid nested decorative sub-meshes when the object should become one IFC element;
+- keep pivots stable and local axes predictable: local X = width along the wall, local Y = height, local Z = wall thickness/depth;
+- include simple metadata if possible: `ifcHint = IfcDoor` or `ifcHint = IfcWindow`;
+- use lightweight geometry and simple materials. The BIM semantics should come from the wrapper/object name and metadata, not from visual complexity.
+
 
 ## Local BIM viewer
 
@@ -553,3 +567,45 @@ For an IFC that was not generated by this app, the viewer can still display and 
 When reopening geometry from the IFC viewer, the modeler now treats the GLB source as the editable source of truth. Authoring walls are rebuilt from their stored wall paths, and door/window meshes are relinked to their host wall openings so they stay snapped into the wall after a viewer → modeler round-trip.
 
 Generated IFC spaces are no longer loaded automatically as editable blue overlays in the modeler because they can hide the authoring model and make openings look displaced. They remain available for debugging by opening the modeler with `showIfcSpaces=1` or `ifcSpaces=1` in the URL.
+
+### Custom opening assets
+
+The modeler now uses bundled custom GLB assets for authored openings:
+
+```txt
+public/assets/openings/door-single.glb
+public/assets/openings/window-fixed.glb
+```
+
+At startup each asset is loaded once, normalized to the modeler opening coordinate contract, then baked directly into every `Door_###` or `Window_###` mesh that is placed on a wall. The placement logic uses the slab top as the door floor line and as the reference for window sill height when a slab exists below the opening. The object depth is scaled from a joinery-depth ratio instead of the full wall thickness; the host wall is still cut through so the opening remains clean. If an asset cannot be loaded, the modeler falls back to the simple monolithic procedural geometry.
+
+Recommended source-asset convention remains:
+
+```txt
+X = width
+Y = height
+Z = asset depth / joinery thickness, not necessarily full wall thickness
+origin = center bottom of the opening
+units = metres
+one semantic root object / one IFC element
+```
+
+The app normalizes the bundled GLBs internally, so placed openings remain editable by width/height/sill and still classify as `IfcDoor` or `IfcWindow` during GLB → IFC conversion.
+
+### Opening placement preview
+
+Door and window authoring uses a two-layer live preview: a through-wall cut volume shows the future wall opening, while the thinner joinery asset shows the visible object depth ratio. This keeps doors and windows from filling the full wall thickness while making placement readable before clicking.
+
+
+### Opening deletion
+
+Selecting a door/window and pressing Delete or Backspace removes the opening object and restores the host wall geometry. Undo/redo preserves both the object and its linked wall cut.
+
+### Editing selected doors and windows
+
+When a placed `Door_###` or `Window_###` is selected in object mode, the properties panel shows a dedicated Door/Window section above the generic GLB geometry stats. Width, height and window sill can be edited there. For linked authoring openings, the visible object is resized and the host wall cut is regenerated immediately. If an older round-trip project lost the direct host-wall metadata, the modeler tries to relink by proximity; if relinking still fails, it can at least resize the visible opening mesh and warns that the wall cut was not recalculated.
+
+
+### UX fix: property inputs
+
+The modeler keeps door/window dimension inputs interactive even while global viewport shortcuts and text-selection guards are active. Editable controls in the property panel now stop event propagation to the 3D viewport, and the no-selection guard no longer disables text selection inside inputs.

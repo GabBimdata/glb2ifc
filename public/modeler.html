@@ -68,9 +68,18 @@
     }
 
     body.modeler-no-select,
-    body.modeler-no-select * {
+    body.modeler-no-select *:not(input):not(textarea):not(select):not(option):not([contenteditable="true"]) {
       -webkit-user-select: none !important;
       user-select: none !important;
+    }
+
+    body.modeler-no-select input,
+    body.modeler-no-select textarea,
+    body.modeler-no-select select,
+    body.modeler-no-select option,
+    body.modeler-no-select [contenteditable="true"] {
+      -webkit-user-select: text !important;
+      user-select: text !important;
     }
 
     body {
@@ -343,6 +352,7 @@
     .snap-hud.slab-edge,
     .snap-hud.slab-corner { border-color: var(--accent); color: var(--accent); }
     .snap-hud.wall { border-color: rgba(116, 185, 255, 0.70); color: #74b9ff; }
+    .snap-hud.angle-guide { border-color: rgba(255, 209, 102, 0.80); color: var(--warning); }
     .snap-hud.free { color: var(--muted); }
 
     .floating-help {
@@ -519,6 +529,29 @@
 
     .prop-label { color: var(--muted); }
     .prop-value { color: var(--text); overflow-wrap: anywhere; }
+    .prop-value input[type="number"],
+    .prop-value input[type="text"],
+    .prop-value input:not([type]) {
+      max-width: 110px;
+      border: 1px solid var(--border);
+      background: var(--panel-3);
+      color: var(--text);
+      border-radius: 10px;
+      padding: 0.42rem 0.5rem;
+      font: inherit;
+      font-size: 0.70rem;
+      outline: none;
+      pointer-events: auto;
+      -webkit-user-select: text;
+      user-select: text;
+    }
+    .prop-value input[type="number"]:focus,
+    .prop-value input[type="text"]:focus,
+    .prop-value input:not([type]):focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px rgba(255, 146, 72, 0.12);
+    }
+    .mini { color: var(--muted); font-size: 0.64rem; }
 
     .hint {
       color: var(--muted);
@@ -612,6 +645,7 @@
           <button id="next-storey" title="Étage suivant" disabled>›</button>
           <button id="new-storey" title="Créer un étage au-dessus et déplacer la grille">+ Storey</button>
           <button id="duplicate-storey" title="Dupliquer l’étage actif au-dessus" disabled>Duplicate</button>
+          <button id="delete-storey" title="Supprimer l’étage actif et ses éléments" disabled>Delete Storey</button>
         </div>
         <div class="toolbar-group">
           <button id="reference-plan-button" title="Importer un plan 2D pour l’étage actif">Plan 2D</button>
@@ -652,6 +686,7 @@
           <button id="tool-wall" class="primary-tool" title="Créer un mur sur grille">Wall</button>
           <button id="tool-door" class="primary-tool" title="Placer une porte avec snap au mur">Door</button>
           <button id="tool-window" class="primary-tool" title="Placer une fenêtre avec snap au mur">Window</button>
+          <button id="tool-roof" class="primary-tool" title="Créer une toiture depuis une slab sélectionnée">Roof</button>
         </div>
         <div class="dock-group">
           <select id="wall-alignment" title="Alignement du mur par rapport au tracé">
@@ -660,6 +695,7 @@
             <option value="right">Wall droite</option>
           </select>
           <button id="walls-from-slab" title="Créer des murs sur le contour de la slab sélectionnée" disabled>Walls from slab</button>
+          <button id="roof-from-slab" title="Créer une toiture depuis la slab sélectionnée" disabled>Roof from slab</button>
           <button id="authoring-stop" class="danger-tool" title="Terminer le tracé courant et revenir en Select" disabled>Stop</button>
         </div>
         <div class="dock-group">
@@ -680,7 +716,7 @@
           <span>Raccourcis</span>
           <button class="floating-help-close" id="help-close" type="button">×</button>
         </strong>
-        Authoring : Nouveau modèle · ‹ / › ou PageUp/PageDown naviguent entre étages · + Storey crée un étage au-dessus · Duplicate copie les murs/dalles de l’étage actif vers un nouvel étage · Wall crée un tracé continu avec ghost preview, épaisseur réelle et alignement gauche/axe/droite · Door/Window se posent par snap au mur, créent un objet 3D générique et exposent largeur/hauteur éditables · les slabs auteur sont rentrées sous les murs pour éviter les faces extérieures coplanaires · snap visible grille + contours de slab/mur · Walls from slab génère des murs sur une dalle sélectionnée · Stop/Échap termine le tracé · Slab crée une dalle rectangulaire · Plan 2D importe une référence non exportée · Scale plan = 2 points + distance réelle.<br />
+        Authoring : Nouveau modèle · ‹ / › ou PageUp/PageDown naviguent entre étages · + Storey crée un étage au-dessus · Duplicate copie les murs/dalles de l’étage actif vers un nouvel étage · Delete Storey supprime l’étage actif et ses éléments · Wall crée un tracé continu avec ghost preview, épaisseur réelle et alignement gauche/axe/droite ; maintiens Shift pendant le tracé pour guider le segment sur 0°/45°/90° · Door/Window se posent par snap au mur, créent un objet 3D générique et exposent largeur/hauteur éditables · Roof crée une toiture Flat/Shed/Gable depuis une slab sélectionnée · les slabs auteur sont rentrées sous les murs pour éviter les faces extérieures coplanaires · snap visible grille + contours de slab/mur · Walls/Roof from slab génèrent les éléments depuis une dalle sélectionnée · Stop/Échap termine le tracé · Slab crée une dalle rectangulaire · Plan 2D importe une référence non exportée · Scale plan = 2 points + distance réelle.<br />
         Tab = Object/Edit · 1/2/3 = Vertex/Edge/Face · Clic/tweak = sélection tolérante · Shift/Ctrl/Cmd+clic = multi-sélection · B = Box Select · A = tout sélectionner.<br />
         Ctrl/Cmd+Z = Undo · Ctrl/Cmd+Shift+Z = Redo · Suppr = supprimer l’objet sélectionné · Alt+Z = Xray · Numpad 1/3/7 = vues ortho Front/Right/Top · Ctrl+Numpad = opposé · Numpad 0 = cadrer.<br />
         G/T = move snapé si Snap est actif · R = rotate · S = scale · L/W = local/world. Le zoom et le pan conservent la vue ortho ; un orbit/pivot gauche simple repasse en perspective. Les vertices modifiés sont baked dans le GLB avant conversion IFC.
