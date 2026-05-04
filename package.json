@@ -7,10 +7,16 @@
   "scripts": {
     "start": "bun server.js",
     "dev": "bun server.js",
-    "qwen:setup": "bash scripts/setup-qwen-linux.sh",
-    "qwen:setup:cuda": "bash scripts/setup-qwen-linux.sh --cuda",
-    "qwen:setup:vulkan": "bash scripts/setup-qwen-linux.sh --vulkan",
-    "qwen:status": "bash scripts/qwen-status.sh"
+    "qwen:setup": "bun scripts/setup-qwen.js",
+    "qwen:setup:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-qwen-windows.ps1",
+    "qwen:setup:linux": "bash scripts/setup-qwen-linux.sh",
+    "qwen:setup:cuda": "bun scripts/setup-qwen.js --cuda",
+    "qwen:setup:vulkan": "bun scripts/setup-qwen.js --vulkan",
+    "qwen:status": "bun scripts/qwen-status.js",
+    "qwen:doctor": "bun scripts/qwen-doctor.js",
+    "qwen:find:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-qwen-windows.ps1 -FindOnly -SkipBuild",
+    "qwen:setup:windows:find": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-qwen-windows.ps1 -FindOnly -SkipBuild",
+    "qwen:prereqs:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-qwen-windows.ps1 -PrereqsOnly"
   },
   "dependencies": {
     "@gltf-transform/core": "^4.1.1",

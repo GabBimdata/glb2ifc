@@ -4,7 +4,7 @@ import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
 import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
-import { makeProjectId, saveProject, getProject, updateProject, setLastProjectId, blobToText, blobToGlbFile, safeFileName } from "./project-store.js";
+import { getProject, updateProject, setLastProjectId, blobToText, blobToGlbFile, safeFileName } from "./project-store.js";
 
 const container = document.getElementById("container");
 const dropzone = document.getElementById("dropzone");
@@ -2346,16 +2346,10 @@ function updateAuthoringSettingFromInput(key, value) {
   renderProperties();
 }
 
-async function loadFile(file, options = {}) {
+async function loadFile(file) {
   if (!/\.(glb|gltf)$/i.test(file.name)) {
     setStatus("Le modeler attend un fichier .glb ou .gltf.", "error");
     return;
-  }
-
-  if (!options.fromProject) {
-    state.projectId = null;
-    state.project = null;
-    state.returnToViewer = false;
   }
 
   setStatus(`<span class="spinner"></span>Chargement de <strong>${escapeHtml(file.name)}</strong> (${formatBytes(file.size)})…`);
@@ -2416,26 +2410,13 @@ async function loadProjectFromUrl() {
   const file = blobToGlbFile(project.glbBlob, project.glbFileName || "model.glb");
   await loadFile(file, { fromProject: true });
 
-  const repairCount = repairAuthoringRoundTripGeometry();
-  if (repairCount > 0) {
-    renderTree();
-    renderProperties();
-    updateUiEnabled();
-    setStatus(`GLB source ouvert depuis le viewer · ${repairCount} ouverture(s) / mur(s) relinké(s) au GLB source.`, "ok");
-  }
-
-  // The IFC space overlay is useful for debugging IFC generation, but it is very
-  // intrusive when the user simply wants to edit the source geometry again: it
-  // can cover the model with a large transparent blue volume and make selected
-  // doors/windows look as if they moved to the middle of the room. Keep it opt-in.
-  const showIfcSpaces = params.get("ifcSpaces") === "1" || params.get("showIfcSpaces") === "1";
-  const overlayCount = showIfcSpaces ? addGeneratedIfcSpacesFromProject(project.ifcText) : 0;
+  const overlayCount = addGeneratedIfcSpacesFromProject(project.ifcText);
   if (overlayCount > 0) {
     indexMeshes(state.modelRoot);
     renderTree();
     renderProperties();
     updateUiEnabled();
-    setStatus(`GLB source ouvert depuis le viewer · ${overlayCount} space(s) IFC généré(s) ajouté(s) comme overlays de debug.`, "ok");
+    setStatus(`GLB source ouvert depuis le viewer · ${overlayCount} space(s) IFC généré(s) ajouté(s) comme géométries éditables.`, "ok");
   }
 
   if (state.returnToViewer && convertIfcButton) {
@@ -2471,38 +2452,19 @@ async function reexportIfcWithProjectEdits(ifcText, fileName) {
   };
 }
 
-async function persistConvertedProject(glbBlob, ifcText, ifcFileName, options = {}) {
-  const patch = {
+async function saveRoundTripAndReturn(glbBlob, ifcText, ifcFileName) {
+  if (!state.projectId) return;
+  const updated = await updateProject(state.projectId, {
     glbBlob,
     glbFileName: editedFileName("glb"),
     ifcText,
     ifcFileName: safeFileName(ifcFileName, "model.ifc"),
     edits: [],
     lastOpenedIn: "modeler",
-    source: state.project?.source || (state.currentFile ? "modeler-upload" : "modeler-from-scratch"),
-  };
-
-  const updated = state.projectId
-    ? await updateProject(state.projectId, patch)
-    : await saveProject({
-      id: makeProjectId(),
-      ...patch,
-      createdFrom: "modeler",
-    });
-
-  state.projectId = updated.id;
+  });
   state.project = updated;
   setLastProjectId(updated.id);
-
-  if (options.returnToViewer) {
-    window.location.href = `/viewer.html?project=${encodeURIComponent(updated.id)}&from=modeler`;
-  }
-
-  return updated;
-}
-
-async function saveRoundTripAndReturn(glbBlob, ifcText, ifcFileName) {
-  await persistConvertedProject(glbBlob, ifcText, ifcFileName, { returnToViewer: true });
+  window.location.href = `/viewer.html?project=${encodeURIComponent(updated.id)}&from=modeler`;
 }
 
 function createGLTFLoader() {
@@ -2770,15 +2732,10 @@ function indexMeshes(root) {
   }
 
   for (const object of editableObjects) {
-    if (!Number.isFinite(Number(object.userData.__modelerId)) && Number.isFinite(Number(object.userData.modelerId))) {
-      object.userData.__modelerId = Number(object.userData.modelerId);
-    }
-
     if (!Number.isFinite(Number(object.userData.__modelerId))) {
       object.userData.__modelerId = state.nextModelerId++;
     } else {
       object.userData.__modelerId = Number(object.userData.__modelerId);
-      object.userData.modelerId = object.userData.__modelerId;
       state.nextModelerId = Math.max(state.nextModelerId, object.userData.__modelerId + 1);
     }
     object.name = object.name || object.parent?.name || `Mesh_${object.userData.__modelerId}`;
@@ -4189,101 +4146,6 @@ function updateOpeningMeshFromWallOpening(mesh, wall, opening) {
   return true;
 }
 
-
-function repairAuthoringRoundTripGeometry() {
-  if (!state.modelRoot) return 0;
-
-  // Rebuild wall meshes from their authoring metadata first. A saved round-trip
-  // GLB contains baked world geometry, but the wallPath is the canonical editable
-  // source for wall length, mitering and openings.
-  let repaired = 0;
-  const wallCount = state.meshes.filter((mesh) => mesh.userData?.authoringType === "wall" && mesh.userData?.wallPath).length;
-  if (wallCount > 0) {
-    refreshAuthoredWallMiters();
-    repaired += wallCount;
-  }
-
-  repaired += repairAuthoringOpeningsFromWallData();
-  if (state.modelRoot) {
-    indexMeshes(state.modelRoot);
-    updateBoxHelper();
-  }
-  return repaired;
-}
-
-function repairAuthoringOpeningsFromWallData() {
-  if (!state.modelRoot) return 0;
-
-  const openingMeshesById = new Map();
-  for (const mesh of state.meshes) {
-    const type = mesh.userData?.authoringType;
-    const openingId = mesh.userData?.opening?.id;
-    if ((type === "door" || type === "window") && openingId) {
-      openingMeshesById.set(String(openingId), mesh);
-    }
-  }
-
-  let count = 0;
-  const walls = state.meshes.filter((mesh) => mesh.userData?.authoringType === "wall" && mesh.userData?.wallPath);
-  for (const wall of walls) {
-    const data = wall.userData.wallPath;
-    normalizeWallPathForRoundTrip(data, wall);
-    const openings = Array.isArray(data.openings) ? data.openings : [];
-    data.openings = openings;
-
-    for (const opening of openings) {
-      if (!opening) continue;
-      if (!opening.id) opening.id = `opening-${Date.now()}-${Math.round(Math.random() * 1e6)}`;
-      const tool = opening.type === "window" ? "window" : "door";
-      opening.type = tool;
-      const key = String(opening.id);
-      let mesh = openingMeshesById.get(key);
-
-      if (mesh) {
-        if (updateOpeningMeshFromWallOpening(mesh, wall, opening)) count += 1;
-        continue;
-      }
-
-      const offset = Number(opening.offset) || 0;
-      const created = createOpeningMesh({
-        wall,
-        wallData: data,
-        offset,
-        point: pointAlongWallData(data, offset, true),
-        dir: wallDirection(data),
-      }, tool, { opening, wall });
-      if (!created) continue;
-
-      const parent = wall.parent || state.modelRoot;
-      parent.add(created);
-      created.updateMatrixWorld(true);
-      openingMeshesById.set(key, created);
-      count += 1;
-    }
-  }
-
-  return count;
-}
-
-function normalizeWallPathForRoundTrip(data, wall) {
-  if (!data) return;
-  const baseElevation = Number(data.baseElevation ?? wall?.userData?.storeyElevation ?? getActiveStoreyElevation());
-  data.baseElevation = Number.isFinite(baseElevation) ? baseElevation : 0;
-  data.height = Math.max(0.05, Number(data.height) || Number(wall?.userData?.dimensions?.height) || state.authoring.wallHeight || 3);
-  data.thickness = Math.max(0.01, Number(data.thickness) || Number(wall?.userData?.dimensions?.thickness) || state.authoring.wallThickness || 0.2);
-  data.alignment = ["left", "center", "right"].includes(data.alignment) ? data.alignment : "center";
-  data.start = coerceWallPoint(data.start, data.baseElevation);
-  data.end = coerceWallPoint(data.end, data.baseElevation);
-  data.prev = data.prev ? coerceWallPoint(data.prev, data.baseElevation) : null;
-  data.next = data.next ? coerceWallPoint(data.next, data.baseElevation) : null;
-  data.openings = Array.isArray(data.openings) ? data.openings.map((opening) => ({ ...opening })).filter(Boolean) : [];
-}
-
-function coerceWallPoint(point, y = 0) {
-  if (point?.isVector3) return point;
-  return new THREE.Vector3(Number(point?.x) || 0, Number(point?.y ?? y) || 0, Number(point?.z) || 0);
-}
-
 function applyEditOpeningHistory(action, direction) {
   const mesh = meshByModelerId(action.meshId);
   const wall = meshByModelerId(action.wallId);
@@ -5131,8 +4993,6 @@ async function convertEditedGlbToIfc() {
       return;
     }
 
-    const project = await persistConvertedProject(glbBlob, ifcText, ifcFileName);
-
     downloadBlob(new Blob([ifcText], { type: "application/x-step" }), ifcFileName);
     const editSuffix = editInfo.applied
       ? ` · ${editInfo.applied} reclassification(s) réappliquée(s)${editInfo.errors ? ` · ${editInfo.errors} erreur(s)` : ""}`
@@ -5140,9 +5000,7 @@ async function convertEditedGlbToIfc() {
 
     setStatus(
       `IFC généré depuis le GLB modifié : <strong>${escapeHtml(ifcFileName)}</strong>\n` +
-      `${total} éléments · ${storeys} étage${storeys > 1 ? "s" : ""} · ${spaces} space${spaces > 1 ? "s" : ""}${editSuffix}.\n` +
-      `Projet local lié : tu peux ouvrir cet IFC dans le viewer puis revenir au modeler avec le bon GLB source. ` +
-      `<a class="link-button" href="/viewer.html?project=${encodeURIComponent(project.id)}">Ouvrir dans le viewer lié →</a>`,
+      `${total} éléments · ${storeys} étage${storeys > 1 ? "s" : ""} · ${spaces} space${spaces > 1 ? "s" : ""}${editSuffix}.`,
       "ok"
     );
   } catch (error) {
@@ -5256,14 +5114,6 @@ function cloneSingleMaterialForExport(material) {
 function copyExportUserData(userData = {}) {
   const out = {};
   for (const [key, value] of Object.entries(userData)) {
-    // Keep the stable editor id across local round-trips. Door/window meshes use
-    // this id to relink to their host wall after opening IFC → viewer → modeler.
-    // Other private fields are runtime-only and should not be baked into GLB.
-    if (key === "__modelerId") {
-      out.__modelerId = value;
-      out.modelerId = value;
-      continue;
-    }
     if (key.startsWith("__")) continue;
     if (typeof value === "function") continue;
     try {

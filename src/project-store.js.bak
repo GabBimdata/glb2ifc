@@ -1,5 +1,5 @@
 const DB_NAME = "glb2ifc-project-store";
-const DB_VERSION = 2;
+const DB_VERSION = 1;
 const STORE_NAME = "projects";
 const LAST_PROJECT_KEY = "glb2ifc:lastProjectId";
 
@@ -13,21 +13,11 @@ function openDb() {
 
     request.onupgradeneeded = () => {
       const db = request.result;
-      const store = db.objectStoreNames.contains(STORE_NAME)
-        ? request.transaction.objectStore(STORE_NAME)
-        : db.createObjectStore(STORE_NAME, { keyPath: "id" });
-
-      if (!store.indexNames.contains("ifcFileName")) {
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        const store = db.createObjectStore(STORE_NAME, { keyPath: "id" });
         store.createIndex("ifcFileName", "ifcFileName", { unique: false });
-      }
-      if (!store.indexNames.contains("glbFileName")) {
         store.createIndex("glbFileName", "glbFileName", { unique: false });
-      }
-      if (!store.indexNames.contains("updatedAt")) {
         store.createIndex("updatedAt", "updatedAt", { unique: false });
-      }
-      if (!store.indexNames.contains("ifcTextHash")) {
-        store.createIndex("ifcTextHash", "ifcTextHash", { unique: false });
       }
     };
 
@@ -77,10 +67,6 @@ export async function saveProject(project) {
     updatedAt: now,
   };
 
-  if (typeof value.ifcText === "string" && value.ifcText.length > 0) {
-    value.ifcTextHash = textFingerprint(value.ifcText);
-  }
-
   const tx = db.transaction(STORE_NAME, "readwrite");
   tx.objectStore(STORE_NAME).put(value);
   await txDone(tx);
@@ -126,32 +112,6 @@ export async function listProjects() {
     };
     request.onerror = () => reject(request.error || new Error("Lecture des projets impossible."));
   });
-}
-
-
-export function textFingerprint(text) {
-  const input = String(text || "");
-  let hash = 2166136261;
-
-  for (let i = 0; i < input.length; i += 1) {
-    hash ^= input.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
-  }
-
-  return `${input.length}:${(hash >>> 0).toString(16).padStart(8, "0")}`;
-}
-
-export async function findProjectForIfcText(ifcText) {
-  const text = String(ifcText || "");
-  if (!text) return null;
-
-  const hash = textFingerprint(text);
-  const projects = await listProjects();
-
-  return projects.find((project) => {
-    if (project.ifcTextHash && project.ifcTextHash === hash) return true;
-    return typeof project.ifcText === "string" && project.ifcText === text;
-  }) || null;
 }
 
 export async function findProjectForIfcFile(fileName) {

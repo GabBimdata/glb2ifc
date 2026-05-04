@@ -3,6 +3,7 @@ import multer from 'multer';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
+import os from 'os';
 import { spawn } from 'child_process';
 import { NodeIO } from '@gltf-transform/core';
 import { ALL_EXTENSIONS } from '@gltf-transform/extensions';
@@ -15,12 +16,35 @@ import { candidateDocumentForIfcType } from './src/ifc-classification-kb.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+const QWEN_ENV_KEYS = [
+  'QWEN_LLAMA_SERVER_BIN',
+  'QWEN_MODEL_PATH',
+  'QWEN_LLAMA_HOST',
+  'QWEN_LLAMA_PORT',
+  'QWEN_LLAMA_CONTEXT',
+  'QWEN_LLAMA_BATCH',
+  'QWEN_AUTO_START',
+  'QWEN_RERANKER_URL',
+];
+
+function repairQwenEnvNewlines(content) {
+  let repaired = String(content || '');
+  for (const key of QWEN_ENV_KEYS) {
+    repaired = repaired.replace(new RegExp(`([^\r\n])(?=${key}=)`, 'g'), '$1\n');
+  }
+  return repaired;
+}
+
+function parseEnvLines(content) {
+  return repairQwenEnvNewlines(content).split(/\r?\n/);
+}
+
 function loadLocalEnvFiles() {
   for (const filename of ['.env', '.env.local']) {
     const envPath = path.join(__dirname, filename);
     if (!fs.existsSync(envPath)) continue;
 
-    const lines = fs.readFileSync(envPath, 'utf8').split(/\r?\n/);
+    const lines = parseEnvLines(fs.readFileSync(envPath, 'utf8'));
     for (const line of lines) {
       const trimmed = line.trim();
       if (!trimmed || trimmed.startsWith('#')) continue;
@@ -4168,44 +4192,151 @@ function generateIFC(meshes, storeys, originalFilename, scaleInfo = null) {
 // Qwen / llama.cpp IFC classification assistant
 // ─────────────────────────────────────────────────────────────────────────────
 
+function normalizeConfiguredPath(value) {
+  const clean = String(value || '').trim().replace(/^['"]|['"]$/g, '');
+  if (!clean) return '';
+  if (clean === '~') return os.homedir();
+  if (clean.startsWith(`~${path.sep}`) || clean.startsWith('~/')) {
+    return path.join(os.homedir(), clean.slice(2));
+  }
+  return path.isAbsolute(clean) ? clean : path.resolve(__dirname, clean);
+}
+
 function executableExists(filePath) {
   if (!filePath) return false;
   try {
-    fs.accessSync(filePath, fs.constants.X_OK);
+    const mode = process.platform === 'win32' ? fs.constants.F_OK : fs.constants.X_OK;
+    fs.accessSync(filePath, mode);
     return true;
   } catch (_) {
     return false;
   }
 }
 
+function uniqueStrings(values, caseInsensitive = process.platform === 'win32') {
+  const seen = new Set();
+  const out = [];
+  for (const value of values.filter(Boolean)) {
+    const key = caseInsensitive ? String(value).toLowerCase() : String(value);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(value);
+  }
+  return out;
+}
+
+function executableNamesForPlatform(name, { includeScripts = false } = {}) {
+  if (process.platform !== 'win32') return [name];
+  if (path.extname(name)) return [name];
+
+  // Keep common-location diagnostics readable. For managed startup we only need
+  // the real binary name; PATH probing below may also try .cmd/.bat shims.
+  const names = [`${name}.exe`, name];
+  if (includeScripts) names.push(`${name}.cmd`, `${name}.bat`);
+  return uniqueStrings(names);
+}
+
 function findExecutableInPath(name) {
   const pathEntries = String(process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  const names = executableNamesForPlatform(name, { includeScripts: true });
   for (const entry of pathEntries) {
-    const candidate = path.join(entry, name);
-    if (executableExists(candidate)) return candidate;
+    for (const executableName of names) {
+      const candidate = path.join(entry, executableName);
+      if (executableExists(candidate)) return candidate;
+    }
   }
   return null;
 }
 
-function resolveLlamaServerBin() {
-  if (process.env.QWEN_LLAMA_SERVER_BIN) {
-    return path.resolve(__dirname, process.env.QWEN_LLAMA_SERVER_BIN);
+function uniqueCandidates(candidates) {
+  const seen = new Set();
+  return candidates
+    .filter(Boolean)
+    .map((candidate) => normalizeConfiguredPath(candidate))
+    .filter((candidate) => {
+      const key = process.platform === 'win32' ? candidate.toLowerCase() : candidate;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function llamaCppCandidateRoots() {
+  const roots = [
+    process.env.QWEN_LLAMA_CPP_DIR,
+    process.env.LLAMA_CPP_DIR,
+    path.join(__dirname, '.tools', 'llama.cpp'),
+    path.join(__dirname, 'tools', 'llama.cpp'),
+    path.join(__dirname, 'llama.cpp'),
+    path.resolve(__dirname, '..', 'llama.cpp'),
+    path.resolve(__dirname, '..', '..', 'llama.cpp'),
+  ];
+
+  if (process.platform === 'win32') {
+    const projectDrive = path.parse(__dirname).root || 'C:\\';
+    roots.push(path.win32.join(projectDrive, 'Github', 'llama.cpp'));
+    roots.push('F:\\Github\\llama.cpp');
+    roots.push('C:\\Github\\llama.cpp');
   }
 
-  const candidates = [
-    path.join(__dirname, '.tools', 'llama.cpp', 'build', 'bin', 'llama-server'),
-    path.join(__dirname, 'tools', 'llama.cpp', 'build', 'bin', 'llama-server'),
-    path.resolve(__dirname, '..', 'llama.cpp', 'build', 'bin', 'llama-server'),
-    path.resolve(__dirname, '..', 'llama.cpp', 'build', 'bin', 'Release', 'llama-server'),
-    findExecutableInPath('llama-server'),
-  ].filter(Boolean);
+  return uniqueCandidates(roots);
+}
 
-  return candidates.find(executableExists) || 'llama-server';
+function llamaServerCandidatePaths() {
+  const names = process.platform === 'win32' ? ['llama-server.exe'] : ['llama-server'];
+  const roots = llamaCppCandidateRoots();
+
+  const suffixDirs = [
+    path.join('build', 'bin', 'Release'),
+    path.join('build', 'bin', 'RelWithDebInfo'),
+    path.join('build', 'bin', 'Debug'),
+    path.join('build', 'bin'),
+    path.join('bin', 'Release'),
+    'bin',
+    path.join('examples', 'server', 'Release'),
+    path.join('server', 'Release'),
+    '',
+  ];
+
+  const localCandidates = [];
+  for (const root of roots) {
+    for (const suffixDir of suffixDirs) {
+      for (const name of names) localCandidates.push(path.join(root, suffixDir, name));
+    }
+  }
+
+  return uniqueCandidates([
+    ...localCandidates,
+    findExecutableInPath('llama-server'),
+  ]);
+}
+
+const QWEN_LLAMA_SERVER_CANDIDATES = llamaServerCandidatePaths();
+
+function resolveLlamaServerBin() {
+  if (process.env.QWEN_LLAMA_SERVER_BIN) {
+    return normalizeConfiguredPath(process.env.QWEN_LLAMA_SERVER_BIN);
+  }
+
+  return QWEN_LLAMA_SERVER_CANDIDATES.find(executableExists) || '';
+}
+
+function qwenExpectedLlamaServerLabel() {
+  return process.env.QWEN_LLAMA_SERVER_BIN
+    ? normalizeConfiguredPath(process.env.QWEN_LLAMA_SERVER_BIN)
+    : (process.platform === 'win32' ? 'llama-server.exe' : 'llama-server');
+}
+
+function qwenSetupTip() {
+  if (process.platform === 'win32') {
+    return 'Tip: run "bun run qwen:doctor", then "bun run qwen:setup:windows", or set QWEN_LLAMA_SERVER_BIN in .env.local.';
+  }
+  return 'Tip: run "bun run qwen:doctor", then "bun run qwen:setup", or set QWEN_LLAMA_SERVER_BIN in .env.local.';
 }
 
 function resolveQwenModelPath() {
   if (process.env.QWEN_MODEL_PATH) {
-    return path.resolve(__dirname, process.env.QWEN_MODEL_PATH);
+    return normalizeConfiguredPath(process.env.QWEN_MODEL_PATH);
   }
 
   const modelsDir = path.join(__dirname, 'models');
@@ -4292,6 +4423,9 @@ function qwenRuntimeStatus() {
     baseUrl: qwenState.baseUrl,
     modelPath: qwenState.modelPath,
     llamaServerBin: QWEN_LLAMA_SERVER_BIN,
+    configuredLlamaServerBin: process.env.QWEN_LLAMA_SERVER_BIN || null,
+    testedLlamaServerCandidates: QWEN_LLAMA_SERVER_CANDIDATES.slice(0, 20),
+    testedLlamaCppRoots: llamaCppCandidateRoots(),
     gpuLayers: QWEN_GPU_LAYERS || null,
     batchSize: Number.isFinite(QWEN_LLAMA_BATCH) && QWEN_LLAMA_BATCH > 0 ? QWEN_LLAMA_BATCH : null,
     microBatchSize: Number.isFinite(QWEN_LLAMA_UBATCH) && QWEN_LLAMA_UBATCH > 0 ? QWEN_LLAMA_UBATCH : null,
@@ -4352,6 +4486,28 @@ function startManagedQwenServer() {
     return qwenState;
   }
 
+  if (!QWEN_LLAMA_SERVER_BIN || !executableExists(QWEN_LLAMA_SERVER_BIN)) {
+    const expected = qwenExpectedLlamaServerLabel();
+    qwenState.status = 'missing_binary';
+    qwenState.lastError = `llama-server executable not found: ${expected}`;
+    console.warn(`\n  Qwen reranker not started: llama-server executable not found`);
+    console.warn(`  Expected binary: ${expected}`);
+    if (process.env.QWEN_LLAMA_SERVER_BIN) {
+      console.warn(`  Configured QWEN_LLAMA_SERVER_BIN does not exist or is not accessible.`);
+    }
+    if (QWEN_LLAMA_SERVER_CANDIDATES.length) {
+      const shown = QWEN_LLAMA_SERVER_CANDIDATES.slice(0, 12);
+      console.warn(`  Tested common locations:`);
+      for (const candidate of shown) console.warn(`    - ${candidate}`);
+      if (QWEN_LLAMA_SERVER_CANDIDATES.length > shown.length) {
+        console.warn(`    - ... ${QWEN_LLAMA_SERVER_CANDIDATES.length - shown.length} more; run "bun run qwen:doctor" for the full diagnosis`);
+      }
+    }
+    console.warn(`  ${qwenSetupTip()}`);
+    console.warn(`  The viewer will keep using heuristic suggestions.\n`);
+    return qwenState;
+  }
+
   const args = [
     '-m', QWEN_MODEL_PATH,
     '--reranking',
@@ -4408,7 +4564,7 @@ function startManagedQwenServer() {
     qwenState.lastError = error.message || String(error);
     console.warn(`  llama-server error: ${qwenState.lastError}`);
     if (String(error?.code || '').toUpperCase() === 'ENOENT') {
-      console.warn(`  Tip: run "bun run qwen:setup" or set QWEN_LLAMA_SERVER_BIN in .env.local.`);
+      console.warn(`  ${qwenSetupTip()}`);
     }
   });
   qwenProcess.on('exit', (code, signal) => {

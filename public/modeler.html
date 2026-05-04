@@ -23,6 +23,56 @@
 
     * { box-sizing: border-box; }
 
+    html,
+    body,
+    #app,
+    aside,
+    main,
+    .properties-panel,
+    .toolbar,
+    .toolbar-group,
+    .authoring-dock,
+    .floating-help,
+    .tree-item,
+    .tree-empty,
+    .properties-empty,
+    .status,
+    button,
+    .link-button,
+    label,
+    summary,
+    .prop-row,
+    .prop-label,
+    .prop-value,
+    .snap-hud {
+      -webkit-user-select: none;
+      user-select: none;
+    }
+
+    input,
+    textarea,
+    select,
+    option,
+    [contenteditable="true"],
+    .allow-text-selection {
+      -webkit-user-select: text;
+      user-select: text;
+    }
+
+    #container,
+    #container canvas {
+      -webkit-user-select: none;
+      user-select: none;
+      -webkit-user-drag: none;
+      touch-action: none;
+    }
+
+    body.modeler-no-select,
+    body.modeler-no-select * {
+      -webkit-user-select: none !important;
+      user-select: none !important;
+    }
+
     body {
       margin: 0;
       background: var(--bg);
@@ -165,8 +215,7 @@
       background: rgba(255, 146, 72, 0.16);
     }
 
-    .toolbar,
-    .floating-help {
+    .toolbar {
       position: absolute;
       z-index: 5;
       display: flex;
@@ -194,20 +243,142 @@
 
     .toolbar button { padding: 0.48rem 0.58rem; }
 
+    .toolbar select {
+      border: 1px solid var(--border);
+      background: var(--panel-2);
+      color: var(--text);
+      padding: 0.45rem 0.45rem;
+      border-radius: 10px;
+      font: inherit;
+      font-size: 0.70rem;
+      outline: none;
+    }
+
+    .toolbar select:focus { border-color: var(--accent); }
+
+
+
+    .authoring-dock {
+      position: absolute;
+      left: 50%;
+      bottom: 0.9rem;
+      transform: translateX(-50%);
+      z-index: 7;
+      display: flex;
+      gap: 0.45rem;
+      align-items: center;
+      flex-wrap: wrap;
+      justify-content: center;
+      max-width: min(980px, calc(100% - 1.5rem));
+      padding: 0.45rem;
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      background: rgba(15, 20, 25, 0.90);
+      backdrop-filter: blur(14px);
+      box-shadow: 0 18px 70px rgba(0,0,0,0.38);
+    }
+
+    .authoring-dock .dock-group {
+      display: flex;
+      gap: 0.35rem;
+      align-items: center;
+      padding: 0.2rem;
+    }
+
+    .authoring-dock button { padding: 0.52rem 0.68rem; }
+
+    .authoring-dock select {
+      border: 1px solid var(--border);
+      background: var(--panel-2);
+      color: var(--text);
+      padding: 0.48rem 0.5rem;
+      border-radius: 11px;
+      font: inherit;
+      font-size: 0.70rem;
+      outline: none;
+    }
+
+    .authoring-dock select:focus { border-color: var(--accent); }
+
+    .authoring-dock .primary-tool {
+      border-color: rgba(255, 146, 72, 0.38);
+      background: rgba(255, 146, 72, 0.08);
+    }
+
+    .authoring-dock .danger-tool {
+      border-color: rgba(255, 107, 107, 0.38);
+    }
+
+    .select-box-rect {
+      position: absolute;
+      z-index: 7;
+      border: 1px solid var(--accent);
+      background: rgba(255, 146, 72, 0.12);
+      pointer-events: none;
+      border-radius: 4px;
+    }
+
+    .snap-hud {
+      position: absolute;
+      z-index: 8;
+      display: none;
+      max-width: 280px;
+      pointer-events: none;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: rgba(15, 20, 25, 0.88);
+      color: var(--text);
+      backdrop-filter: blur(10px);
+      font-size: 0.66rem;
+      line-height: 1;
+      padding: 0.45rem 0.62rem;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.28);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .snap-hud.visible { display: block; }
+    .snap-hud.grid { border-color: rgba(93, 211, 158, 0.55); color: var(--success); }
+    .snap-hud.slab-edge,
+    .snap-hud.slab-corner { border-color: var(--accent); color: var(--accent); }
+    .snap-hud.wall { border-color: rgba(116, 185, 255, 0.70); color: #74b9ff; }
+    .snap-hud.free { color: var(--muted); }
+
     .floating-help {
+      position: absolute;
       right: 0.75rem;
       bottom: 0.75rem;
-      display: block;
-      max-width: 360px;
+      z-index: 6;
+      display: none;
+      max-width: 390px;
       border: 1px solid var(--border);
       border-radius: 16px;
-      background: rgba(15, 20, 25, 0.84);
+      background: rgba(15, 20, 25, 0.90);
       backdrop-filter: blur(12px);
       color: var(--muted);
       font-size: 0.70rem;
       line-height: 1.55;
       padding: 0.75rem 0.85rem;
-      pointer-events: none;
+      box-shadow: 0 20px 70px rgba(0,0,0,0.32);
+    }
+
+    .floating-help.open { display: block; }
+
+    .floating-help strong {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      color: var(--text);
+      margin-bottom: 0.35rem;
+    }
+
+    .floating-help-close {
+      padding: 0.18rem 0.45rem;
+      border-radius: 8px;
+      font-size: 0.68rem;
+      line-height: 1;
     }
 
     .status {
@@ -244,7 +415,11 @@
     }
 
     #tree-search,
-    #name-input {
+    #name-input,
+    #author-wall-height,
+    #author-wall-thickness,
+    #author-slab-thickness,
+    #author-storey-height {
       width: 100%;
       border: 1px solid var(--border);
       background: var(--panel-3);
@@ -257,7 +432,11 @@
     }
 
     #tree-search:focus,
-    #name-input:focus { border-color: var(--accent); }
+    #name-input:focus,
+    #author-wall-height:focus,
+    #author-wall-thickness:focus,
+    #author-slab-thickness:focus,
+    #author-storey-height:focus { border-color: var(--accent); }
 
     #tree {
       overflow: auto;
@@ -360,6 +539,17 @@
       vertical-align: -1px;
     }
 
+
+
+    .select-box-rect {
+      position: absolute;
+      z-index: 20;
+      border: 1px solid var(--accent);
+      background: rgba(255, 146, 72, 0.16);
+      box-shadow: 0 0 0 1px rgba(15, 20, 25, 0.35) inset;
+      pointer-events: none;
+    }
+
     @keyframes spin { to { transform: rotate(360deg); } }
 
     @media (max-width: 1050px) {
@@ -391,6 +581,7 @@
       </div>
 
       <div class="mode-actions">
+        <button id="new-scene">Nouveau modèle</button>
         <button id="select-all" disabled>Tout cadrer</button>
         <button id="clear-scene" disabled>Vider</button>
       </div>
@@ -413,15 +604,35 @@
 
     <main>
       <div id="container"></div>
+      <div id="snap-hud" class="snap-hud" aria-hidden="true"></div>
       <div class="toolbar">
+        <div class="toolbar-group">
+          <button id="previous-storey" title="Étage précédent" disabled>‹</button>
+          <select id="storey-select" title="Étage actif"></select>
+          <button id="next-storey" title="Étage suivant" disabled>›</button>
+          <button id="new-storey" title="Créer un étage au-dessus et déplacer la grille">+ Storey</button>
+          <button id="duplicate-storey" title="Dupliquer l’étage actif au-dessus" disabled>Duplicate</button>
+        </div>
+        <div class="toolbar-group">
+          <button id="reference-plan-button" title="Importer un plan 2D pour l’étage actif">Plan 2D</button>
+          <input id="reference-plan-input" type="file" accept="image/*" />
+          <button id="calibrate-plan" disabled title="Tracer 2 points sur le plan puis saisir la distance réelle">Scale plan</button>
+        </div>
         <div class="toolbar-group">
           <button id="mode-object" disabled title="Tab">Object</button>
           <button id="mode-edit" disabled title="Tab">Edit</button>
         </div>
         <div class="toolbar-group">
+          <button id="undo-action" disabled title="Ctrl/Cmd+Z">Undo</button>
+          <button id="redo-action" disabled title="Ctrl/Cmd+Shift+Z">Redo</button>
+          <button id="xray-toggle" title="Alt+Z">Xray</button>
+          <button id="help-toggle" title="Afficher les raccourcis">?</button>
+        </div>
+        <div class="toolbar-group">
           <button id="mode-vertex" disabled title="1">Vertex</button>
           <button id="mode-edge" disabled title="2">Edge</button>
           <button id="mode-face" disabled title="3">Face</button>
+          <button id="select-box" disabled title="B puis glisser">Box</button>
         </div>
         <div class="toolbar-group">
           <button id="mode-translate" disabled title="G ou T">Move</button>
@@ -434,10 +645,45 @@
           <button id="reset-transform" disabled>Reset</button>
         </div>
       </div>
-      <div class="floating-help">
-        <strong>Raccourcis façon Blender</strong><br />
-        Tab = Object/Edit · 1/2/3 = Vertex/Edge/Face · Clic = sélectionner · Shift/Ctrl+clic = multi-sélection · A = tout sélectionner.<br />
-        G/T = move · R = rotate · S = scale · L/W = local/world · Échap = clear/exit. Les vertices modifiés sont baked dans le GLB avant conversion IFC.
+      <div class="authoring-dock" aria-label="Ajout d’éléments">
+        <div class="dock-group">
+          <button id="tool-select" title="Sélection objet">Select</button>
+          <button id="tool-slab" class="primary-tool" title="Créer une dalle rectangulaire sur grille">Slab</button>
+          <button id="tool-wall" class="primary-tool" title="Créer un mur sur grille">Wall</button>
+          <button id="tool-door" class="primary-tool" title="Placer une porte avec snap au mur">Door</button>
+          <button id="tool-window" class="primary-tool" title="Placer une fenêtre avec snap au mur">Window</button>
+        </div>
+        <div class="dock-group">
+          <select id="wall-alignment" title="Alignement du mur par rapport au tracé">
+            <option value="left">Wall gauche</option>
+            <option value="center" selected>Wall axe</option>
+            <option value="right">Wall droite</option>
+          </select>
+          <button id="walls-from-slab" title="Créer des murs sur le contour de la slab sélectionnée" disabled>Walls from slab</button>
+          <button id="authoring-stop" class="danger-tool" title="Terminer le tracé courant et revenir en Select" disabled>Stop</button>
+        </div>
+        <div class="dock-group">
+          <button id="snap-toggle" title="Snap grille">Snap</button>
+          <select id="grid-step" title="Pas de grille">
+            <option value="0.01">0.01m</option>
+            <option value="0.025">0.025m</option>
+            <option value="0.05">0.05m</option>
+            <option value="0.10" selected>0.10m</option>
+            <option value="0.25">0.25m</option>
+            <option value="0.50">0.50m</option>
+            <option value="1.00">1.00m</option>
+          </select>
+        </div>
+      </div>
+      <div class="floating-help" id="shortcuts-panel" aria-hidden="true">
+        <strong>
+          <span>Raccourcis</span>
+          <button class="floating-help-close" id="help-close" type="button">×</button>
+        </strong>
+        Authoring : Nouveau modèle · ‹ / › ou PageUp/PageDown naviguent entre étages · + Storey crée un étage au-dessus · Duplicate copie les murs/dalles de l’étage actif vers un nouvel étage · Wall crée un tracé continu avec ghost preview, épaisseur réelle et alignement gauche/axe/droite · Door/Window se posent par snap au mur, créent un objet 3D générique et exposent largeur/hauteur éditables · les slabs auteur sont rentrées sous les murs pour éviter les faces extérieures coplanaires · snap visible grille + contours de slab/mur · Walls from slab génère des murs sur une dalle sélectionnée · Stop/Échap termine le tracé · Slab crée une dalle rectangulaire · Plan 2D importe une référence non exportée · Scale plan = 2 points + distance réelle.<br />
+        Tab = Object/Edit · 1/2/3 = Vertex/Edge/Face · Clic/tweak = sélection tolérante · Shift/Ctrl/Cmd+clic = multi-sélection · B = Box Select · A = tout sélectionner.<br />
+        Ctrl/Cmd+Z = Undo · Ctrl/Cmd+Shift+Z = Redo · Suppr = supprimer l’objet sélectionné · Alt+Z = Xray · Numpad 1/3/7 = vues ortho Front/Right/Top · Ctrl+Numpad = opposé · Numpad 0 = cadrer.<br />
+        G/T = move snapé si Snap est actif · R = rotate · S = scale · L/W = local/world. Le zoom et le pan conservent la vue ortho ; un orbit/pivot gauche simple repasse en perspective. Les vertices modifiés sont baked dans le GLB avant conversion IFC.
       </div>
     </main>
 

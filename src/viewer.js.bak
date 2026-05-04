@@ -2,7 +2,7 @@ import * as THREE from "three";
 import * as OBC from "@thatopen/components";
 import * as FRAGS from "@thatopen/fragments";
 import { openTypePicker } from './ifc-type-picker.js';
-import { getProject, updateProject, findProjectForIfcFile, findProjectForIfcText, setLastProjectId, editsMapToArray, editsArrayToMap, textToIfcFile, safeFileName } from './project-store.js';
+import { getProject, updateProject, findProjectForIfcFile, setLastProjectId, getLastProjectId, editsMapToArray, editsArrayToMap, textToIfcFile, safeFileName } from './project-store.js';
 
 const container = document.getElementById("container");
 const dropzone = document.getElementById("dropzone");
@@ -1356,7 +1356,7 @@ function updateDownloadCurrentIfcButtonState() {
   }
 }
 
-async function attachProjectContextForFile(fileName, ifcText = "") {
+async function attachProjectContextForFile(fileName) {
   if (!fileName || !/\.ifc$/i.test(fileName)) {
     updateModelerButtonState();
     return;
@@ -1365,22 +1365,25 @@ async function attachProjectContextForFile(fileName, ifcText = "") {
   try {
     let project = state.projectId ? await getProject(state.projectId) : null;
 
-    if (!project && ifcText) {
-      project = await findProjectForIfcText(ifcText);
-    }
-
     if (!project) {
       project = await findProjectForIfcFile(fileName);
     }
 
-    if (project?.glbBlob) {
+    if (!project) {
+      const lastId = getLastProjectId();
+      const last = lastId ? await getProject(lastId) : null;
+      if (last && last.glbBlob && last.ifcFileName) {
+        const a = String(last.ifcFileName).replace(/\.ifc$/i, '').toLowerCase();
+        const b = String(fileName).replace(/\.ifc$/i, '').toLowerCase();
+        if (a === b || a.replace(/\.edited$/i, '') === b.replace(/\.edited$/i, '')) project = last;
+      }
+    }
+
+    if (project) {
       state.projectId = project.id;
       state.project = project;
       setLastProjectId(project.id);
       setStatus(`Modèle chargé : ${fileName} · GLB source lié au projet local.`, "ok");
-    } else {
-      state.projectId = null;
-      state.project = null;
     }
   } catch (error) {
     console.warn("Project context lookup failed:", error);
@@ -1424,20 +1427,17 @@ async function persistCurrentProjectState() {
 async function ensureLinkedProjectForModeler() {
   let project = state.projectId ? await getProject(state.projectId) : null;
 
-  if (!project && state.lastIfcText) {
-    project = await findProjectForIfcText(state.lastIfcText);
-  }
-
   if (!project && state.currentFileName) {
     project = await findProjectForIfcFile(state.currentFileName);
   }
 
+  if (!project) {
+    const last = await getProject(getLastProjectId());
+    if (last?.glbBlob) project = last;
+  }
+
   if (!project?.glbBlob) {
-    throw new Error(
-      "Aucun GLB source éditable n’est lié à cet IFC dans le stockage local. " +
-      "Si cet IFC vient du modeler, réexporte-le avec la dernière version : le modeler sauvegarde maintenant automatiquement le projet GLB+IFC. " +
-      "Pour un IFC externe, l’app peut l’afficher/reclassifier, mais elle ne peut pas reconstruire automatiquement le GLB source éditable."
-    );
+    throw new Error("Aucun GLB source n’est lié à cet IFC. Ouvre le viewer depuis le bouton créé après la conversion GLB → IFC, ou recharge l’IFC généré dans le même navigateur.");
   }
 
   state.projectId = project.id;
@@ -1481,7 +1481,7 @@ async function loadProjectFromUrl() {
     setLastProjectId(project.id);
 
     state.restoringProjectEdits = true;
-    await loadFile(textToIfcFile(project.ifcText, project.ifcFileName || "model.ifc"), { fromProject: true, project });
+    await loadFile(textToIfcFile(project.ifcText, project.ifcFileName || "model.ifc"));
     state.restoringProjectEdits = false;
 
     restorePendingEditsFromProject(project);
@@ -1497,19 +1497,10 @@ async function loadProjectFromUrl() {
   }
 }
 
-async function loadFile(file, options = {}) {
+async function loadFile(file) {
   if (!state.initialized) {
     setStatus("Le viewer n’est pas encore prêt.", "error");
     return;
-  }
-
-  const fromProject = Boolean(options.fromProject);
-  const linkedProject = options.project || null;
-
-  if (!fromProject) {
-    state.projectId = null;
-    state.project = null;
-    state.loadedFromModeler = false;
   }
 
   const lower = file.name.toLowerCase();
@@ -1521,11 +1512,6 @@ async function loadFile(file, options = {}) {
 
   try {
     await clearModels();
-
-    if (fromProject && linkedProject) {
-      state.projectId = linkedProject.id;
-      state.project = linkedProject;
-    }
 
     setStatus(`Chargement de ${file.name} (${formatBytes(file.size)})…`);
 
@@ -1568,7 +1554,7 @@ async function loadFile(file, options = {}) {
     resetButton.disabled = false;
     updateSelectionButtons();
     setStatus(`Modèle chargé : ${file.name}`, "ok");
-    await attachProjectContextForFile(file.name, state.lastIfcText);
+    await attachProjectContextForFile(file.name);
     if (state.project?.edits?.length) restorePendingEditsFromProject(state.project);
     updateModelerButtonState();
     updateDownloadCurrentIfcButtonState();
