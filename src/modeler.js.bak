@@ -4,7 +4,7 @@ import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
 import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
-import { makeProjectId, saveProject, getProject, updateProject, setLastProjectId, blobToText, blobToGlbFile, safeFileName } from "./project-store.js";
+import { getProject, updateProject, setLastProjectId, blobToText, blobToGlbFile, safeFileName } from "./project-store.js";
 
 const container = document.getElementById("container");
 const dropzone = document.getElementById("dropzone");
@@ -34,24 +34,18 @@ const boxSelectButton = document.getElementById("select-box");
 const undoButton = document.getElementById("undo-action");
 const redoButton = document.getElementById("redo-action");
 const xrayToggleButton = document.getElementById("xray-toggle");
-const ifcSpacesToggleButton = document.getElementById("ifc-spaces-toggle");
 const toolSelectButton = document.getElementById("tool-select");
 const toolWallButton = document.getElementById("tool-wall");
-const toolPartitionButton = document.getElementById("tool-partition");
 const toolSlabButton = document.getElementById("tool-slab");
 const toolDoorButton = document.getElementById("tool-door");
 const toolWindowButton = document.getElementById("tool-window");
-const toolRoofButton = document.getElementById("tool-roof");
-const toolStairButton = document.getElementById("tool-stair");
 const wallAlignmentSelect = document.getElementById("wall-alignment");
 const wallsFromSlabButton = document.getElementById("walls-from-slab");
-const roofFromSlabButton = document.getElementById("roof-from-slab");
 const authoringStopButton = document.getElementById("authoring-stop");
 const snapToggleButton = document.getElementById("snap-toggle");
 const gridStepSelect = document.getElementById("grid-step");
 const newStoreyButton = document.getElementById("new-storey");
 const duplicateStoreyButton = document.getElementById("duplicate-storey");
-const deleteStoreyButton = document.getElementById("delete-storey");
 const previousStoreyButton = document.getElementById("previous-storey");
 const nextStoreyButton = document.getElementById("next-storey");
 const storeySelect = document.getElementById("storey-select");
@@ -94,18 +88,11 @@ const state = {
     originals: new Map(),
   },
   objectUrls: new Set(),
-  assets: {
-    openings: {
-      door: { url: "/assets/openings/door-single.glb", geometry: null, material: null, baseSize: null, loaded: false, error: null, label: "Door" },
-      window: { url: "/assets/openings/window-fixed.glb", geometry: null, material: null, baseSize: null, loaded: false, error: null, label: "Window" },
-    },
-  },
   projectId: null,
   project: null,
   returnToViewer: false,
   ifcOverlayGroup: null,
   ifcOverlayCount: 0,
-  ifcSpacesVisible: true,
   edit: {
     active: false,
     componentMode: "vertex",
@@ -136,29 +123,14 @@ const state = {
     gridStep: 0.1,
     wallHeight: 3,
     wallThickness: 0.2,
-    partitionHeight: 3,
-    partitionThickness: 0.075,
     wallAlignment: "center",
-    slabThickness: 0.12,
+    slabThickness: 0.25,
     slabEdgeInset: "auto",
     doorWidth: 0.9,
     doorHeight: 2.1,
     windowWidth: 1.2,
     windowHeight: 1.2,
     windowSill: 0.9,
-    roofType: "gable",
-    roofPitch: 35,
-    roofThickness: 0.18,
-    roofOverhang: 0.3,
-    roofEavesHeight: 3,
-    roofRidgeDirection: "x",
-    stairWidth: 0.9,
-    stairSteps: 12,
-    stairRise: 0.17,
-    stairLanding: 1,
-    stairTurnMode: "landing",
-    stairWinderSteps: 3,
-    stairAutoOpening: true,
     storeyHeight: 3,
     storeys: [{ id: "storey-0", name: "Storey 0", elevation: 0, height: 3 }],
     activeStoreyId: "storey-0",
@@ -166,19 +138,15 @@ const state = {
     calibration: { active: false, start: null, current: null, line: null },
     drawStart: null,
     drawCurrent: null,
-    stairPath: [],
     wallChainLastMesh: null,
     preview: null,
     openingPlacement: null,
     snapMarker: null,
     snapInfo: { type: "none", label: "", point: null },
     wallCount: 0,
-    partitionCount: 0,
     slabCount: 0,
     doorCount: 0,
     windowCount: 0,
-    roofCount: 0,
-    stairCount: 0,
   },
 };
 
@@ -239,26 +207,8 @@ const authoringPreviewMaterial = new THREE.MeshBasicMaterial({
   color: 0xff9248,
   transparent: true,
   opacity: 0.42,
-  depthTest: false,
   depthWrite: false,
   side: THREE.DoubleSide,
-});
-
-const authoringOpeningPreviewMaterial = new THREE.MeshBasicMaterial({
-  color: 0xff9248,
-  transparent: true,
-  opacity: 0.28,
-  depthTest: false,
-  depthWrite: false,
-  side: THREE.DoubleSide,
-});
-
-const authoringOpeningPreviewLineMaterial = new THREE.LineBasicMaterial({
-  color: 0xff9248,
-  transparent: true,
-  opacity: 0.95,
-  depthTest: false,
-  depthWrite: false,
 });
 
 const authoringSnapMarkerMaterial = new THREE.MeshBasicMaterial({
@@ -290,34 +240,38 @@ const authoringSlabMaterial = new THREE.MeshStandardMaterial({
   metalness: 0.02,
 });
 
-const authoringPartitionMaterial = new THREE.MeshStandardMaterial({
-  color: 0xe6dccd,
-  roughness: 0.84,
-  metalness: 0.02,
-});
-
-const authoringRoofMaterial = new THREE.MeshStandardMaterial({
-  color: 0x7f4f3a,
+const authoringDoorLeafMaterial = new THREE.MeshStandardMaterial({
+  color: 0x6f5137,
   roughness: 0.78,
   metalness: 0.02,
 });
 
-const authoringStairMaterial = new THREE.MeshStandardMaterial({
-  color: 0xc9b99d,
-  roughness: 0.82,
-  metalness: 0.02,
+const authoringDoorFrameMaterial = new THREE.MeshStandardMaterial({
+  color: 0xefe7dc,
+  roughness: 0.72,
+  metalness: 0.01,
 });
 
-const authoringDoorObjectMaterial = new THREE.MeshStandardMaterial({
-  color: 0x8a6a4f,
-  roughness: 0.76,
-  metalness: 0.02,
+const authoringDoorHandleMaterial = new THREE.MeshStandardMaterial({
+  color: 0x2c2f33,
+  roughness: 0.42,
+  metalness: 0.35,
 });
 
-const authoringWindowObjectMaterial = new THREE.MeshStandardMaterial({
-  color: 0xe4e9ed,
-  roughness: 0.58,
+const authoringWindowFrameMaterial = new THREE.MeshStandardMaterial({
+  color: 0xf0f3f5,
+  roughness: 0.62,
   metalness: 0.04,
+});
+
+const authoringWindowGlassMaterial = new THREE.MeshPhysicalMaterial({
+  color: 0xc9e6f5,
+  roughness: 0.08,
+  metalness: 0,
+  transparent: true,
+  opacity: 0.38,
+  transmission: 0.25,
+  depthWrite: false,
 });
 
 const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
@@ -403,7 +357,6 @@ function init() {
   resize();
   animate();
   updateUiEnabled();
-  preloadOpeningAssets();
   loadProjectFromUrl().catch((error) => {
     console.error(error);
     setStatus(`Impossible de charger le projet local : ${escapeHtml(error.message || error)}`, "error");
@@ -479,30 +432,19 @@ function bindEvents() {
 
   treeSearch.addEventListener("input", renderTree);
 
-  // Property-panel controls must stay fully interactive while the 3D app owns
-  // global shortcuts and text-selection guards. Without this, pointer/keyboard
-  // events coming from dimension inputs can bubble into viewport/modeler handlers
-  // and make the fields feel impossible to edit.
-  bindPropertyControlEventGuards();
-
   newSceneButton?.addEventListener("click", createNewAuthoringScene);
   toolSelectButton?.addEventListener("click", () => setAuthoringTool("select"));
   toolWallButton?.addEventListener("click", () => setAuthoringTool("wall"));
-  toolPartitionButton?.addEventListener("click", () => setAuthoringTool("partition"));
   toolSlabButton?.addEventListener("click", () => setAuthoringTool("slab"));
   toolDoorButton?.addEventListener("click", () => setAuthoringTool("door"));
   toolWindowButton?.addEventListener("click", () => setAuthoringTool("window"));
-  toolRoofButton?.addEventListener("click", () => setAuthoringTool("roof"));
-  toolStairButton?.addEventListener("click", () => setAuthoringTool("stair"));
   wallAlignmentSelect?.addEventListener("change", () => setWallAlignment(wallAlignmentSelect.value));
   wallsFromSlabButton?.addEventListener("click", createWallsFromSelectedSlabBoundary);
-  roofFromSlabButton?.addEventListener("click", createRoofFromSelectedSlab);
   authoringStopButton?.addEventListener("click", () => stopAuthoringTool());
   snapToggleButton?.addEventListener("click", () => setAuthoringSnap(!state.authoring.snap));
   gridStepSelect?.addEventListener("change", () => setGridStep(Number(gridStepSelect.value || 0.5)));
   newStoreyButton?.addEventListener("click", createNewStorey);
   duplicateStoreyButton?.addEventListener("click", duplicateActiveStorey);
-  deleteStoreyButton?.addEventListener("click", deleteActiveStorey);
   previousStoreyButton?.addEventListener("click", () => navigateStorey(-1));
   nextStoreyButton?.addEventListener("click", () => navigateStorey(1));
   storeySelect?.addEventListener("change", () => setActiveStorey(storeySelect.value));
@@ -538,7 +480,6 @@ function bindEvents() {
   undoButton?.addEventListener("click", undoLastAction);
   redoButton?.addEventListener("click", redoLastAction);
   xrayToggleButton?.addEventListener("click", () => setXrayEnabled(!state.xray.active));
-  ifcSpacesToggleButton?.addEventListener("click", () => setIfcSpacesVisible(!state.ifcSpacesVisible));
   helpToggleButton?.addEventListener("click", () => setHelpPanelOpen(!shortcutsPanel?.classList.contains("open")));
   helpCloseButton?.addEventListener("click", () => setHelpPanelOpen(false));
 
@@ -569,12 +510,6 @@ function bindEvents() {
       return;
     }
 
-    if (event.key === "Enter" && state.authoring.tool === "stair" && state.authoring.stairPath?.length > 1) {
-      event.preventDefault();
-      stopAuthoringTool({ silent: false });
-      return;
-    }
-
     if (event.key === "Escape") {
       if (state.authoring.calibration.active) cancelReferenceCalibration();
       else if (state.authoring.drawStart || isDrawingAuthoringTool()) stopAuthoringTool({ silent: false });
@@ -602,12 +537,9 @@ function bindEvents() {
     if (!state.edit.active) {
       if (key === "v") setAuthoringTool("select");
       if (key === "m") setAuthoringTool("wall");
-      if (key === "i") setAuthoringTool("partition");
       if (key === "d") setAuthoringTool("slab");
       if (key === "o") setAuthoringTool("door");
       if (key === "f") setAuthoringTool("window");
-      if (key === "h") setAuthoringTool("roof");
-      if (key === "e") setAuthoringTool("stair");
       if (key === "p") setAuthoringSnap(!state.authoring.snap);
       if (key === "pageup") navigateStorey(1);
       if (key === "pagedown") navigateStorey(-1);
@@ -699,22 +631,6 @@ function isEditableTextTarget(target) {
   return Boolean(target.closest('input, textarea, select, option, [contenteditable="true"], .allow-text-selection'));
 }
 
-function bindPropertyControlEventGuards() {
-  if (!properties) return;
-
-  const stopForEditable = (event) => {
-    if (!isEditableTextTarget(event.target)) return;
-    event.stopPropagation();
-  };
-
-  for (const eventName of [
-    "pointerdown", "pointerup", "mousedown", "mouseup", "click", "dblclick",
-    "keydown", "keyup", "keypress", "selectstart", "dragstart",
-  ]) {
-    properties.addEventListener(eventName, stopForEditable, { capture: true });
-  }
-}
-
 function clearBrowserSelection() {
   const selection = window.getSelection?.();
   if (selection && selection.rangeCount) selection.removeAllRanges();
@@ -738,9 +654,8 @@ function beginViewportPointerInteraction() {
   clearBrowserSelection();
 }
 
-function endViewportPointerInteraction(event = null) {
+function endViewportPointerInteraction() {
   document.body.classList.remove("modeler-no-select");
-  if (event?.target && isEditableTextTarget(event.target)) return;
   clearBrowserSelection();
 }
 
@@ -872,24 +787,19 @@ function ensureAuthoringRoot() {
 }
 
 function setAuthoringTool(tool, options = {}) {
-  if (!["select", "wall", "partition", "slab", "door", "window", "roof", "stair"].includes(tool)) return;
+  if (!["select", "wall", "slab", "door", "window"].includes(tool)) return;
   if (state.authoring.tool !== tool) cancelAuthoringDraw();
   state.authoring.tool = tool;
   if (tool !== "select" && state.edit.active) setEditMode(false);
   if (tool !== "select") ensureAuthoringRoot();
-  if (tool === "roof") updateRoofPreviewFromSelection();
-  else if (state.authoring.preview?.userData?.authoringType === "roof") removeAuthoringPreview();
   updateToolbarState();
   renderProperties();
 
   if (!options.silent) {
-    if (tool === "wall") setStatus(`Outil Wall · preview live · Shift = guide 0°/45°/90° · alignement ${wallAlignmentLabel()} · snap visible grille/slab · Stop/Échap termine.`, "ok");
-    else if (tool === "partition") setStatus("Outil Cloison · mur intérieur fin · tracé continu · Shift = guide 0°/45°/90° · Stop/Échap termine.", "ok");
+    if (tool === "wall") setStatus(`Outil Wall · preview live · alignement ${wallAlignmentLabel()} · snap visible grille/slab · Stop/Échap termine.`, "ok");
     else if (tool === "slab") setStatus("Outil Slab · clic coin 1, clic coin opposé · rectangle contraint à la grille.", "ok");
     else if (tool === "door") setStatus("Outil Door · survole un mur, preview bleue/brune, clic pour créer la porte et découper le mur.", "ok");
     else if (tool === "window") setStatus("Outil Window · survole un mur, preview vitrée, clic pour créer la fenêtre et découper le mur.", "ok");
-    else if (tool === "roof") setStatus("Outil Roof · sélectionne une slab : preview toiture · clique Roof from slab pour créer une toiture Flat/Shed/Gable.", "ok");
-    else if (tool === "stair") setStatus("Outil Escalier · multi-points · mode palier ou balancé · trémie auto dans la slab supérieure · Stop/Entrée finalise.", "ok");
     else setStatus("Outil Select · sélection et transformations objet/édition.", "ok");
   }
 }
@@ -915,21 +825,6 @@ function wallAlignmentLabel(value = state.authoring.wallAlignment) {
   if (value === "left") return "face gauche";
   if (value === "right") return "face droite";
   return "axe central";
-}
-
-function isWallTraceTool(tool = state.authoring.tool) {
-  return tool === "wall" || tool === "partition";
-}
-
-function authoringToolLabel(tool = state.authoring.tool) {
-  if (tool === "wall") return "Wall";
-  if (tool === "partition") return "Cloison";
-  if (tool === "slab") return "Slab";
-  if (tool === "door") return "Door";
-  if (tool === "window") return "Window";
-  if (tool === "roof") return "Roof";
-  if (tool === "stair") return "Escalier";
-  return "Select";
 }
 
 function setAuthoringSnap(enabled) {
@@ -1037,7 +932,7 @@ function duplicateActiveStorey() {
     mesh?.parent
     && !mesh.userData?.__modelerOverlay
     && mesh.userData?.storeyId === sourceStorey.id
-    && ["wall", "slab", "door", "window", "roof", "stair"].includes(mesh.userData?.authoringType)
+    && ["wall", "slab", "door", "window"].includes(mesh.userData?.authoringType)
   ));
 
   if (!sourceMeshes.length) {
@@ -1078,7 +973,6 @@ function duplicateActiveStorey() {
 
   indexMeshes(root);
   refreshAuthoredWallMiters();
-  relinkOpeningMeshesForStorey(targetStorey.id);
   const indexed = created.map((mesh) => state.meshes.find((candidate) => candidate.uuid === mesh.uuid) || mesh);
   pushHistory({
     type: "createMeshes",
@@ -1096,130 +990,6 @@ function duplicateActiveStorey() {
   setStatus(`${escapeHtml(sourceStorey.name)} dupliqué vers ${escapeHtml(targetStorey.name)} · ${indexed.length} élément${indexed.length > 1 ? "s" : ""}.`, "ok");
 }
 
-function getAuthoredMeshesForStorey(storeyId) {
-  return state.meshes.filter((mesh) => (
-    mesh?.parent
-    && !mesh.userData?.__modelerOverlay
-    && mesh.userData?.storeyId === storeyId
-    && ["wall", "slab", "door", "window", "roof", "stair"].includes(mesh.userData?.authoringType)
-  ));
-}
-
-function captureChildRecord(object) {
-  if (!object) return null;
-  const parent = object.parent || null;
-  return {
-    mesh: object,
-    parent,
-    index: parent ? parent.children.indexOf(object) : -1,
-  };
-}
-
-function addChildBackAt(record, fallbackParent = null) {
-  if (!record?.mesh) return;
-  const parent = record.parent || fallbackParent || state.modelRoot || ensureAuthoringRoot();
-  if (!parent) return;
-  if (!record.mesh.parent) parent.add(record.mesh);
-  if (Number.isFinite(record.index) && record.index >= 0 && record.index < parent.children.length - 1) {
-    const currentIndex = parent.children.indexOf(record.mesh);
-    if (currentIndex >= 0) {
-      parent.children.splice(currentIndex, 1);
-      parent.children.splice(record.index, 0, record.mesh);
-    }
-  }
-}
-
-function detachReferencePlanForHistory(storeyId) {
-  const ref = state.authoring.references.get(storeyId);
-  if (!ref) return null;
-  const parent = ref.mesh?.parent || null;
-  const index = parent ? parent.children.indexOf(ref.mesh) : -1;
-  if (ref.mesh?.parent) ref.mesh.parent.remove(ref.mesh);
-  state.authoring.references.delete(storeyId);
-  return { ref, parent, index };
-}
-
-function restoreReferencePlanFromHistory(record) {
-  if (!record?.ref) return;
-  state.authoring.references.set(record.ref.storeyId, record.ref);
-  if (record.ref.mesh) {
-    const parent = record.parent || state.scene;
-    if (!record.ref.mesh.parent) parent.add(record.ref.mesh);
-    if (Number.isFinite(record.index) && record.index >= 0 && record.index < parent.children.length - 1) {
-      const currentIndex = parent.children.indexOf(record.ref.mesh);
-      if (currentIndex >= 0) {
-        parent.children.splice(currentIndex, 1);
-        parent.children.splice(record.index, 0, record.ref.mesh);
-      }
-    }
-  }
-}
-
-function getFallbackStoreyIdAfterDeletion(deletedIndex, preferredId = null) {
-  const storeys = state.authoring.storeys || [];
-  if (!storeys.length) return "storey-0";
-  if (preferredId && storeys.some((storey) => storey.id === preferredId)) return preferredId;
-  const fallbackIndex = THREE.MathUtils.clamp(Math.min(deletedIndex - 1, storeys.length - 1), 0, storeys.length - 1);
-  return storeys[fallbackIndex]?.id || storeys[0]?.id;
-}
-
-function deleteActiveStorey() {
-  if (!state.modelRoot) return;
-  const storeys = state.authoring.storeys || [];
-  const storey = getActiveStorey();
-  if (!storey) return;
-  if (storeys.length <= 1) {
-    setStatus("Impossible de supprimer le dernier étage. Crée un autre storey avant de supprimer celui-ci.", "warning");
-    return;
-  }
-
-  ensureAuthoringRoot();
-  cancelAuthoringDraw();
-  cancelReferenceCalibration();
-  if (state.edit.active) setEditMode(false);
-
-  const storeyIndex = getActiveStoreyIndex();
-  const meshes = getAuthoredMeshesForStorey(storey.id);
-  const ref = state.authoring.references.get(storey.id);
-  const count = meshes.length + (ref ? 1 : 0);
-  const message = `Supprimer ${storey.name} et ${count} élément${count > 1 ? "s" : ""} associé${count > 1 ? "s" : ""} ?\n\nCette action est annulable avec Ctrl/Cmd+Z.`;
-  if (typeof window !== "undefined" && typeof window.confirm === "function" && !window.confirm(message)) return;
-
-  const meshRecords = meshes.map(captureChildRecord).filter(Boolean);
-  if (state.selected?.userData?.storeyId === storey.id) selectMesh(null);
-  for (const record of meshRecords) {
-    if (record.mesh?.parent) record.mesh.parent.remove(record.mesh);
-  }
-
-  const referenceRecord = detachReferencePlanForHistory(storey.id);
-  state.authoring.storeys = storeys.filter((candidate) => candidate.id !== storey.id);
-  const activeAfter = getFallbackStoreyIdAfterDeletion(storeyIndex);
-  state.authoring.activeStoreyId = activeAfter;
-  updateAuthoringPlaneElevation();
-
-  if (state.modelRoot) {
-    indexMeshes(state.modelRoot);
-    refreshAuthoredWallMiters();
-  }
-
-  pushHistory({
-    type: "deleteStorey",
-    label: `Supprimer ${storey.name}`,
-    storey: { ...storey },
-    index: storeyIndex,
-    activeBefore: storey.id,
-    activeAfter,
-    meshRecords,
-    referenceRecord,
-  });
-
-  renderTree();
-  renderProperties();
-  markDirty();
-  updateUiEnabled();
-  setStatus(`${escapeHtml(storey.name)} supprimé · ${meshes.length} objet${meshes.length > 1 ? "s" : ""} retiré${meshes.length > 1 ? "s" : ""}. Ctrl/Cmd+Z pour annuler.`, "ok");
-}
-
 function duplicateAuthoredMeshToActiveStorey(mesh, targetStorey) {
   if (!mesh) return null;
   if (mesh.userData?.authoringType === "wall" && mesh.userData?.wallPath) {
@@ -1228,15 +998,7 @@ function duplicateAuthoredMeshToActiveStorey(mesh, targetStorey) {
       prevPoint: data.prev?.clone?.() || null,
       nextPoint: data.next?.clone?.() || null,
       alignment: data.alignment || state.authoring.wallAlignment,
-      kind: data.kind || "wall",
-      thickness: data.thickness,
-      height: data.height,
-      openings: Array.isArray(data.openings) ? data.openings.map((opening) => {
-        const copy = cloneOpening(opening);
-        const deltaY = targetStorey.elevation - Number(mesh.userData?.storeyElevation || data.baseElevation || 0);
-        if (Number.isFinite(Number(copy.floorElevation))) copy.floorElevation = Number(copy.floorElevation) + deltaY;
-        return copy;
-      }) : [],
+      openings: Array.isArray(data.openings) ? data.openings.map(cloneOpening) : [],
     });
     if (!copy) return null;
     copy.name = `${mesh.name || "Wall"}_copy`;
@@ -1244,8 +1006,6 @@ function duplicateAuthoredMeshToActiveStorey(mesh, targetStorey) {
     copy.userData.storeyName = targetStorey.name;
     copy.userData.storeyElevation = targetStorey.elevation;
     copy.userData.wallPath.baseElevation = targetStorey.elevation;
-    copy.userData.wallPath.storeyId = targetStorey.id;
-    copy.userData.wallPath.storeyName = targetStorey.name;
     copy.position.y = targetStorey.elevation;
     if (state.xray.active) applyXrayToMesh(copy);
     return copy;
@@ -1277,80 +1037,6 @@ function duplicateAuthoredMeshToActiveStorey(mesh, targetStorey) {
     return copy;
   }
 
-
-  if (mesh.userData?.authoringType === "roof" && mesh.userData?.roofData) {
-    const oldActiveId = state.authoring.activeStoreyId;
-    state.authoring.activeStoreyId = targetStorey.id;
-    const data = mesh.userData.roofData;
-    const fakeSlab = {
-      userData: {
-        authoringType: "slab",
-        storeyId: targetStorey.id,
-        storeyName: targetStorey.name,
-        storeyElevation: targetStorey.elevation,
-        slabBoundary: {
-          minX: data.minX + Number(data.overhang || 0),
-          maxX: data.maxX - Number(data.overhang || 0),
-          minZ: data.minZ + Number(data.overhang || 0),
-          maxZ: data.maxZ - Number(data.overhang || 0),
-          elevation: targetStorey.elevation,
-        },
-      },
-    };
-    const previous = {
-      roofType: state.authoring.roofType,
-      roofPitch: state.authoring.roofPitch,
-      roofThickness: state.authoring.roofThickness,
-      roofOverhang: state.authoring.roofOverhang,
-      roofEavesHeight: state.authoring.roofEavesHeight,
-      roofRidgeDirection: state.authoring.roofRidgeDirection,
-    };
-    state.authoring.roofType = data.type || previous.roofType;
-    state.authoring.roofPitch = Number(data.pitch ?? previous.roofPitch);
-    state.authoring.roofThickness = Number(data.thickness ?? previous.roofThickness);
-    state.authoring.roofOverhang = Number(data.overhang ?? previous.roofOverhang);
-    state.authoring.roofEavesHeight = Number(data.eavesHeight ?? previous.roofEavesHeight);
-    state.authoring.roofRidgeDirection = data.ridgeDirection || previous.roofRidgeDirection;
-    const copy = createRoofMeshFromSlab(fakeSlab);
-    Object.assign(state.authoring, previous);
-    state.authoring.activeStoreyId = oldActiveId;
-    if (!copy) return null;
-    copy.name = `${mesh.name || "Roof"}_copy`;
-    if (state.xray.active) applyXrayToMesh(copy);
-    return copy;
-  }
-
-  if (mesh.userData?.authoringType === "stair" && mesh.userData?.stairData) {
-    const data = mesh.userData.stairData;
-    const oldActiveId = state.authoring.activeStoreyId;
-    state.authoring.activeStoreyId = targetStorey.id;
-    const points = Array.isArray(data.points) && data.points.length >= 2
-      ? data.points.map((point) => new THREE.Vector3(point.x, targetStorey.elevation, point.z))
-      : [
-          data.start?.clone?.() || new THREE.Vector3(),
-          data.end?.clone?.() || (data.start?.clone?.() || new THREE.Vector3()).add(new THREE.Vector3(Number(data.run) || 2.4, 0, 0)),
-        ].map((point) => { point.y = targetStorey.elevation; return point; });
-    const copy = createStairMesh(points, {
-      width: Number(data.width ?? mesh.userData?.dimensions?.width ?? state.authoring.stairWidth),
-      steps: Number(data.steps ?? mesh.userData?.dimensions?.steps ?? state.authoring.stairSteps),
-      rise: Number(data.rise ?? mesh.userData?.dimensions?.rise ?? state.authoring.stairRise),
-      landing: Number(data.landing ?? mesh.userData?.dimensions?.landingLength ?? state.authoring.stairLanding),
-      turnMode: data.turnMode || mesh.userData?.dimensions?.turnMode || state.authoring.stairTurnMode,
-      winderSteps: Number(data.winderSteps ?? mesh.userData?.dimensions?.winderSteps ?? state.authoring.stairWinderSteps),
-    });
-    state.authoring.activeStoreyId = oldActiveId;
-    if (!copy) return null;
-    copy.name = `${mesh.name || "Stair"}_copy`;
-    copy.userData.storeyId = targetStorey.id;
-    copy.userData.storeyName = targetStorey.name;
-    copy.userData.storeyElevation = targetStorey.elevation;
-    copy.userData.stairData.storeyId = targetStorey.id;
-    copy.userData.stairData.storeyName = targetStorey.name;
-    copy.userData.stairData.baseElevation = targetStorey.elevation;
-    if (state.xray.active) applyXrayToMesh(copy);
-    return copy;
-  }
-
   if (["door", "window"].includes(mesh.userData?.authoringType)) {
     const deltaY = targetStorey.elevation - Number(mesh.userData?.storeyElevation || 0);
     const copy = mesh.clone(false);
@@ -1366,17 +1052,6 @@ function duplicateAuthoredMeshToActiveStorey(mesh, targetStorey) {
     copy.userData.storeyId = targetStorey.id;
     copy.userData.storeyName = targetStorey.name;
     copy.userData.storeyElevation = targetStorey.elevation;
-
-    // The copied wall receives a new local modeler id after indexMeshes(). Until
-    // then, keeping the source wallId on the copied opening is dangerous: direct
-    // delete/edit operations would target the source storey. Keep the semantic
-    // opening id and force getOpeningLinkForMesh() to resolve the host wall by
-    // storey + proximity/opening id.
-    if (copy.userData.opening) {
-      copy.userData.opening = { ...copy.userData.opening };
-      delete copy.userData.opening.wallId;
-    }
-
     if (state.xray.active) applyXrayToMesh(copy);
     return copy;
   }
@@ -1634,7 +1309,7 @@ function applyReferencePlanScale(ref, factor, anchorWorld) {
 }
 
 function isDrawingAuthoringTool() {
-  return !state.edit.active && ["wall", "partition", "slab", "door", "window", "stair"].includes(state.authoring.tool);
+  return !state.edit.active && ["wall", "slab", "door", "window"].includes(state.authoring.tool);
 }
 
 function isOpeningTool(tool = state.authoring.tool) {
@@ -1655,39 +1330,13 @@ function handleAuthoringClick(event) {
 
   ensureAuthoringRoot();
 
-  if (state.authoring.tool === "stair") {
-    const minSize = Math.max(0.02, state.authoring.gridStep * 0.25);
-    if (!state.authoring.stairPath.length) {
-      state.authoring.stairPath = [point.clone()];
-      state.authoring.drawStart = point.clone();
-      state.authoring.drawCurrent = point.clone();
-      createOrUpdateAuthoringPreview();
-      setStatus(`Point 1 de l’escalier posé : ${formatVector(point)} · clique les points suivants pour créer des volées et des paliers. Stop/Entrée finalise.`, "ok");
-      return;
-    }
-
-    const last = state.authoring.stairPath[state.authoring.stairPath.length - 1];
-    if (Math.hypot(point.x - last.x, point.z - last.z) < minSize) {
-      setStatus("Segment d’escalier trop court : choisis un point plus éloigné.", "warning");
-      return;
-    }
-
-    state.authoring.stairPath.push(point.clone());
-    state.authoring.drawStart = point.clone();
-    state.authoring.drawCurrent = point.clone();
-    createOrUpdateAuthoringPreview();
-    const flights = Math.max(1, state.authoring.stairPath.length - 1);
-    setStatus(`Volée ${flights} validée · clique un autre point pour ajouter un coude/palier, ou Stop/Entrée pour créer l’escalier.`, "ok");
-    return;
-  }
-
   if (!state.authoring.drawStart) {
     state.authoring.wallChainLastMesh = null;
     state.authoring.drawStart = point.clone();
     state.authoring.drawCurrent = point.clone();
     createOrUpdateAuthoringPreview();
-    const label = isWallTraceTool() ? (state.authoring.tool === "partition" ? "cloison" : "mur") : state.authoring.tool === "stair" ? "escalier" : "dalle";
-    setStatus(`Point 1 du ${label} posé : ${formatVector(point)} · clique le second point. Maintiens Shift pour guider à 0°/45°/90°.`, "ok");
+    const label = state.authoring.tool === "wall" ? "mur" : "dalle";
+    setStatus(`Point 1 du ${label} posé : ${formatVector(point)} · clique le second point. Drag gauche reste réservé à l’orbite caméra.`, "ok");
     return;
   }
 
@@ -1728,8 +1377,6 @@ function pointerToGroundPoint(event, options = {}) {
   const shouldSnap = options.snap ?? state.authoring.snap;
   if (shouldSnap) snapAuthoringPoint(point, options);
   else setAuthoringSnapInfo({ type: "free", label: "Libre", point: point.clone() });
-
-  applyWallAngleGuideIfNeeded(point, event, options);
   point.y = elevation;
 
   if (options.feedback !== false) {
@@ -1738,55 +1385,6 @@ function pointerToGroundPoint(event, options = {}) {
   }
 
   return point;
-}
-
-function applyWallAngleGuideIfNeeded(point, event, options = {}) {
-  if (options.angleGuide === false) return point;
-  if (!event?.shiftKey) return point;
-  if (!isWallTraceTool() && state.authoring.tool !== "stair") return point;
-  if (!state.authoring.drawStart) return point;
-  if (state.authoring.calibration.active || isOpeningTool()) return point;
-
-  const start = state.authoring.drawStart;
-  const dx = point.x - start.x;
-  const dz = point.z - start.z;
-  const distance = Math.hypot(dx, dz);
-  if (distance < 1e-6) return point;
-
-  const rawAngle = Math.atan2(dz, dx);
-  const stepAngle = Math.PI / 4;
-  const snappedAngle = Math.round(rawAngle / stepAngle) * stepAngle;
-  const cos = Math.cos(snappedAngle);
-  const sin = Math.sin(snappedAngle);
-  const signX = Math.abs(cos) < 1e-6 ? 0 : Math.sign(cos);
-  const signZ = Math.abs(sin) < 1e-6 ? 0 : Math.sign(sin);
-  const grid = Math.max(0.0001, Number(state.authoring.gridStep) || 0.1);
-
-  let component;
-  if (signX && signZ) component = Math.max(Math.abs(dx), Math.abs(dz));
-  else if (signX) component = Math.abs(dx);
-  else component = Math.abs(dz);
-
-  if (state.authoring.snap) component = Math.max(grid, Math.round(component / grid) * grid);
-
-  point.x = start.x + signX * component;
-  point.z = start.z + signZ * component;
-  point.y = getActiveStoreyElevation();
-
-  const degrees = normalizeGuideAngle(Math.round(THREE.MathUtils.radToDeg(snappedAngle)));
-  const previousLabel = state.authoring.snapInfo?.label || (state.authoring.snap ? `Grille ${formatNumber(grid)} m` : "Libre");
-  setAuthoringSnapInfo({
-    type: "angle-guide",
-    label: `Guide ${degrees}° · ${previousLabel}`,
-    point: point.clone(),
-  });
-  return point;
-}
-
-function normalizeGuideAngle(degrees) {
-  let angle = degrees % 180;
-  if (angle < 0) angle += 180;
-  return angle === 135 ? -45 : angle;
 }
 
 function snapAuthoringPoint(point, options = {}) {
@@ -1914,7 +1512,7 @@ function removeAuthoringSnapMarker() {
 function updateSnapHud(event) {
   if (!snapHud || !event || !isDrawingAuthoringTool()) return;
   const info = state.authoring.snapInfo || {};
-  const alignment = state.authoring.tool === "wall" ? ` · ${wallAlignmentLabel()}` : state.authoring.tool === "partition" ? " · cloison intérieure" : "";
+  const alignment = state.authoring.tool === "wall" ? ` · ${wallAlignmentLabel()}` : "";
   const point = info.point;
   const coords = point ? ` · X ${formatNumber(point.x)} · Z ${formatNumber(point.z)}` : "";
   snapHud.textContent = `${info.label || "Libre"}${alignment}${coords}`;
@@ -1957,20 +1555,13 @@ function createOrUpdateAuthoringPreview() {
   const end = state.authoring.drawCurrent;
   if (!start || !end) return;
 
-  const stairPoints = state.authoring.tool === "stair"
-    ? buildPreviewStairPoints()
-    : null;
-
-  const mesh = isWallTraceTool()
+  const mesh = state.authoring.tool === "wall"
     ? createWallMesh(start, end, {
         preview: true,
         prevPoint: state.authoring.wallChainLastMesh?.userData?.wallPath?.start || null,
-        alignment: state.authoring.tool === "partition" ? "center" : state.authoring.wallAlignment,
-        kind: state.authoring.tool === "partition" ? "partition" : "wall",
+        alignment: state.authoring.wallAlignment,
       })
-    : state.authoring.tool === "stair"
-      ? createStairMesh(stairPoints, { preview: true })
-      : createSlabMesh(start, end, { preview: true });
+    : createSlabMesh(start, end, { preview: true });
 
   if (!mesh) return;
   mesh.userData.__modelerOverlay = true;
@@ -1990,7 +1581,6 @@ function removeAuthoringPreview() {
 function cancelAuthoringDraw() {
   state.authoring.drawStart = null;
   state.authoring.drawCurrent = null;
-  state.authoring.stairPath = [];
   state.authoring.wallChainLastMesh = null;
   state.authoring.openingPlacement = null;
   removeAuthoringPreview();
@@ -1999,36 +1589,6 @@ function cancelAuthoringDraw() {
 }
 
 function stopAuthoringTool(options = {}) {
-  if (state.authoring.tool === "stair" && state.authoring.stairPath?.length > 1) {
-    const mesh = createStairMesh(state.authoring.stairPath);
-    if (mesh) {
-      removeAuthoringPreview();
-      const root = ensureAuthoringRoot();
-      root.add(mesh);
-      mesh.updateMatrixWorld(true);
-      indexMeshes(root);
-      const indexed = state.meshes.find((candidate) => candidate.uuid === mesh.uuid) || mesh;
-      const slabCut = applyAutoStairSlabOpening(indexed);
-      pushHistory({
-        type: "createMesh",
-        label: `Create ${authoringToolLabel("stair")}`,
-        mesh: indexed,
-        parent: root,
-        meshId: indexed.userData.__modelerId,
-        slabCut,
-      });
-      selectMesh(indexed);
-      markDirty();
-      renderTree();
-      renderProperties();
-      updateUiEnabled();
-      cancelAuthoringDraw();
-      setAuthoringTool("select", { silent: true });
-      if (!options.silent) setStatus(`${authoringToolLabel("stair")} créé · ${escapeHtml(indexed.name)} · géométrie fermée avec paliers.`, "ok");
-      return;
-    }
-  }
-
   const wasDrawing = isDrawingAuthoringTool() || Boolean(state.authoring.drawStart);
   cancelAuthoringDraw();
   setAuthoringTool("select", { silent: true });
@@ -2168,11 +1728,6 @@ function createOpeningOnWall(placement, tool) {
   const offset = THREE.MathUtils.clamp(placement.offset, margin + half, Math.max(margin + half, length - margin - half));
   if (offset - half < margin || offset + half > length - margin) return null;
 
-  const point = pointAlongWallData(data, offset, true);
-  const floorElevation = openingFloorElevationForWall(wall, point);
-  const effectiveSill = Math.max(0, floorElevation - Number(data.baseElevation ?? getActiveStoreyElevation())) + sill;
-  if (effectiveSill + height > Number(data.height || state.authoring.wallHeight) - 0.02) return null;
-
   const opening = {
     id: `opening-${Date.now()}-${Math.round(Math.random() * 1e6)}`,
     type: tool,
@@ -2180,11 +1735,10 @@ function createOpeningOnWall(placement, tool) {
     width,
     height,
     sill,
-    floorElevation,
   };
   data.openings = Array.isArray(data.openings) ? data.openings : [];
   data.openings.push(opening);
-  const mesh = createOpeningMesh({ ...placement, offset, point }, tool, { opening, wall });
+  const mesh = createOpeningMesh({ ...placement, offset, point: pointAlongWallData(data, offset, true) }, tool, { opening, wall });
   if (!mesh) {
     data.openings = data.openings.filter((item) => item.id !== opening.id);
     return null;
@@ -2199,189 +1753,103 @@ function createOpeningMesh(placement, tool, options = {}) {
   const width = options.opening?.width ?? defaults.width;
   const height = options.opening?.height ?? defaults.height;
   const sill = options.opening?.sill ?? defaults.sill;
-  const wallThickness = Math.max(0.03, Number(data.thickness || state.authoring.wallThickness) || 0.2);
-  const objectDepth = openingObjectDepth(tool, wallThickness);
+  const thickness = Math.max(0.03, Number(data.thickness || state.authoring.wallThickness) + 0.035);
+  const material = options.preview ? authoringPreviewMaterial.clone() : createOpeningMaterials(tool);
+  const geometry = options.preview
+    ? new THREE.BoxGeometry(width, height, thickness)
+    : createOpeningObjectGeometry(tool, width, height, thickness);
+  const mesh = new THREE.Mesh(geometry, material);
   const point = placement.point || pointAlongWallData(data, placement.offset ?? 0, true);
-  const floorElevation = openingFloorElevationForWall(options.wall || placement.wall || data, point, options.opening);
-  if (options.opening && !Number.isFinite(Number(options.opening.floorElevation))) options.opening.floorElevation = floorElevation;
-
-  const object = options.preview
-    ? createOpeningPreviewObject(tool, width, height, wallThickness, objectDepth)
-    : new THREE.Mesh(createOpeningObjectGeometry(tool, width, height, objectDepth), createOpeningMaterials(tool));
-  if (!object) return null;
-
-  object.position.set(point.x, floorElevation + sill + height * 0.5, point.z);
+  mesh.position.set(point.x, Number(data.baseElevation ?? getActiveStoreyElevation()) + sill + height * 0.5, point.z);
   const dir = placement.dir || wallDirection(data);
-  object.rotation.y = rotationYForWallDirection(dir);
-  object.name = options.preview
+  mesh.rotation.y = rotationYForWallDirection(dir);
+  mesh.name = options.preview
     ? `${openingToolLabel(tool)} preview`
     : `${openingToolLabel(tool)}_${String(++state.authoring[tool === "window" ? "windowCount" : "doorCount"]).padStart(3, "0")}`;
-  object.castShadow = false;
-  object.receiveShadow = false;
-  object.userData.authoringType = tool;
-  object.userData.ifcHint = tool === "window" ? "IfcWindow" : "IfcDoor";
-  object.userData.storeyId = placement.wall?.userData?.storeyId || getActiveStorey().id;
-  object.userData.storeyName = placement.wall?.userData?.storeyName || getActiveStorey().name;
-  object.userData.storeyElevation = Number(data.baseElevation ?? getActiveStoreyElevation());
-  object.userData.floorElevation = floorElevation;
-  object.userData.dimensions = { width, height, sill, wallThickness, objectDepth, floorElevation };
+  mesh.castShadow = false;
+  mesh.receiveShadow = false;
+  mesh.userData.authoringType = tool;
+  mesh.userData.ifcHint = tool === "window" ? "IfcWindow" : "IfcDoor";
+  mesh.userData.storeyId = placement.wall?.userData?.storeyId || getActiveStorey().id;
+  mesh.userData.storeyName = placement.wall?.userData?.storeyName || getActiveStorey().name;
+  mesh.userData.storeyElevation = Number(data.baseElevation ?? getActiveStoreyElevation());
+  mesh.userData.dimensions = { width, height, sill, wallThickness: thickness };
   if (!options.preview) {
-    object.userData.opening = {
+    mesh.userData.opening = {
       id: options.opening?.id || null,
       wallId: placement.wall?.userData?.__modelerId || options.wall?.userData?.__modelerId || null,
       offset: placement.offset,
       type: tool,
     };
   }
-  if (state.xray.active && !options.preview) applyXrayToMesh(object);
-  return object;
+  if (state.xray.active && !options.preview) applyXrayToMesh(mesh);
+  return mesh;
 }
 
 function createOpeningMaterials(tool) {
-  const assetKey = tool === "window" ? "window" : "door";
-  const fallback = tool === "window" ? authoringWindowObjectMaterial : authoringDoorObjectMaterial;
-  const assetMaterial = state.assets?.openings?.[assetKey]?.material;
-  if (assetMaterial) {
-    const material = assetMaterial.clone();
-    material.side = THREE.FrontSide;
-    material.transparent = false;
-    material.depthWrite = true;
-    return material;
+  if (tool === "window") {
+    return [authoringWindowFrameMaterial.clone(), authoringWindowGlassMaterial.clone()];
+  }
+  return [authoringDoorLeafMaterial.clone(), authoringDoorFrameMaterial.clone(), authoringDoorHandleMaterial.clone()];
+}
+
+function createOpeningObjectGeometry(tool, width, height, thickness) {
+  const boxes = [];
+  const frame = THREE.MathUtils.clamp(Math.min(width, height) * 0.09, 0.045, 0.12);
+  const depth = Math.max(0.035, thickness * 0.42);
+
+  if (tool === "window") {
+    const mullion = Math.max(frame * 0.55, 0.035);
+    boxes.push({ center: [0, 0, 0], size: [Math.max(0.02, width - frame * 1.6), Math.max(0.02, height - frame * 1.6), Math.max(0.012, thickness * 0.08)], materialIndex: 1 });
+    boxes.push({ center: [0, height * 0.5 - frame * 0.5, 0], size: [width, frame, depth], materialIndex: 0 });
+    boxes.push({ center: [0, -height * 0.5 + frame * 0.5, 0], size: [width, frame, depth], materialIndex: 0 });
+    boxes.push({ center: [-width * 0.5 + frame * 0.5, 0, 0], size: [frame, height, depth], materialIndex: 0 });
+    boxes.push({ center: [width * 0.5 - frame * 0.5, 0, 0], size: [frame, height, depth], materialIndex: 0 });
+    boxes.push({ center: [0, 0, 0], size: [mullion, Math.max(0.02, height - frame * 1.8), depth * 0.9], materialIndex: 0 });
+  } else {
+    const leafDepth = Math.max(0.025, thickness * 0.16);
+    boxes.push({ center: [0, 0, 0], size: [Math.max(0.02, width - frame * 1.1), Math.max(0.02, height - frame * 0.5), leafDepth], materialIndex: 0 });
+    boxes.push({ center: [0, height * 0.5 - frame * 0.5, 0], size: [width, frame, depth], materialIndex: 1 });
+    boxes.push({ center: [-width * 0.5 + frame * 0.5, 0, 0], size: [frame, height, depth], materialIndex: 1 });
+    boxes.push({ center: [width * 0.5 - frame * 0.5, 0, 0], size: [frame, height, depth], materialIndex: 1 });
+    boxes.push({ center: [width * 0.28, -height * 0.08, -Math.max(0.03, depth * 0.55)], size: [Math.max(0.05, width * 0.055), Math.max(0.055, width * 0.06), Math.max(0.025, thickness * 0.10)], materialIndex: 2 });
   }
 
-  return fallback.clone();
+  return createCompositeBoxGeometry(boxes);
 }
 
-function openingObjectDepth(tool, wallThickness) {
-  const t = Math.max(0.03, Number(wallThickness) || 0.2);
-  // The wall opening is cut through the whole wall by the wall mesh generator,
-  // but the visible joinery object must stay thinner than the host wall.
-  // Keep stable architectural proportions instead of scaling the asset to 100%
-  // of the wall thickness.
-  if (tool === "window") return THREE.MathUtils.clamp(t * 0.45, 0.045, 0.12);
-  return THREE.MathUtils.clamp(t * 0.38, 0.04, 0.10);
-}
+function createCompositeBoxGeometry(boxes) {
+  const vertices = [];
+  const indices = [];
+  const groups = [];
 
-function createOpeningPreviewObject(tool, width, height, wallThickness, objectDepth) {
-  // Preview has two layers:
-  // 1. a through-wall cut volume / outline, so the future boolean is visible;
-  // 2. the real joinery asset depth, so the user sees the thinner door/window object.
-  // This keeps the depth-ratio fix while restoring a clear placement preview.
-  const group = new THREE.Group();
-  group.userData.__modelerOverlay = true;
+  for (const box of boxes) {
+    const [cx, cy, cz] = box.center;
+    const [sx, sy, sz] = box.size.map((value) => Math.max(0.001, Number(value) || 0.001));
+    const x0 = cx - sx * 0.5, x1 = cx + sx * 0.5;
+    const y0 = cy - sy * 0.5, y1 = cy + sy * 0.5;
+    const z0 = cz - sz * 0.5, z1 = cz + sz * 0.5;
+    const base = vertices.length / 3;
+    vertices.push(
+      x0, y0, z0, x1, y0, z0, x1, y1, z0, x0, y1, z0,
+      x0, y0, z1, x1, y0, z1, x1, y1, z1, x0, y1, z1,
+    );
+    const start = indices.length;
+    indices.push(
+      base + 0, base + 2, base + 1, base + 0, base + 3, base + 2,
+      base + 4, base + 5, base + 6, base + 4, base + 6, base + 7,
+      base + 0, base + 1, base + 5, base + 0, base + 5, base + 4,
+      base + 1, base + 2, base + 6, base + 1, base + 6, base + 5,
+      base + 2, base + 3, base + 7, base + 2, base + 7, base + 6,
+      base + 3, base + 0, base + 4, base + 3, base + 4, base + 7,
+    );
+    groups.push({ start, count: indices.length - start, materialIndex: Math.max(0, Number(box.materialIndex) || 0) });
+  }
 
-  const cutDepth = Math.max(0.04, Number(wallThickness) || 0.2) + 0.026;
-  const cutGeometry = createOpeningPreviewGeometry(tool, width, height, cutDepth);
-  const cutMaterial = authoringOpeningPreviewMaterial.clone();
-  cutMaterial.color.set(tool === "window" ? 0x7fd6ff : 0xffb15f);
-  const cutMesh = new THREE.Mesh(cutGeometry, cutMaterial);
-  cutMesh.name = `${openingToolLabel(tool)} cut preview`;
-  cutMesh.renderOrder = 35;
-  cutMesh.userData.__modelerOverlay = true;
-  group.add(cutMesh);
-
-  const objectGeometry = createOpeningObjectGeometry(tool, width, height, objectDepth);
-  const objectMaterial = authoringPreviewMaterial.clone();
-  objectMaterial.color.set(tool === "window" ? 0xbbeaff : 0xffd0a0);
-  objectMaterial.opacity = 0.62;
-  const objectMesh = new THREE.Mesh(objectGeometry, objectMaterial);
-  objectMesh.name = `${openingToolLabel(tool)} object preview`;
-  objectMesh.renderOrder = 36;
-  objectMesh.userData.__modelerOverlay = true;
-  group.add(objectMesh);
-
-  const edgeGeometry = new THREE.EdgesGeometry(cutGeometry.clone());
-  const edgeMaterial = authoringOpeningPreviewLineMaterial.clone();
-  edgeMaterial.color.set(tool === "window" ? 0x5bc9ff : 0xff9248);
-  const edges = new THREE.LineSegments(edgeGeometry, edgeMaterial);
-  edges.name = `${openingToolLabel(tool)} outline preview`;
-  edges.renderOrder = 37;
-  edges.userData.__modelerOverlay = true;
-  group.add(edges);
-
-  return group;
-}
-
-function createOpeningPreviewGeometry(tool, width, height, depth) {
-  const geometry = new THREE.BoxGeometry(
-    Math.max(0.02, Number(width) || openingDefaults(tool).width),
-    Math.max(0.02, Number(height) || openingDefaults(tool).height),
-    Math.max(0.02, Number(depth) || 0.06),
-  );
-  geometry.computeBoundingBox();
-  geometry.computeBoundingSphere();
-  return geometry;
-}
-
-function createOpeningObjectGeometry(tool, width, height, objectDepth) {
-  if (tool === "window") return createWindowMonolithGeometry(width, height, objectDepth);
-  return createDoorMonolithGeometry(width, height, objectDepth);
-}
-
-function createOpeningAssetGeometry(asset, width, height, thickness) {
-  if (!asset?.geometry || !asset?.baseSize) return null;
-  const geometry = asset.geometry.clone();
-  const sx = Math.max(0.001, width) / Math.max(0.001, asset.baseSize.x);
-  const sy = Math.max(0.001, height) / Math.max(0.001, asset.baseSize.y);
-  const sz = Math.max(0.001, thickness) / Math.max(0.001, asset.baseSize.z);
-  geometry.scale(sx, sy, sz);
-  geometry.computeVertexNormals();
-  geometry.computeBoundingBox();
-  geometry.computeBoundingSphere();
-  return geometry;
-}
-
-function createDoorMonolithGeometry(width, height, thickness) {
-  const assetGeometry = createOpeningAssetGeometry(state.assets?.openings?.door, width, height, thickness);
-  if (assetGeometry) return assetGeometry;
-
-  // Fallback if the custom GLB asset has not loaded yet.
-  // A semantic door should be one selectable/exportable mesh. Keep the geometry
-  // deliberately simple and monolithic so the GLB -> IFC classifier sees one
-  // Door_* object instead of a decorative assembly of leaf/frame/handle parts.
-  const panelWidth = Math.max(0.08, width * 0.92);
-  const panelHeight = Math.max(0.08, height * 0.96);
-  const panelDepth = Math.max(0.018, Math.min(thickness * 0.18, 0.08));
-  const geometry = new THREE.BoxGeometry(panelWidth, panelHeight, panelDepth);
-  geometry.computeBoundingBox();
-  geometry.computeBoundingSphere();
-  return geometry;
-}
-
-function createWindowMonolithGeometry(width, height, thickness) {
-  const assetGeometry = createOpeningAssetGeometry(state.assets?.openings?.window, width, height, thickness);
-  if (assetGeometry) return assetGeometry;
-
-  // Fallback if the custom GLB asset has not loaded yet. One continuous
-  // extruded ring, not a multi-part object: still one semantic IfcWindow mesh.
-  const frame = THREE.MathUtils.clamp(Math.min(width, height) * 0.11, 0.045, 0.14);
-  const outerW = Math.max(0.08, width * 0.94);
-  const outerH = Math.max(0.08, height * 0.94);
-  const innerW = Math.max(0.02, outerW - frame * 2);
-  const innerH = Math.max(0.02, outerH - frame * 2);
-  const depth = Math.max(0.018, Math.min(thickness * 0.16, 0.07));
-
-  const shape = new THREE.Shape();
-  shape.moveTo(-outerW * 0.5, -outerH * 0.5);
-  shape.lineTo( outerW * 0.5, -outerH * 0.5);
-  shape.lineTo( outerW * 0.5,  outerH * 0.5);
-  shape.lineTo(-outerW * 0.5,  outerH * 0.5);
-  shape.lineTo(-outerW * 0.5, -outerH * 0.5);
-
-  const hole = new THREE.Path();
-  hole.moveTo(-innerW * 0.5, -innerH * 0.5);
-  hole.lineTo(-innerW * 0.5,  innerH * 0.5);
-  hole.lineTo( innerW * 0.5,  innerH * 0.5);
-  hole.lineTo( innerW * 0.5, -innerH * 0.5);
-  hole.lineTo(-innerW * 0.5, -innerH * 0.5);
-  shape.holes.push(hole);
-
-  const geometry = new THREE.ExtrudeGeometry(shape, {
-    depth,
-    bevelEnabled: false,
-    steps: 1,
-  });
-  geometry.translate(0, 0, -depth * 0.5);
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
+  geometry.setIndex(indices);
+  for (const group of groups) geometry.addGroup(group.start, group.count, group.materialIndex);
   geometry.computeVertexNormals();
   geometry.computeBoundingBox();
   geometry.computeBoundingSphere();
@@ -2405,46 +1873,6 @@ function openingDefaults(tool) {
 
 function openingToolLabel(tool) {
   return tool === "window" ? "Window" : "Door";
-}
-
-function openingFloorElevationForWall(wallOrData, point = null, opening = null) {
-  const data = wallOrData?.userData?.wallPath || wallOrData;
-  const fallback = Number(data?.baseElevation ?? wallOrData?.userData?.storeyElevation ?? getActiveStoreyElevation());
-  const stored = Number(opening?.floorElevation);
-  if (Number.isFinite(stored)) return stored;
-  return slabTopElevationAtPoint(point, wallOrData?.userData?.storeyId || data?.storeyId, fallback);
-}
-
-function slabTopElevationAtPoint(point, storeyId = null, fallbackElevation = 0) {
-  if (!point || !state.modelRoot) return fallbackElevation;
-  let best = null;
-  const tolerance = Math.max(0.05, (Number(state.authoring.wallThickness) || 0.2) * 1.35);
-
-  state.modelRoot.traverse((mesh) => {
-    if (!mesh?.isMesh || mesh.userData?.authoringType !== "slab") return;
-    if (storeyId && mesh.userData?.storeyId && mesh.userData.storeyId !== storeyId) return;
-    const boundary = mesh.userData?.slabBoundary;
-    if (!slabBoundaryContainsPoint(boundary, point, tolerance)) return;
-    const slabBase = Number(boundary?.elevation ?? mesh.userData?.storeyElevation ?? fallbackElevation);
-    const slabThickness = Math.max(0, Number(mesh.userData?.dimensions?.thickness) || Number(state.authoring.slabThickness) || 0.12);
-    const top = slabBase + slabThickness;
-    best = best == null ? top : Math.max(best, top);
-  });
-
-  return best == null ? fallbackElevation : best;
-}
-
-function slabBoundaryContainsPoint(boundary, point, tolerance = 0.02) {
-  if (!boundary || !point) return false;
-  const minX = Math.min(Number(boundary.minX), Number(boundary.maxX));
-  const maxX = Math.max(Number(boundary.minX), Number(boundary.maxX));
-  const minZ = Math.min(Number(boundary.minZ), Number(boundary.maxZ));
-  const maxZ = Math.max(Number(boundary.minZ), Number(boundary.maxZ));
-  if (![minX, maxX, minZ, maxZ].every(Number.isFinite)) return false;
-  return point.x >= minX - tolerance
-    && point.x <= maxX + tolerance
-    && point.z >= minZ - tolerance
-    && point.z <= maxZ + tolerance;
 }
 
 function cloneOpening(opening) {
@@ -2504,18 +1932,9 @@ function commitAuthoringPrimitive() {
     return;
   }
 
-  const isWallLikeTool = createdTool === "wall" || createdTool === "partition";
-  const previousWall = isWallLikeTool ? state.authoring.wallChainLastMesh : null;
+  const previousWall = createdTool === "wall" ? state.authoring.wallChainLastMesh : null;
   const prevPoint = previousWall?.userData?.wallPath?.start || null;
-  const mesh = isWallLikeTool
-    ? createWallMesh(start, end, {
-        prevPoint,
-        alignment: createdTool === "partition" ? "center" : state.authoring.wallAlignment,
-        kind: createdTool === "partition" ? "partition" : "wall",
-      })
-    : createdTool === "stair"
-      ? createStairMesh(start, end)
-      : createSlabMesh(start, end);
+  const mesh = createdTool === "wall" ? createWallMesh(start, end, { prevPoint, alignment: state.authoring.wallAlignment }) : createSlabMesh(start, end);
   if (!mesh) {
     setStatus("Géométrie trop petite pour être créée.", "warning");
     return;
@@ -2529,51 +1948,45 @@ function commitAuthoringPrimitive() {
   const indexed = state.meshes.find((candidate) => candidate.uuid === mesh.uuid) || mesh;
   pushHistory({
     type: "createMesh",
-    label: `Create ${authoringToolLabel(createdTool)}`,
+    label: `Create ${createdTool === "wall" ? "wall" : "slab"}`,
     mesh: indexed,
     parent: root,
     meshId: indexed.userData.__modelerId,
   });
-  if (isWallLikeTool && previousWall?.userData?.wallPath) {
+  if (createdTool === "wall" && previousWall?.userData?.wallPath) {
     previousWall.userData.wallPath.next = end.clone();
     refreshWallMeshGeometry(previousWall);
   }
-  if (isWallLikeTool) refreshAuthoredWallMiters();
+  if (createdTool === "wall") refreshAuthoredWallMiters();
 
   selectMesh(indexed);
   markDirty();
 
-  if (isWallLikeTool) {
+  if (createdTool === "wall") {
     state.authoring.wallChainLastMesh = indexed;
     state.authoring.drawStart = end.clone();
     state.authoring.drawCurrent = end.clone();
     removeAuthoringPreview();
     updateToolbarState();
-    const detail = createdTool === "partition" ? "cloison intérieure" : wallAlignmentLabel();
-    setStatus(`${authoringToolLabel(createdTool)} créé · ${escapeHtml(indexed.name)} · ${detail} · Shift guide 0°/45°/90° · clique le point suivant ou Stop/Échap.`, "ok");
+    setStatus(`Wall créé · ${escapeHtml(indexed.name)} · ${wallAlignmentLabel()} · clique le point suivant pour continuer, ou Stop/Échap pour terminer.`, "ok");
     return;
   }
 
   state.authoring.drawStart = null;
   state.authoring.drawCurrent = null;
   setAuthoringTool("select", { silent: true });
-  setStatus(`${authoringToolLabel(createdTool)} créé · ${escapeHtml(indexed.name)} · outil Select actif.`, "ok");
+  setStatus(`Slab créé · ${escapeHtml(indexed.name)} · dalle rentrée sous l’épaisseur des murs pour éviter les chants visibles en façade · outil Select actif.`, "ok");
 }
 
 function createWallMesh(start, end, options = {}) {
   const length = Math.hypot(end.x - start.x, end.z - start.z);
   if (length < 1e-5) return null;
 
-  const kind = options.kind || "wall";
-  const height = kind === "partition"
-    ? Math.max(0.05, Number(options.height ?? state.authoring.partitionHeight) || 3)
-    : Math.max(0.05, Number(options.height ?? state.authoring.wallHeight) || 3);
-  const thickness = kind === "partition"
-    ? Math.max(0.01, Number(options.thickness ?? state.authoring.partitionThickness) || 0.075)
-    : Math.max(0.01, Number(options.thickness ?? state.authoring.wallThickness) || 0.2);
+  const height = Math.max(0.05, Number(state.authoring.wallHeight) || 3);
+  const thickness = Math.max(0.01, Number(state.authoring.wallThickness) || 0.2);
   const baseElevation = getActiveStoreyElevation();
   const storey = getActiveStorey();
-  const material = options.preview ? authoringPreviewMaterial.clone() : (kind === "partition" ? authoringPartitionMaterial.clone() : authoringWallMaterial.clone());
+  const material = options.preview ? authoringPreviewMaterial.clone() : authoringWallMaterial.clone();
   const wallData = {
     start: start.clone(),
     end: end.clone(),
@@ -2581,11 +1994,8 @@ function createWallMesh(start, end, options = {}) {
     next: options.nextPoint?.clone?.() || null,
     height,
     thickness,
-    alignment: kind === "partition" ? "center" : (options.alignment || state.authoring.wallAlignment || "center"),
-    kind,
+    alignment: options.alignment || state.authoring.wallAlignment || "center",
     baseElevation,
-    storeyId: storey.id,
-    storeyName: storey.name,
     openings: Array.isArray(options.openings) ? options.openings.map(cloneOpening).filter(Boolean) : [],
   };
   const origin = wallGeometryOrigin(wallData);
@@ -2594,17 +2004,15 @@ function createWallMesh(start, end, options = {}) {
 
   const mesh = new THREE.Mesh(geometry, material);
   mesh.position.set(origin.x, baseElevation, origin.z);
-  mesh.name = options.preview ? (kind === "partition" ? "Cloison preview" : "Wall preview") : kind === "partition" ? `Cloison_${String(++state.authoring.partitionCount).padStart(3, "0")}` : `Wall_${String(++state.authoring.wallCount).padStart(3, "0")}`;
+  mesh.name = options.preview ? "Wall preview" : `Wall_${String(++state.authoring.wallCount).padStart(3, "0")}`;
   mesh.castShadow = false;
   mesh.receiveShadow = false;
   mesh.userData.authoringType = "wall";
   mesh.userData.ifcHint = "IfcWall";
-  mesh.userData.smeltIfcType = "IfcWall";
-  mesh.userData.smeltPredefinedType = kind === "partition" ? ".PARTITIONING." : ".STANDARD.";
   mesh.userData.storeyId = storey.id;
   mesh.userData.storeyName = storey.name;
   mesh.userData.storeyElevation = baseElevation;
-  mesh.userData.dimensions = { length, height, thickness, alignment: wallData.alignment, kind };
+  mesh.userData.dimensions = { length, height, thickness, alignment: wallData.alignment };
   mesh.userData.wallPath = wallData;
   return mesh;
 }
@@ -2623,7 +2031,6 @@ function refreshWallMeshGeometry(mesh) {
     height: data.height,
     thickness: data.thickness,
     alignment: data.alignment || "center",
-    kind: data.kind || "wall",
   };
   mesh.updateMatrixWorld(true);
 }
@@ -2686,11 +2093,7 @@ function normalizedWallOpenings(wall, length, wallHeight) {
       const center = THREE.MathUtils.clamp(Number(opening.offset) || 0, margin + half, Math.max(margin + half, length - margin - half));
       const start = THREE.MathUtils.clamp(center - half, margin, length - margin);
       const end = THREE.MathUtils.clamp(center + half, margin, length - margin);
-      const base = Number(wall.baseElevation ?? getActiveStoreyElevation());
-      const point = pointAlongWallData(wall, center, true);
-      const floorElevation = openingFloorElevationForWall(wall, point, opening);
-      const rawSill = Math.max(0, Number(opening.sill) || 0);
-      const sill = THREE.MathUtils.clamp(Math.max(0, floorElevation - base) + rawSill, 0, wallHeight - 0.02);
+      const sill = THREE.MathUtils.clamp(Number(opening.sill) || 0, 0, wallHeight - 0.02);
       const height = Math.max(0.05, Number(opening.height) || 2.1);
       const top = THREE.MathUtils.clamp(sill + height, sill + 0.02, wallHeight);
       if (end - start < 0.05 || top - sill < 0.05) return null;
@@ -2835,7 +2238,7 @@ function createWallsFromSelectedSlabBoundary() {
     const start = points[i];
     const end = points[(i + 1) % points.length];
     const next = points[(i + 2) % points.length];
-    const mesh = createWallMesh(start, end, { prevPoint: prev, nextPoint: next, alignment: "left", kind: "wall" });
+    const mesh = createWallMesh(start, end, { prevPoint: prev, nextPoint: next, alignment: "left" });
     if (!mesh) continue;
     mesh.userData.wallPath.prev = prev.clone();
     mesh.userData.wallPath.next = next.clone();
@@ -2863,261 +2266,6 @@ function createWallsFromSelectedSlabBoundary() {
   renderProperties();
   updateUiEnabled();
   setStatus(`${indexed.length} murs créés sur le contour de ${escapeHtml(slab.name)} · alignement face intérieure.`, "ok");
-}
-
-
-function updateRoofSetting(key, value) {
-  if (key === "roofType") {
-    const allowed = ["flat", "shed", "gable"];
-    state.authoring.roofType = allowed.includes(value) ? value : "gable";
-  } else if (key === "roofRidgeDirection") {
-    state.authoring.roofRidgeDirection = value === "z" ? "z" : "x";
-  } else {
-    const numeric = Number(value);
-    const min = key === "roofPitch" || key === "roofOverhang" ? 0 : 0.01;
-    if (!Number.isFinite(numeric) || numeric < min) return;
-    if (key === "roofPitch") state.authoring.roofPitch = THREE.MathUtils.clamp(numeric, 0, 80);
-    else state.authoring[key] = key === "stairSteps" ? Math.max(1, Math.round(numeric)) : numeric;
-  }
-  updateRoofPreviewFromSelection();
-  markDirty();
-  renderProperties();
-  updateToolbarState();
-}
-
-function selectedRoofBaseSlab() {
-  return state.selected?.userData?.authoringType === "slab" ? state.selected : null;
-}
-
-function updateRoofPreviewFromSelection() {
-  if (state.authoring.tool !== "roof") return;
-  removeAuthoringPreview();
-  const slab = selectedRoofBaseSlab();
-  if (!slab) return;
-  const mesh = createRoofMeshFromSlab(slab, { preview: true });
-  if (!mesh) return;
-  mesh.userData.__modelerOverlay = true;
-  mesh.name = "Roof preview";
-  mesh.renderOrder = 25;
-  state.authoring.preview = mesh;
-  state.scene.add(mesh);
-}
-
-function createRoofFromSelectedSlab() {
-  const slab = selectedRoofBaseSlab();
-  if (!slab) {
-    setStatus("Sélectionne une slab, puis clique Roof from slab pour générer une toiture.", "warning");
-    return;
-  }
-
-  ensureAuthoringRoot();
-  cancelAuthoringDraw();
-  if (slab.userData?.storeyId && slab.userData.storeyId !== state.authoring.activeStoreyId) {
-    setActiveStorey(slab.userData.storeyId, { silent: true });
-  }
-
-  const mesh = createRoofMeshFromSlab(slab);
-  if (!mesh) {
-    setStatus("Impossible de créer la toiture : contour de slab invalide.", "warning");
-    return;
-  }
-
-  removeAuthoringPreview();
-  const root = ensureAuthoringRoot();
-  root.add(mesh);
-  mesh.updateMatrixWorld(true);
-  indexMeshes(root);
-  const indexed = state.meshes.find((candidate) => candidate.uuid === mesh.uuid) || mesh;
-  pushHistory({
-    type: "createMesh",
-    label: `Create ${roofTypeLabel(state.authoring.roofType)} roof`,
-    mesh: indexed,
-    parent: root,
-    meshId: indexed.userData.__modelerId,
-  });
-  selectMesh(indexed);
-  markDirty();
-  renderTree();
-  renderProperties();
-  updateUiEnabled();
-  setStatus(`${roofTypeLabel(indexed.userData?.roofData?.type)} créé depuis ${escapeHtml(slab.name || "Slab")} · mesh classifiable IfcRoof.`, "ok");
-}
-
-function roofTypeLabel(type = state.authoring.roofType) {
-  if (type === "flat") return "Flat";
-  if (type === "shed") return "Shed";
-  return "Gable";
-}
-
-function createRoofMeshFromSlab(slab, options = {}) {
-  const points = slabBoundaryPoints(slab);
-  if (!points?.length) return null;
-  const xs = points.map((p) => p.x);
-  const zs = points.map((p) => p.z);
-  const minX0 = Math.min(...xs);
-  const maxX0 = Math.max(...xs);
-  const minZ0 = Math.min(...zs);
-  const maxZ0 = Math.max(...zs);
-  const overhang = Math.max(0, Number(state.authoring.roofOverhang) || 0);
-  const minX = minX0 - overhang;
-  const maxX = maxX0 + overhang;
-  const minZ = minZ0 - overhang;
-  const maxZ = maxZ0 + overhang;
-  const width = maxX - minX;
-  const depth = maxZ - minZ;
-  if (width < 0.05 || depth < 0.05) return null;
-
-  const storey = getActiveStorey();
-  const type = ["flat", "shed", "gable"].includes(state.authoring.roofType) ? state.authoring.roofType : "gable";
-  const pitch = THREE.MathUtils.clamp(Number(state.authoring.roofPitch) || 0, 0, 80);
-  const thickness = Math.max(0.03, Number(state.authoring.roofThickness) || 0.18);
-  const eavesHeight = Math.max(0.05, Number(state.authoring.roofEavesHeight) || Number(storey?.height) || 3);
-  const baseElevation = Number(slab.userData?.storeyElevation ?? getActiveStoreyElevation());
-  const eavesY = baseElevation + eavesHeight;
-  const ridgeDirection = state.authoring.roofRidgeDirection === "z" ? "z" : "x";
-  const pitchRad = THREE.MathUtils.degToRad(pitch);
-
-  const geometry = createRoofGeometry({ type, minX, maxX, minZ, maxZ, eavesY, thickness, pitchRad, ridgeDirection });
-  if (!geometry) return null;
-  geometry.computeBoundingBox();
-  const localCenter = new THREE.Vector3();
-  geometry.boundingBox?.getCenter(localCenter);
-  geometry.translate(-localCenter.x, -localCenter.y, -localCenter.z);
-  geometry.computeBoundingBox();
-  geometry.computeBoundingSphere();
-  const material = options.preview ? authoringPreviewMaterial.clone() : authoringRoofMaterial.clone();
-  if (options.preview) material.opacity = 0.36;
-  const mesh = new THREE.Mesh(geometry, material);
-  mesh.position.copy(localCenter);
-  mesh.name = options.preview ? "Roof preview" : `Roof_${roofTypeLabel(type)}_${String(++state.authoring.roofCount).padStart(3, "0")}`;
-  mesh.castShadow = false;
-  mesh.receiveShadow = false;
-  mesh.userData.authoringType = "roof";
-  mesh.userData.ifcHint = "IfcRoof";
-  mesh.userData.storeyId = slab.userData?.storeyId || storey.id;
-  mesh.userData.storeyName = slab.userData?.storeyName || storey.name;
-  mesh.userData.storeyElevation = baseElevation;
-  mesh.userData.dimensions = { width, depth, thickness, overhang, pitch, eavesHeight, ridgeDirection, type };
-  mesh.userData.roofData = {
-    type,
-    minX,
-    maxX,
-    minZ,
-    maxZ,
-    eavesY,
-    thickness,
-    pitch,
-    overhang,
-    eavesHeight,
-    ridgeDirection,
-    storeyId: mesh.userData.storeyId,
-    storeyName: mesh.userData.storeyName,
-    storeyElevation: baseElevation,
-    sourceSlabId: slab.userData?.__modelerId || null,
-  };
-  if (state.xray.active && !options.preview) applyXrayToMesh(mesh);
-  return mesh;
-}
-
-function createRoofGeometry(data) {
-  if (data.type === "flat") return createFlatRoofGeometry(data);
-  if (data.type === "shed") return createShedRoofGeometry(data);
-  return createGableRoofGeometry(data);
-}
-
-function createFlatRoofGeometry({ minX, maxX, minZ, maxZ, eavesY, thickness }) {
-  const geometry = new THREE.BoxGeometry(maxX - minX, thickness, maxZ - minZ);
-  geometry.translate((minX + maxX) * 0.5, eavesY + thickness * 0.5, (minZ + maxZ) * 0.5);
-  geometry.computeBoundingBox();
-  geometry.computeBoundingSphere();
-  return geometry;
-}
-
-function createShedRoofGeometry({ minX, maxX, minZ, maxZ, eavesY, thickness, pitchRad, ridgeDirection }) {
-  const vertices = [];
-  const indices = [];
-  const run = ridgeDirection === "z" ? (maxZ - minZ) : (maxX - minX);
-  const rise = Math.tan(pitchRad) * Math.max(0, run);
-  const topY = (x, z) => eavesY + (ridgeDirection === "z" ? ((z - minZ) / Math.max(1e-6, maxZ - minZ)) : ((x - minX) / Math.max(1e-6, maxX - minX))) * rise;
-  const pts = [
-    new THREE.Vector3(minX, 0, minZ),
-    new THREE.Vector3(maxX, 0, minZ),
-    new THREE.Vector3(maxX, 0, maxZ),
-    new THREE.Vector3(minX, 0, maxZ),
-  ];
-  for (const p of pts) vertices.push(p.x, topY(p.x, p.z) - thickness, p.z);
-  for (const p of pts) vertices.push(p.x, topY(p.x, p.z), p.z);
-  addQuad(indices, 0, 3, 2, 1); // underside
-  addQuad(indices, 4, 5, 6, 7); // top
-  addQuad(indices, 0, 1, 5, 4);
-  addQuad(indices, 1, 2, 6, 5);
-  addQuad(indices, 2, 3, 7, 6);
-  addQuad(indices, 3, 0, 4, 7);
-  return roofBufferGeometry(vertices, indices);
-}
-
-function createGableRoofGeometry({ minX, maxX, minZ, maxZ, eavesY, thickness, pitchRad, ridgeDirection }) {
-  const vertices = [];
-  const indices = [];
-  const alongX = ridgeDirection === "x";
-  const run = alongX ? (maxZ - minZ) * 0.5 : (maxX - minX) * 0.5;
-  const rise = Math.tan(pitchRad) * Math.max(0, run);
-  const ridgeY = eavesY + rise;
-  if (alongX) {
-    const midZ = (minZ + maxZ) * 0.5;
-    const pts = [
-      [minX, eavesY - thickness, minZ], [minX, ridgeY - thickness, midZ], [minX, eavesY - thickness, maxZ],
-      [minX, eavesY, minZ], [minX, ridgeY, midZ], [minX, eavesY, maxZ],
-      [maxX, eavesY - thickness, minZ], [maxX, ridgeY - thickness, midZ], [maxX, eavesY - thickness, maxZ],
-      [maxX, eavesY, minZ], [maxX, ridgeY, midZ], [maxX, eavesY, maxZ],
-    ];
-    for (const p of pts) vertices.push(...p);
-    addQuad(indices, 3, 9, 10, 4);   // top slope A
-    addQuad(indices, 4, 10, 11, 5);  // top slope B
-    addQuad(indices, 0, 1, 7, 6);    // underside A
-    addQuad(indices, 1, 2, 8, 7);    // underside B
-    addQuad(indices, 0, 6, 9, 3);    // eave side
-    addQuad(indices, 2, 5, 11, 8);   // eave side
-    addRoofCap(indices, [0, 1, 2, 5, 4, 3]);
-    addRoofCap(indices, [6, 9, 10, 7, 8, 11]);
-  } else {
-    const midX = (minX + maxX) * 0.5;
-    const pts = [
-      [minX, eavesY - thickness, minZ], [midX, ridgeY - thickness, minZ], [maxX, eavesY - thickness, minZ],
-      [minX, eavesY, minZ], [midX, ridgeY, minZ], [maxX, eavesY, minZ],
-      [minX, eavesY - thickness, maxZ], [midX, ridgeY - thickness, maxZ], [maxX, eavesY - thickness, maxZ],
-      [minX, eavesY, maxZ], [midX, ridgeY, maxZ], [maxX, eavesY, maxZ],
-    ];
-    for (const p of pts) vertices.push(...p);
-    addQuad(indices, 3, 4, 10, 9);   // top slope A
-    addQuad(indices, 4, 5, 11, 10);  // top slope B
-    addQuad(indices, 0, 6, 7, 1);    // underside A
-    addQuad(indices, 1, 7, 8, 2);    // underside B
-    addQuad(indices, 0, 3, 9, 6);    // eave side
-    addQuad(indices, 2, 8, 11, 5);   // eave side
-    addRoofCap(indices, [0, 1, 2, 5, 4, 3]);
-    addRoofCap(indices, [6, 9, 10, 7, 8, 11]);
-  }
-  return roofBufferGeometry(vertices, indices);
-}
-
-function addQuad(indices, a, b, c, d) {
-  indices.push(a, b, c, a, c, d);
-}
-
-function addRoofCap(indices, polygon) {
-  for (let i = 1; i < polygon.length - 1; i++) indices.push(polygon[0], polygon[i], polygon[i + 1]);
-}
-
-function roofBufferGeometry(vertices, indices) {
-  if (!vertices.length || !indices.length) return null;
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
-  geometry.setIndex(indices);
-  geometry.computeVertexNormals();
-  geometry.computeBoundingBox();
-  geometry.computeBoundingSphere();
-  return geometry;
 }
 
 function slabBoundaryPoints(slab) {
@@ -3152,384 +2300,26 @@ function slabVisualInset(width, depth) {
   return Math.max(0, Math.min(t, width * 0.45, depth * 0.45));
 }
 
-function createStairMesh(startOrPoints, endOrOptions = {}, maybeOptions = {}) {
-  const points = Array.isArray(startOrPoints)
-    ? startOrPoints.map((point) => point?.clone?.() || new THREE.Vector3(point?.x || 0, point?.y || 0, point?.z || 0))
-    : [startOrPoints, endOrOptions].map((point) => point?.clone?.() || new THREE.Vector3(point?.x || 0, point?.y || 0, point?.z || 0));
-  const options = Array.isArray(startOrPoints) ? (endOrOptions || {}) : maybeOptions;
-  const cleaned = sanitizeStairPath(points);
-  if (cleaned.length < 2) return null;
-
-  const baseElevation = getActiveStoreyElevation();
-  const width = Math.max(0.2, Number(options.width ?? state.authoring.stairWidth) || 0.9);
-  let requestedSteps = Math.max(1, Math.round(Number(options.steps ?? state.authoring.stairSteps) || 12));
-  const rise = Math.max(0.05, Number(options.rise ?? state.authoring.stairRise) || 0.17);
-  const landingLength = Math.max(width, Number(options.landing ?? state.authoring.stairLanding) || width);
-  const turnMode = options.turnMode || state.authoring.stairTurnMode || "landing";
-  const winderSteps = Math.max(2, Math.round(Number(options.winderSteps ?? state.authoring.stairWinderSteps) || 3));
-
-  const segments = [];
-  let totalRun = 0;
-  for (let i = 0; i < cleaned.length - 1; i++) {
-    const start = cleaned[i];
-    const end = cleaned[i + 1];
-    const length = Math.hypot(end.x - start.x, end.z - start.z);
-    if (length < 1e-5) continue;
-    const dir = new THREE.Vector3((end.x - start.x) / length, 0, (end.z - start.z) / length);
-    const normal = new THREE.Vector3(-dir.z, 0, dir.x);
-    totalRun += length;
-    segments.push({ start, end, length, dir, normal });
-  }
-  if (!segments.length) return null;
-
-  const turnCount = Math.max(0, segments.length - 1);
-  const winderStepTotal = turnMode === "winder" ? turnCount * winderSteps : 0;
-  const flightStepBudget = Math.max(segments.length, requestedSteps - winderStepTotal);
-  const stepDistribution = distributeStairSteps(flightStepBudget, segments.map((segment) => segment.length));
-  const actualSteps = stepDistribution.reduce((sum, value) => sum + value, 0) + winderStepTotal;
-
-  const geometries = [];
-  let accumulatedRise = 0;
-  for (let i = 0; i < segments.length; i++) {
-    const segment = segments[i];
-    const prev = i > 0 ? segments[i - 1] : null;
-    const next = i < segments.length - 1 ? segments[i + 1] : null;
-    const trimStart = prev ? Math.min(landingLength * 0.5, segment.length * 0.35) : 0;
-    const trimEnd = next ? Math.min(landingLength * 0.5, segment.length * 0.35) : 0;
-    const segmentSteps = Math.max(1, stepDistribution[i]);
-    const flight = createClosedStairFlightGeometry(segment.start, segment.end, width, segmentSteps, rise, baseElevation + accumulatedRise, trimStart, trimEnd);
-    if (flight) geometries.push(flight);
-    accumulatedRise += segmentSteps * rise;
-
-    if (next) {
-      if (turnMode === "winder") {
-        const winder = createWinderTurnGeometry(segment, next, width, landingLength, winderSteps, rise, baseElevation + accumulatedRise);
-        if (winder) geometries.push(winder);
-        accumulatedRise += winderSteps * rise;
-      } else {
-        const landing = createQuarterTurnLandingGeometry(segment, next, width, landingLength, baseElevation + accumulatedRise - rise, rise);
-        if (landing) geometries.push(landing);
-      }
-    }
-  }
-
-  if (!geometries.length) return null;
-  const geometry = mergeWorldGeometries(geometries);
-  if (!geometry) return null;
-  geometry.computeBoundingBox();
-  const localCenter = new THREE.Vector3();
-  geometry.boundingBox?.getCenter(localCenter);
-  geometry.translate(-localCenter.x, -localCenter.y, -localCenter.z);
-  geometry.computeBoundingBox();
-  geometry.computeBoundingSphere();
-
-  const material = options.preview ? authoringPreviewMaterial.clone() : authoringStairMaterial.clone();
-  const mesh = new THREE.Mesh(geometry, material);
-  mesh.position.copy(localCenter);
-  mesh.castShadow = false;
-  mesh.receiveShadow = false;
-  mesh.name = options.preview ? "Escalier preview" : `Stair_${String(++state.authoring.stairCount).padStart(3, "0")}`;
-  const storey = getActiveStorey();
-  mesh.userData.authoringType = "stair";
-  mesh.userData.ifcHint = "IfcStair";
-  mesh.userData.smeltIfcType = "IfcStair";
-  mesh.userData.storeyId = storey.id;
-  mesh.userData.storeyName = storey.name;
-  mesh.userData.storeyElevation = baseElevation;
-  mesh.userData.dimensions = { width, steps: actualSteps, rise, run: totalRun, height: actualSteps * rise, landings: turnMode === "landing" ? turnCount : 0, winderTurns: turnMode === "winder" ? turnCount : 0, landingLength, turnMode, winderSteps };
-  mesh.userData.stairData = {
-    points: cleaned.map((point) => point.clone()),
-    start: cleaned[0].clone(),
-    end: cleaned[cleaned.length - 1].clone(),
-    width,
-    steps: actualSteps,
-    requestedSteps,
-    rise,
-    landing: landingLength,
-    turnMode,
-    winderSteps,
-    run: totalRun,
-    baseElevation,
-    storeyId: storey.id,
-    storeyName: storey.name,
-  };
-  return mesh;
-}
-
-function sanitizeStairPath(points) {
-  const minRun = Math.max(0.25, Number(state.authoring.gridStep || 0.1) * 2);
-  const cleaned = [];
-  for (const point of points || []) {
-    if (!point) continue;
-    const candidate = point.clone ? point.clone() : new THREE.Vector3(point.x || 0, point.y || 0, point.z || 0);
-    candidate.y = getActiveStoreyElevation();
-    const prev = cleaned[cleaned.length - 1];
-    if (!prev || Math.hypot(candidate.x - prev.x, candidate.z - prev.z) >= minRun) cleaned.push(candidate);
-  }
-  return cleaned;
-}
-
-function buildPreviewStairPoints() {
-  const points = (state.authoring.stairPath || []).map((point) => point.clone());
-  if (!state.authoring.drawCurrent) return points;
-  if (!points.length || points[points.length - 1].distanceToSquared(state.authoring.drawCurrent) > 1e-8) {
-    points.push(state.authoring.drawCurrent.clone());
-  }
-  return sanitizeStairPath(points);
-}
-
-function distributeStairSteps(totalSteps, lengths) {
-  if (!lengths.length) return [];
-  const total = lengths.reduce((sum, value) => sum + Math.max(0, value), 0) || lengths.length;
-  const allocation = lengths.map((length) => Math.max(1, Math.round((Math.max(0, length) / total) * totalSteps)));
-  let diff = totalSteps - allocation.reduce((sum, value) => sum + value, 0);
-  let guard = 0;
-  while (diff !== 0 && guard < 1000) {
-    guard += 1;
-    if (diff > 0) {
-      let bestIndex = 0;
-      let bestScore = -Infinity;
-      for (let i = 0; i < lengths.length; i++) {
-        const score = lengths[i] / allocation[i];
-        if (score > bestScore) { bestScore = score; bestIndex = i; }
-      }
-      allocation[bestIndex] += 1;
-      diff -= 1;
-    } else {
-      let bestIndex = -1;
-      let bestScore = -Infinity;
-      for (let i = 0; i < lengths.length; i++) {
-        if (allocation[i] <= 1) continue;
-        const score = allocation[i] / Math.max(1e-6, lengths[i]);
-        if (score > bestScore) { bestScore = score; bestIndex = i; }
-      }
-      if (bestIndex === -1) break;
-      allocation[bestIndex] -= 1;
-      diff += 1;
-    }
-  }
-  return allocation;
-}
-
-function createClosedStairFlightGeometry(start, end, width, steps, rise, baseElevation, trimStart = 0, trimEnd = 0) {
-  const totalRun = Math.hypot(end.x - start.x, end.z - start.z);
-  if (totalRun < 1e-5 || steps < 1) return null;
-  const usableRun = totalRun - trimStart - trimEnd;
-  if (usableRun < 0.1) return null;
-
-  const dir = new THREE.Vector3((end.x - start.x) / totalRun, 0, (end.z - start.z) / totalRun);
-  const normal = new THREE.Vector3(-dir.z, 0, dir.x);
-  const startPoint = new THREE.Vector3(start.x + dir.x * trimStart, baseElevation, start.z + dir.z * trimStart);
-  const stepDepth = usableRun / steps;
-
-  const profile = [new THREE.Vector2(0, 0), new THREE.Vector2(0, rise)];
-  for (let i = 0; i < steps; i++) {
-    const x1 = (i + 1) * stepDepth;
-    const y = (i + 1) * rise;
-    profile.push(new THREE.Vector2(x1, y));
-    if (i < steps - 1) profile.push(new THREE.Vector2(x1, y + rise));
-  }
-  profile.push(new THREE.Vector2(usableRun, 0));
-
-  const shape = new THREE.Shape(profile);
-  const geometry = new THREE.ExtrudeGeometry(shape, { depth: width, bevelEnabled: false, steps: 1 });
-  geometry.translate(0, 0, -width * 0.5);
-  const basis = new THREE.Matrix4().makeBasis(dir, new THREE.Vector3(0, 1, 0), normal);
-  const transform = new THREE.Matrix4().copy(basis).setPosition(startPoint);
-  geometry.applyMatrix4(transform);
-  geometry.computeVertexNormals();
-  geometry.computeBoundingBox();
-  geometry.computeBoundingSphere();
-  return geometry;
-}
-
-function createQuarterTurnLandingGeometry(prevSegment, nextSegment, width, landingLength, elevationBase, thickness) {
-  const corner = prevSegment.end;
-  const back = corner.clone().addScaledVector(prevSegment.dir, -landingLength);
-  const forward = corner.clone().addScaledVector(nextSegment.dir, landingLength);
-  const rectA = orientedRectXZ(back, corner, width);
-  const rectB = orientedRectXZ(corner, forward, width);
-  const pad = Math.max(width, landingLength * 0.55);
-  const centerPadA = corner.clone().addScaledVector(prevSegment.dir, -pad * 0.25);
-  const centerPadB = corner.clone().addScaledVector(nextSegment.dir, pad * 0.25);
-  const rectC = orientedRectXZ(centerPadA, centerPadB, Math.max(width, landingLength));
-  const hull = convexHullXZ([...rectA, ...rectB, ...rectC]);
-  return createHorizontalPrismGeometry(hull, elevationBase, elevationBase + Math.max(0.05, thickness));
-}
-
-function createWinderTurnGeometry(prevSegment, nextSegment, width, landingLength, steps, rise, baseElevation) {
-  const corner = prevSegment.end;
-  const angle0 = Math.atan2(prevSegment.dir.z, prevSegment.dir.x);
-  const angle1 = unwrapAngleNear(Math.atan2(nextSegment.dir.z, nextSegment.dir.x), angle0);
-  const outer = Math.max(width * 1.25, landingLength * 0.8);
-  const inner = Math.max(0.08, width * 0.16);
-  const geometries = [];
-  for (let i = 0; i < steps; i++) {
-    const a0 = THREE.MathUtils.lerp(angle0, angle1, i / steps);
-    const a1 = THREE.MathUtils.lerp(angle0, angle1, (i + 1) / steps);
-    const p0i = polarXZ(corner, inner, a0);
-    const p1i = polarXZ(corner, inner, a1);
-    const p1o = polarXZ(corner, outer, a1);
-    const p0o = polarXZ(corner, outer, a0);
-    const top = baseElevation + (i + 1) * rise;
-    const geom = createHorizontalPrismGeometry([p0i, p1i, p1o, p0o], baseElevation, top);
-    if (geom) geometries.push(geom);
-  }
-  return mergeWorldGeometries(geometries);
-}
-
-function unwrapAngleNear(angle, reference) {
-  let result = angle;
-  while (result - reference > Math.PI) result -= Math.PI * 2;
-  while (result - reference < -Math.PI) result += Math.PI * 2;
-  return result;
-}
-
-function polarXZ(origin, radius, angle) {
-  return new THREE.Vector3(origin.x + Math.cos(angle) * radius, origin.y, origin.z + Math.sin(angle) * radius);
-}
-
-function orientedRectXZ(a, b, width) {
-  const length = Math.hypot(b.x - a.x, b.z - a.z);
-  if (length < 1e-6) return [a.clone(), b.clone()];
-  const dir = new THREE.Vector3((b.x - a.x) / length, 0, (b.z - a.z) / length);
-  const normal = new THREE.Vector3(-dir.z, 0, dir.x).multiplyScalar(width * 0.5);
-  return [
-    a.clone().add(normal),
-    b.clone().add(normal),
-    b.clone().sub(normal),
-    a.clone().sub(normal),
-  ];
-}
-
-function convexHullXZ(points) {
-  const unique = [];
-  for (const p of points || []) {
-    if (!p) continue;
-    if (!unique.some((q) => Math.hypot(q.x - p.x, q.z - p.z) < 1e-6)) unique.push(p.clone());
-  }
-  if (unique.length <= 3) return unique;
-  unique.sort((a, b) => (a.x === b.x ? a.z - b.z : a.x - b.x));
-  const cross = (o, a, b) => (a.x - o.x) * (b.z - o.z) - (a.z - o.z) * (b.x - o.x);
-  const lower = [];
-  for (const p of unique) {
-    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
-    lower.push(p);
-  }
-  const upper = [];
-  for (let i = unique.length - 1; i >= 0; i--) {
-    const p = unique[i];
-    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
-    upper.push(p);
-  }
-  lower.pop();
-  upper.pop();
-  return lower.concat(upper);
-}
-
-function createHorizontalPrismGeometry(points, y0, y1) {
-  const polygon = (points || []).filter(Boolean);
-  if (polygon.length < 3 || y1 - y0 < 1e-5) return null;
-  const vertices = [];
-  const indices = [];
-  for (const p of polygon) vertices.push(p.x, y0, p.z);
-  for (const p of polygon) vertices.push(p.x, y1, p.z);
-  const n = polygon.length;
-  for (let i = 1; i < n - 1; i++) indices.push(0, i + 1, i);
-  for (let i = 1; i < n - 1; i++) indices.push(n, n + i, n + i + 1);
-  for (let i = 0; i < n; i++) {
-    const j = (i + 1) % n;
-    indices.push(i, j, n + j, i, n + j, n + i);
-  }
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
-  geometry.setIndex(indices);
-  geometry.computeVertexNormals();
-  geometry.computeBoundingBox();
-  geometry.computeBoundingSphere();
-  return geometry;
-}
-
-function mergeWorldGeometries(geometries) {
-  const vertices = [];
-  const indices = [];
-  for (const geometry of geometries || []) {
-    if (!geometry) continue;
-    const position = geometry.getAttribute?.("position");
-    if (!position) continue;
-    const base = vertices.length / 3;
-    for (let i = 0; i < position.count; i++) {
-      vertices.push(position.getX(i), position.getY(i), position.getZ(i));
-    }
-    const index = geometry.getIndex();
-    if (index) {
-      for (let i = 0; i < index.count; i++) indices.push(base + index.getX(i));
-    } else {
-      for (let i = 0; i < position.count; i++) indices.push(base + i);
-    }
-  }
-  if (!vertices.length || !indices.length) return null;
-  const merged = new THREE.BufferGeometry();
-  merged.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
-  merged.setIndex(indices);
-  merged.computeVertexNormals();
-  merged.computeBoundingBox();
-  merged.computeBoundingSphere();
-  return merged;
-}
-
-function appendOrientedBox(vertices, indices, originPoint, dir, normal, d0, d1, w0, w1, y0, y1, localOrigin) {
-  const corners = [
-    worldPointAlong(originPoint, dir, normal, d0, w0, y0),
-    worldPointAlong(originPoint, dir, normal, d1, w0, y0),
-    worldPointAlong(originPoint, dir, normal, d1, w1, y0),
-    worldPointAlong(originPoint, dir, normal, d0, w1, y0),
-    worldPointAlong(originPoint, dir, normal, d0, w0, y1),
-    worldPointAlong(originPoint, dir, normal, d1, w0, y1),
-    worldPointAlong(originPoint, dir, normal, d1, w1, y1),
-    worldPointAlong(originPoint, dir, normal, d0, w1, y1),
-  ];
-  const base = vertices.length / 3;
-  for (const point of corners) vertices.push(point.x - localOrigin.x, point.y - localOrigin.y, point.z - localOrigin.z);
-  indices.push(
-    base + 0, base + 2, base + 1, base + 0, base + 3, base + 2,
-    base + 4, base + 5, base + 6, base + 4, base + 6, base + 7,
-    base + 0, base + 1, base + 5, base + 0, base + 5, base + 4,
-    base + 1, base + 2, base + 6, base + 1, base + 6, base + 5,
-    base + 2, base + 3, base + 7, base + 2, base + 7, base + 6,
-    base + 3, base + 0, base + 4, base + 3, base + 4, base + 7,
-  );
-}
-
-function worldPointAlong(originPoint, dir, normal, d, w, y) {
-  return new THREE.Vector3(
-    originPoint.x + dir.x * d + normal.x * w,
-    y,
-    originPoint.z + dir.z * d + normal.z * w,
-  );
-}
-
 function createSlabMesh(start, end, options = {}) {
   const width = Math.abs(end.x - start.x);
   const depth = Math.abs(end.z - start.z);
   const min = Math.max(0.02, state.authoring.gridStep * 0.1);
   if (width < min || depth < min) return null;
 
-  const thickness = Math.max(0.01, Number(options.thickness ?? state.authoring.slabThickness) || 0.12);
+  const thickness = Math.max(0.01, Number(state.authoring.slabThickness) || 0.25);
   const baseElevation = getActiveStoreyElevation();
   const storey = getActiveStorey();
   const inset = options.preview ? 0 : slabVisualInset(width, depth);
+  const visualWidth = Math.max(0.02, width - inset * 2);
+  const visualDepth = Math.max(0.02, depth - inset * 2);
   const minX = Math.min(start.x, end.x);
   const maxX = Math.max(start.x, end.x);
   const minZ = Math.min(start.z, end.z);
   const maxZ = Math.max(start.z, end.z);
-  const openings = Array.isArray(options.openings) ? options.openings.map(cloneSlabOpening).filter(Boolean) : [];
-  const slabData = { minX, maxX, minZ, maxZ, elevation: baseElevation, thickness, inset, openings };
-  const built = createSlabGeometryFromData(slabData);
-  if (!built?.geometry) return null;
+  const geometry = new THREE.BoxGeometry(visualWidth, thickness, visualDepth);
   const material = options.preview ? authoringPreviewMaterial.clone() : authoringSlabMaterial.clone();
-  const mesh = new THREE.Mesh(built.geometry, material);
-  mesh.position.copy(built.origin);
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.position.set((start.x + end.x) * 0.5, baseElevation + thickness * 0.5, (start.z + end.z) * 0.5);
   mesh.name = options.preview ? "Slab preview" : `Slab_${String(++state.authoring.slabCount).padStart(3, "0")}`;
   mesh.castShadow = false;
   mesh.receiveShadow = false;
@@ -3538,231 +2328,9 @@ function createSlabMesh(start, end, options = {}) {
   mesh.userData.storeyId = storey.id;
   mesh.userData.storeyName = storey.name;
   mesh.userData.storeyElevation = baseElevation;
-  mesh.userData.dimensions = { width, depth, visualWidth: built.visualWidth, visualDepth: built.visualDepth, thickness, inset, openings: openings.length };
+  mesh.userData.dimensions = { width, depth, visualWidth, visualDepth, thickness, inset };
   mesh.userData.slabBoundary = { minX, maxX, minZ, maxZ, elevation: baseElevation };
-  mesh.userData.slabOpenings = openings;
   return mesh;
-}
-
-function cloneSlabOpening(opening) {
-  if (!opening) return null;
-  const minX = Number(opening.minX);
-  const maxX = Number(opening.maxX);
-  const minZ = Number(opening.minZ);
-  const maxZ = Number(opening.maxZ);
-  if (![minX, maxX, minZ, maxZ].every(Number.isFinite)) return null;
-  if (maxX - minX < 0.02 || maxZ - minZ < 0.02) return null;
-  return {
-    id: opening.id || `slab-opening-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-    minX: Math.min(minX, maxX),
-    maxX: Math.max(minX, maxX),
-    minZ: Math.min(minZ, maxZ),
-    maxZ: Math.max(minZ, maxZ),
-    source: opening.source || "manual",
-    stairId: opening.stairId || null,
-  };
-}
-
-function createSlabGeometryFromData(data) {
-  const minX = Number(data.minX);
-  const maxX = Number(data.maxX);
-  const minZ = Number(data.minZ);
-  const maxZ = Number(data.maxZ);
-  const thickness = Math.max(0.01, Number(data.thickness) || state.authoring.slabThickness || 0.12);
-  const inset = Math.max(0, Number(data.inset) || 0);
-  const y0 = Number(data.elevation) || 0;
-  const y1 = y0 + thickness;
-  const vMinX = minX + inset;
-  const vMaxX = maxX - inset;
-  const vMinZ = minZ + inset;
-  const vMaxZ = maxZ - inset;
-  if (vMaxX - vMinX < 0.02 || vMaxZ - vMinZ < 0.02) return null;
-
-  const openings = (Array.isArray(data.openings) ? data.openings : [])
-    .map(cloneSlabOpening)
-    .filter(Boolean)
-    .map((opening) => ({
-      ...opening,
-      minX: THREE.MathUtils.clamp(opening.minX, vMinX, vMaxX),
-      maxX: THREE.MathUtils.clamp(opening.maxX, vMinX, vMaxX),
-      minZ: THREE.MathUtils.clamp(opening.minZ, vMinZ, vMaxZ),
-      maxZ: THREE.MathUtils.clamp(opening.maxZ, vMinZ, vMaxZ),
-    }))
-    .filter((opening) => opening.maxX - opening.minX >= 0.02 && opening.maxZ - opening.minZ >= 0.02);
-
-  const xs = [vMinX, vMaxX];
-  const zs = [vMinZ, vMaxZ];
-  for (const opening of openings) {
-    xs.push(opening.minX, opening.maxX);
-    zs.push(opening.minZ, opening.maxZ);
-  }
-  xs.sort((a, b) => a - b);
-  zs.sort((a, b) => a - b);
-  const ux = uniqueSortedNumbers(xs);
-  const uz = uniqueSortedNumbers(zs);
-  const origin = new THREE.Vector3((vMinX + vMaxX) * 0.5, y0 + thickness * 0.5, (vMinZ + vMaxZ) * 0.5);
-  const vertices = [];
-  const indices = [];
-  for (let xi = 0; xi < ux.length - 1; xi++) {
-    for (let zi = 0; zi < uz.length - 1; zi++) {
-      const x0 = ux[xi];
-      const x1 = ux[xi + 1];
-      const z0 = uz[zi];
-      const z1 = uz[zi + 1];
-      if (x1 - x0 < 1e-5 || z1 - z0 < 1e-5) continue;
-      const cx = (x0 + x1) * 0.5;
-      const cz = (z0 + z1) * 0.5;
-      if (openings.some((opening) => cx > opening.minX + 1e-6 && cx < opening.maxX - 1e-6 && cz > opening.minZ + 1e-6 && cz < opening.maxZ - 1e-6)) continue;
-      appendAxisAlignedBox(vertices, indices, x0, x1, y0, y1, z0, z1, origin);
-    }
-  }
-  if (!vertices.length || !indices.length) return null;
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
-  geometry.setIndex(indices);
-  geometry.computeVertexNormals();
-  geometry.computeBoundingBox();
-  geometry.computeBoundingSphere();
-  return { geometry, origin, visualWidth: vMaxX - vMinX, visualDepth: vMaxZ - vMinZ };
-}
-
-function uniqueSortedNumbers(values) {
-  const result = [];
-  for (const value of values) {
-    if (!Number.isFinite(value)) continue;
-    if (!result.length || Math.abs(result[result.length - 1] - value) > 1e-6) result.push(value);
-  }
-  return result;
-}
-
-function appendAxisAlignedBox(vertices, indices, minX, maxX, y0, y1, minZ, maxZ, origin) {
-  const base = vertices.length / 3;
-  const corners = [
-    [minX, y0, minZ], [maxX, y0, minZ], [maxX, y0, maxZ], [minX, y0, maxZ],
-    [minX, y1, minZ], [maxX, y1, minZ], [maxX, y1, maxZ], [minX, y1, maxZ],
-  ];
-  for (const [x, y, z] of corners) vertices.push(x - origin.x, y - origin.y, z - origin.z);
-  // Winding is deliberately outward-facing. The first trémie implementation
-  // used the same index order as appendOrientedBox(), but for axis-aligned slab
-  // cells that made the top face back-facing with FrontSide materials, so slabs
-  // looked open from above. Keep this order in sync with the corner contract:
-  // 0-3 bottom CCW in X/Z, 4-7 top.
-  indices.push(
-    // bottom -Y
-    base + 0, base + 1, base + 2, base + 0, base + 2, base + 3,
-    // top +Y
-    base + 4, base + 6, base + 5, base + 4, base + 7, base + 6,
-    // z min -Z
-    base + 0, base + 4, base + 5, base + 0, base + 5, base + 1,
-    // x max +X
-    base + 1, base + 5, base + 6, base + 1, base + 6, base + 2,
-    // z max +Z
-    base + 2, base + 6, base + 7, base + 2, base + 7, base + 3,
-    // x min -X
-    base + 3, base + 7, base + 4, base + 3, base + 4, base + 0,
-  );
-}
-
-function refreshSlabMeshGeometry(mesh) {
-  if (!mesh?.userData?.slabBoundary) return;
-  const boundary = mesh.userData.slabBoundary;
-  const thickness = Number(mesh.userData?.dimensions?.thickness ?? state.authoring.slabThickness) || 0.12;
-  const inset = Number(mesh.userData?.dimensions?.inset ?? 0) || 0;
-  const openings = Array.isArray(mesh.userData.slabOpenings) ? mesh.userData.slabOpenings.map(cloneSlabOpening).filter(Boolean) : [];
-  const built = createSlabGeometryFromData({ ...boundary, thickness, inset, openings });
-  if (!built?.geometry) return;
-  mesh.geometry?.dispose?.();
-  mesh.geometry = built.geometry;
-  mesh.position.copy(built.origin);
-  mesh.userData.dimensions = {
-    ...(mesh.userData.dimensions || {}),
-    width: Math.abs(boundary.maxX - boundary.minX),
-    depth: Math.abs(boundary.maxZ - boundary.minZ),
-    visualWidth: built.visualWidth,
-    visualDepth: built.visualDepth,
-    thickness,
-    inset,
-    openings: openings.length,
-  };
-  mesh.updateMatrixWorld(true);
-}
-
-
-function applyAutoStairSlabOpening(stairMesh) {
-  if (!state.authoring.stairAutoOpening || !stairMesh?.isMesh) return null;
-  const slab = findUpperSlabForStair(stairMesh);
-  if (!slab) return null;
-  const opening = stairOpeningForSlab(stairMesh, slab);
-  if (!opening) return null;
-  const before = (slab.userData.slabOpenings || []).map(cloneSlabOpening).filter(Boolean);
-  const existing = before.find((item) => item.stairId === stairMesh.userData?.__modelerId || item.id === opening.id);
-  const after = before.filter((item) => item.id !== existing?.id);
-  after.push(opening);
-  slab.userData.slabOpenings = after;
-  refreshSlabMeshGeometry(slab);
-  const cut = { slabId: slab.userData.__modelerId, opening: cloneSlabOpening(opening), before, after: after.map(cloneSlabOpening).filter(Boolean) };
-  if (stairMesh.userData?.stairData) stairMesh.userData.stairData.slabCut = cut;
-  return cut;
-}
-
-function findUpperSlabForStair(stairMesh) {
-  if (!stairMesh) return null;
-  stairMesh.updateMatrixWorld(true);
-  const stairBox = new THREE.Box3().setFromObject(stairMesh);
-  const base = Number(stairMesh.userData?.storeyElevation ?? stairMesh.userData?.stairData?.baseElevation ?? getActiveStoreyElevation());
-  const candidates = state.meshes
-    .filter((mesh) => mesh?.userData?.authoringType === "slab" && Number(mesh.userData?.storeyElevation) > base + 0.05)
-    .sort((a, b) => Number(a.userData.storeyElevation) - Number(b.userData.storeyElevation));
-  for (const slab of candidates) {
-    const b = slab.userData?.slabBoundary;
-    if (!b) continue;
-    const overlaps = stairBox.max.x >= b.minX && stairBox.min.x <= b.maxX && stairBox.max.z >= b.minZ && stairBox.min.z <= b.maxZ;
-    if (overlaps) return slab;
-  }
-  return null;
-}
-
-function stairOpeningForSlab(stairMesh, slab) {
-  stairMesh.updateMatrixWorld(true);
-  const box = new THREE.Box3().setFromObject(stairMesh);
-  const b = slab.userData?.slabBoundary;
-  if (!b) return null;
-  const margin = Math.max(0.15, Number(stairMesh.userData?.dimensions?.width || state.authoring.stairWidth || 0.9) * 0.22);
-  const minX = THREE.MathUtils.clamp(box.min.x - margin, b.minX, b.maxX);
-  const maxX = THREE.MathUtils.clamp(box.max.x + margin, b.minX, b.maxX);
-  const minZ = THREE.MathUtils.clamp(box.min.z - margin, b.minZ, b.maxZ);
-  const maxZ = THREE.MathUtils.clamp(box.max.z + margin, b.minZ, b.maxZ);
-  if (maxX - minX < 0.25 || maxZ - minZ < 0.25) return null;
-  return {
-    id: `stair-trimmer-${stairMesh.userData?.__modelerId || stairMesh.uuid}`,
-    minX,
-    maxX,
-    minZ,
-    maxZ,
-    source: "stair-auto-trimmer",
-    stairId: stairMesh.userData?.__modelerId || null,
-  };
-}
-
-function applySlabCutSnapshot(cut, mode = "after") {
-  if (!cut?.slabId) return;
-  const slab = meshByModelerId(cut.slabId);
-  if (!slab) return;
-  const payload = mode === "before" ? cut.before : cut.after;
-  slab.userData.slabOpenings = (payload || []).map(cloneSlabOpening).filter(Boolean);
-  refreshSlabMeshGeometry(slab);
-}
-
-function removeStairSlabCut(stairMesh) {
-  const cut = stairMesh?.userData?.stairData?.slabCut;
-  if (!cut?.slabId) return null;
-  const slab = meshByModelerId(cut.slabId);
-  if (!slab) return null;
-  const before = (slab.userData.slabOpenings || []).map(cloneSlabOpening).filter(Boolean);
-  const after = before.filter((opening) => opening.id !== cut.opening?.id && opening.stairId !== stairMesh.userData?.__modelerId);
-  slab.userData.slabOpenings = after;
-  refreshSlabMeshGeometry(slab);
-  return { ...cut, before, after };
 }
 
 function formatNumber(value) {
@@ -3773,21 +2341,15 @@ function updateAuthoringSettingFromInput(key, value) {
   const numeric = Number(value);
   const min = key === "windowSill" ? 0 : 0.0001;
   if (!Number.isFinite(numeric) || numeric < min) return;
-  state.authoring[key] = (key === "stairSteps" || key === "stairWinderSteps") ? Math.max(key === "stairWinderSteps" ? 2 : 1, Math.round(numeric)) : numeric;
+  state.authoring[key] = numeric;
   markDirty();
   renderProperties();
 }
 
-async function loadFile(file, options = {}) {
+async function loadFile(file) {
   if (!/\.(glb|gltf)$/i.test(file.name)) {
     setStatus("Le modeler attend un fichier .glb ou .gltf.", "error");
     return;
-  }
-
-  if (!options.fromProject) {
-    state.projectId = null;
-    state.project = null;
-    state.returnToViewer = false;
   }
 
   setStatus(`<span class="spinner"></span>Chargement de <strong>${escapeHtml(file.name)}</strong> (${formatBytes(file.size)})…`);
@@ -3848,27 +2410,13 @@ async function loadProjectFromUrl() {
   const file = blobToGlbFile(project.glbBlob, project.glbFileName || "model.glb");
   await loadFile(file, { fromProject: true });
 
-  const repairCount = repairAuthoringRoundTripGeometry();
-  if (repairCount > 0) {
-    renderTree();
-    renderProperties();
-    updateUiEnabled();
-    setStatus(`GLB source ouvert depuis le viewer · ${repairCount} ouverture(s) / mur(s) relinké(s) au GLB source.`, "ok");
-  }
-
-  // Generated IFC spaces are part of the useful authoring round-trip: users can
-  // tweak their geometry in Edit mode after conversion. They used to be opt-in
-  // because the old blue overlay was visually intrusive; now they are loaded by
-  // default with a very light material and a toolbar toggle.
-  const loadIfcSpaces = params.get("ifcSpaces") !== "0" && params.get("hideIfcSpaces") !== "1";
-  const spacesVisible = params.get("spacesVisible") !== "0" && params.get("hideIfcSpaces") !== "1";
-  const overlayCount = loadIfcSpaces ? addGeneratedIfcSpacesFromProject(project.ifcText, { visible: spacesVisible }) : 0;
+  const overlayCount = addGeneratedIfcSpacesFromProject(project.ifcText);
   if (overlayCount > 0) {
     indexMeshes(state.modelRoot);
     renderTree();
     renderProperties();
     updateUiEnabled();
-    setStatus(`GLB source ouvert depuis le viewer · ${overlayCount} space(s) IFC généré(s) chargé(s) comme géométries éditables. Toggle IFC Spaces pour les masquer/afficher.`, "ok");
+    setStatus(`GLB source ouvert depuis le viewer · ${overlayCount} space(s) IFC généré(s) ajouté(s) comme géométries éditables.`, "ok");
   }
 
   if (state.returnToViewer && convertIfcButton) {
@@ -3904,105 +2452,19 @@ async function reexportIfcWithProjectEdits(ifcText, fileName) {
   };
 }
 
-async function persistConvertedProject(glbBlob, ifcText, ifcFileName, options = {}) {
-  const patch = {
+async function saveRoundTripAndReturn(glbBlob, ifcText, ifcFileName) {
+  if (!state.projectId) return;
+  const updated = await updateProject(state.projectId, {
     glbBlob,
     glbFileName: editedFileName("glb"),
     ifcText,
     ifcFileName: safeFileName(ifcFileName, "model.ifc"),
     edits: [],
     lastOpenedIn: "modeler",
-    source: state.project?.source || (state.currentFile ? "modeler-upload" : "modeler-from-scratch"),
-  };
-
-  const updated = state.projectId
-    ? await updateProject(state.projectId, patch)
-    : await saveProject({
-      id: makeProjectId(),
-      ...patch,
-      createdFrom: "modeler",
-    });
-
-  state.projectId = updated.id;
+  });
   state.project = updated;
   setLastProjectId(updated.id);
-
-  if (options.returnToViewer) {
-    window.location.href = `/viewer.html?project=${encodeURIComponent(updated.id)}&from=modeler`;
-  }
-
-  return updated;
-}
-
-async function saveRoundTripAndReturn(glbBlob, ifcText, ifcFileName) {
-  await persistConvertedProject(glbBlob, ifcText, ifcFileName, { returnToViewer: true });
-}
-
-async function preloadOpeningAssets() {
-  const entries = Object.entries(state.assets?.openings || {});
-  if (!entries.length) return;
-
-  const loader = createGLTFLoader();
-  await Promise.all(entries.map(async ([key, asset]) => {
-    if (!asset || asset.loaded || asset.error) return;
-
-    try {
-      const gltf = await loader.loadAsync(asset.url);
-      const root = gltf.scene || gltf.scenes?.[0];
-      const extracted = extractFirstMeshGeometryAndMaterial(root);
-      if (!extracted?.geometry) throw new Error("asset GLB sans mesh exploitable");
-
-      asset.geometry = normalizeOpeningAssetGeometry(extracted.geometry);
-      asset.material = extracted.material || (key === "window" ? authoringWindowObjectMaterial.clone() : authoringDoorObjectMaterial.clone());
-      asset.baseSize = asset.geometry.userData?.openingAssetBaseSize || (key === "window" ? new THREE.Vector3(1.2, 1.2, 0.08) : new THREE.Vector3(0.9, 2.1, 0.1));
-      asset.loaded = true;
-
-      console.info(`[modeler] ${asset.label || key} asset loaded: ${asset.url}`, asset.baseSize);
-    } catch (error) {
-      asset.error = error;
-      console.warn(`[modeler] ${asset?.label || key} asset fallback: ${asset?.url}`, error);
-    }
-  }));
-}
-
-function extractFirstMeshGeometryAndMaterial(root) {
-  if (!root) return null;
-  root.updateMatrixWorld(true);
-
-  let result = null;
-  root.traverse((object) => {
-    if (result || !object.isMesh || !object.geometry) return;
-    const geometry = object.geometry.clone();
-    geometry.applyMatrix4(object.matrixWorld);
-    result = {
-      geometry,
-      material: Array.isArray(object.material) ? object.material[0]?.clone?.() : object.material?.clone?.(),
-    };
-  });
-
-  return result;
-}
-
-function normalizeOpeningAssetGeometry(sourceGeometry) {
-  const geometry = sourceGeometry.clone();
-  geometry.computeBoundingBox();
-  const box = geometry.boundingBox;
-  if (!box || box.isEmpty()) throw new Error("asset GLB avec bounding box vide");
-
-  const size = new THREE.Vector3();
-  box.getSize(size);
-
-  // The app places openings from their center. User-authored assets may use a
-  // center-bottom origin; normalize to a centered geometry contract here, while
-  // keeping the source dimensions as the parametric base size.
-  const center = new THREE.Vector3();
-  box.getCenter(center);
-  geometry.translate(-center.x, -center.y, -center.z);
-  geometry.computeVertexNormals();
-  geometry.computeBoundingBox();
-  geometry.computeBoundingSphere();
-  geometry.userData.openingAssetBaseSize = size.clone();
-  return geometry;
+  window.location.href = `/viewer.html?project=${encodeURIComponent(updated.id)}&from=modeler`;
 }
 
 function createGLTFLoader() {
@@ -4013,7 +2475,7 @@ function createGLTFLoader() {
   return loader;
 }
 
-function addGeneratedIfcSpacesFromProject(ifcText, options = {}) {
+function addGeneratedIfcSpacesFromProject(ifcText) {
   if (!state.modelRoot || !ifcText) return 0;
 
   // If the GLB already contains editable spaces from a previous modeler round-trip,
@@ -4029,13 +2491,11 @@ function addGeneratedIfcSpacesFromProject(ifcText, options = {}) {
   const group = new THREE.Group();
   group.name = "Generated IFC Spaces";
   group.userData.smeltOverlayGroup = true;
-  group.visible = options.visible !== false;
-  state.ifcSpacesVisible = group.visible;
 
   const material = new THREE.MeshBasicMaterial({
     color: 0x74b9ff,
     transparent: true,
-    opacity: 0.11,
+    opacity: 0.30,
     side: THREE.DoubleSide,
     depthWrite: false,
   });
@@ -4045,8 +2505,6 @@ function addGeneratedIfcSpacesFromProject(ifcText, options = {}) {
     mesh.name = space.name || `IfcSpace_${space.localId}`;
     mesh.frustumCulled = false;
     mesh.renderOrder = 2;
-    mesh.userData.authoringType = "space";
-    mesh.userData.ifcHint = "IfcSpace";
     mesh.userData.smeltIfcType = "IFCSPACE";
     mesh.userData.smeltSource = "ifc-generated-overlay";
     mesh.userData.smeltOriginalLocalId = space.localId;
@@ -4058,7 +2516,6 @@ function addGeneratedIfcSpacesFromProject(ifcText, options = {}) {
   state.modelRoot.add(group);
   state.ifcOverlayGroup = group;
   state.ifcOverlayCount = spaces.length;
-  updateToolbarState();
   return spaces.length;
 }
 
@@ -4255,81 +2712,6 @@ function parseIfcIndexTriplesForModeler(arg) {
   return triples;
 }
 
-function maybeExtractPlanOrientationFromGeometry(object) {
-  if (!object?.isMesh || object.isInstancedMesh || !object.geometry) return;
-  if (object.userData?.__planOrientationExtracted) return;
-
-  // IFC triangulation sometimes arrives with a useful placement matrix but a
-  // residual object yaw baked into the vertex coordinates. The OBB can look
-  // right, while TransformControls still sees an identity local basis. Extract a
-  // stable horizontal principal axis into object.quaternion, and counter-rotate
-  // the geometry so the mesh does not visually move. This gives Local gizmos the
-  // same orientation as the object/bbox.
-  const source = String(object.userData?.smeltSource || object.parent?.userData?.smeltSource || "");
-  const isIfcEditableSnapshot = source === "web-ifc-editable-snapshot" || object.userData?.smeltLocalTransformPreserved === true;
-  if (!isIfcEditableSnapshot) return;
-
-  const scale = object.scale || new THREE.Vector3(1, 1, 1);
-  const maxScale = Math.max(Math.abs(scale.x || 1), Math.abs(scale.y || 1), Math.abs(scale.z || 1));
-  const minScale = Math.min(Math.abs(scale.x || 1), Math.abs(scale.y || 1), Math.abs(scale.z || 1));
-  if (maxScale > 0 && Math.abs(maxScale - minScale) / maxScale > 1e-4) return;
-
-  const position = object.geometry.getAttribute("position");
-  if (!position || position.count < 4) return;
-
-  let meanX = 0;
-  let meanZ = 0;
-  for (let i = 0; i < position.count; i++) {
-    meanX += position.getX(i);
-    meanZ += position.getZ(i);
-  }
-  meanX /= position.count;
-  meanZ /= position.count;
-
-  let xx = 0;
-  let xz = 0;
-  let zz = 0;
-  for (let i = 0; i < position.count; i++) {
-    const x = position.getX(i) - meanX;
-    const z = position.getZ(i) - meanZ;
-    xx += x * x;
-    xz += x * z;
-    zz += z * z;
-  }
-  xx /= position.count;
-  xz /= position.count;
-  zz /= position.count;
-
-  const trace = xx + zz;
-  const diff = xx - zz;
-  const discr = Math.sqrt(Math.max(0, diff * diff + 4 * xz * xz));
-  const lambda0 = (trace + discr) * 0.5;
-  const lambda1 = (trace - discr) * 0.5;
-  if (!Number.isFinite(lambda0) || lambda0 < 1e-8) return;
-  if (lambda1 > 0 && lambda0 / lambda1 < 1.08) return;
-
-  // Principal direction angle in local XZ. Fold it to [-90°, 90°] to avoid
-  // arbitrary 180° flips between similar reloads.
-  const angle = 0.5 * Math.atan2(2 * xz, xx - zz);
-  let normalized = angle;
-  while (normalized > Math.PI / 2) normalized -= Math.PI;
-  while (normalized < -Math.PI / 2) normalized += Math.PI;
-  if (Math.abs(normalized) < THREE.MathUtils.degToRad(0.5)) return;
-
-  const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), normalized);
-  const inverse = new THREE.Matrix4().makeRotationY(-normalized);
-  object.geometry.applyMatrix4(inverse);
-  object.geometry.computeBoundingBox?.();
-  object.geometry.computeBoundingSphere?.();
-  object.geometry.computeVertexNormals?.();
-
-  object.quaternion.multiply(q);
-  object.updateMatrix();
-  object.updateMatrixWorld(true);
-  object.userData.__planOrientationExtracted = true;
-  object.userData.__planOrientationAngle = normalized;
-}
-
 function indexMeshes(root) {
   state.meshes = [];
   const editableObjects = [];
@@ -4350,15 +2732,10 @@ function indexMeshes(root) {
   }
 
   for (const object of editableObjects) {
-    if (!Number.isFinite(Number(object.userData.__modelerId)) && Number.isFinite(Number(object.userData.modelerId))) {
-      object.userData.__modelerId = Number(object.userData.modelerId);
-    }
-
     if (!Number.isFinite(Number(object.userData.__modelerId))) {
       object.userData.__modelerId = state.nextModelerId++;
     } else {
       object.userData.__modelerId = Number(object.userData.__modelerId);
-      object.userData.modelerId = object.userData.__modelerId;
       state.nextModelerId = Math.max(state.nextModelerId, object.userData.__modelerId + 1);
     }
     object.name = object.name || object.parent?.name || `Mesh_${object.userData.__modelerId}`;
@@ -4369,7 +2746,6 @@ function indexMeshes(root) {
       }
 
       ensureEditableBufferGeometry(object);
-      maybeExtractPlanOrientationFromGeometry(object);
       normalizeEditablePivotToGeometryCenter(object);
       object.geometry.computeBoundingBox();
       object.geometry.computeBoundingSphere();
@@ -4480,18 +2856,14 @@ function clearScene(options = {}) {
   state.currentFileName = "";
   state.ifcOverlayGroup = null;
   state.ifcOverlayCount = 0;
-  state.ifcSpacesVisible = true;
   state.meshes = [];
   state.history.undoStack.length = 0;
   state.history.redoStack.length = 0;
   state.history.objectDragStart = null;
   state.authoring.wallCount = 0;
-  state.authoring.partitionCount = 0;
   state.authoring.slabCount = 0;
   state.authoring.doorCount = 0;
   state.authoring.windowCount = 0;
-  state.authoring.roofCount = 0;
-  state.authoring.stairCount = 0;
   state.authoring.tool = "select";
   resetAuthoringStoreys();
   renderTree();
@@ -4697,7 +3069,9 @@ function selectMesh(mesh) {
     if (state.edit.active) {
       updateEditPivotToSelection();
     } else {
-      attachTransformToSelectedObject();
+      state.transform.enabled = true;
+      state.transform.attach(state.selected);
+      state.transform.setSize?.(1.15);
     }
   } else {
     clearEditComponentSelection();
@@ -4709,37 +3083,9 @@ function selectMesh(mesh) {
   }
 
   updateBoxHelper();
-  if (state.authoring.tool === "roof") updateRoofPreviewFromSelection();
   renderTree();
   renderProperties();
   updateUiEnabled();
-}
-
-function currentTransformSpace() {
-  return state.transform?.getSpace?.() || state.transform?.space || "world";
-}
-
-function attachTransformToSelectedObject() {
-  if (!state.selected || !state.transform) return;
-  state.selected.updateMatrix();
-  state.selected.updateMatrixWorld(true);
-  state.transform.enabled = true;
-  state.transform.setSpace(currentTransformSpace());
-  state.transform.attach(state.selected);
-  state.transform.setSize?.(1.15);
-  state.transform.updateMatrixWorld?.(true);
-  state.transform.dispatchEvent?.({ type: "change" });
-}
-
-function refreshTransformAttachment() {
-  if (!state.transform) return;
-  if (state.edit.active) {
-    if (hasEditComponentSelection()) updateEditPivotToSelection();
-    else state.transform.detach();
-    return;
-  }
-  if (state.selected) attachTransformToSelectedObject();
-  else state.transform.detach();
 }
 
 function setEditMode(active) {
@@ -4777,7 +3123,10 @@ function setEditMode(active) {
     cancelBoxSelect();
     removeEditOverlay();
     state.transform.detach();
-    if (state.selected) attachTransformToSelectedObject();
+    if (state.selected) {
+      state.transform.attach(state.selected);
+      state.transform.setSize?.(1.15);
+    }
   }
 
   updateBoxHelper();
@@ -5581,70 +3930,13 @@ function updateBoxHelper() {
   if (!state.selected) return;
 
   state.selected.updateMatrixWorld(true);
-  state.boxHelper = createObjectSpaceBoxHelper(state.selected, 0xff9248);
-  if (!state.boxHelper) return;
-  state.boxHelper.userData.__modelerOverlay = true;
+  const box = new THREE.Box3().setFromObject(state.selected);
+  if (box.isEmpty()) return;
+
+  state.boxHelper = new THREE.Box3Helper(box, 0xff9248);
   state.boxHelper.material.depthTest = false;
   state.boxHelper.renderOrder = 10;
   state.scene.add(state.boxHelper);
-}
-
-function createObjectSpaceBoxHelper(object, color = 0xff9248) {
-  if (!object) return null;
-  const sourceBox = getLocalGeometryBox(object);
-  if (!sourceBox || sourceBox.isEmpty()) return null;
-
-  const min = sourceBox.min;
-  const max = sourceBox.max;
-  const localCorners = [
-    [min.x, min.y, min.z], [max.x, min.y, min.z], [max.x, max.y, min.z], [min.x, max.y, min.z],
-    [min.x, min.y, max.z], [max.x, min.y, max.z], [max.x, max.y, max.z], [min.x, max.y, max.z],
-  ].map(([x, y, z]) => new THREE.Vector3(x, y, z));
-  const edges = [
-    0, 1, 1, 2, 2, 3, 3, 0,
-    4, 5, 5, 6, 6, 7, 7, 4,
-    0, 4, 1, 5, 2, 6, 3, 7,
-  ];
-  const positions = new Float32Array(edges.length * 3);
-  object.updateMatrixWorld(true);
-  for (let i = 0; i < edges.length; i++) {
-    const world = localCorners[edges[i]].clone().applyMatrix4(object.matrixWorld);
-    positions[i * 3] = world.x;
-    positions[i * 3 + 1] = world.y;
-    positions[i * 3 + 2] = world.z;
-  }
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-  const material = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.95, depthTest: false });
-  const helper = new THREE.LineSegments(geometry, material);
-  helper.name = "Object oriented bounding box";
-  return helper;
-}
-
-function getLocalGeometryBox(object) {
-  if (!object?.geometry) return null;
-  const geometry = object.geometry;
-  geometry.computeBoundingBox?.();
-  const box = geometry.boundingBox;
-  if (!box || box.isEmpty()) return null;
-  return box.clone();
-}
-
-function getObjectSpaceBoundingInfo(object) {
-  const box = getLocalGeometryBox(object);
-  if (!box) return null;
-  object.updateMatrixWorld(true);
-  const localSize = new THREE.Vector3();
-  const localCenter = new THREE.Vector3();
-  box.getSize(localSize);
-  box.getCenter(localCenter);
-  const worldCenter = localCenter.clone().applyMatrix4(object.matrixWorld);
-  const worldSize = localSize.clone().multiply(new THREE.Vector3(
-    Math.abs(object.scale.x || 1),
-    Math.abs(object.scale.y || 1),
-    Math.abs(object.scale.z || 1),
-  ));
-  return { size: worldSize, center: worldCenter, localSize, localCenter };
 }
 
 function renderProperties() {
@@ -5661,14 +3953,11 @@ function renderProperties() {
   const mesh = state.selected;
   mesh.updateMatrixWorld(true);
   const stats = geometryStats(mesh);
-  const orientedBox = getObjectSpaceBoundingInfo(mesh);
-  const fallbackBox = new THREE.Box3().setFromObject(mesh);
-  const size = orientedBox?.size || new THREE.Vector3();
-  const center = orientedBox?.center || new THREE.Vector3();
-  if (!orientedBox) {
-    fallbackBox.getSize(size);
-    fallbackBox.getCenter(center);
-  }
+  const box = new THREE.Box3().setFromObject(mesh);
+  const size = new THREE.Vector3();
+  const center = new THREE.Vector3();
+  box.getSize(size);
+  box.getCenter(center);
   const openingEditorHtml = renderSelectedOpeningEditor(mesh);
 
   properties.innerHTML = `
@@ -5690,7 +3979,7 @@ function renderProperties() {
       <div class="prop-grid">
         <div class="prop-row"><div class="prop-label">Vertices</div><div class="prop-value">${stats.vertices}</div></div>
         <div class="prop-row"><div class="prop-label">Triangles</div><div class="prop-value">${stats.triangles}</div></div>
-        <div class="prop-row"><div class="prop-label">BBox orientée</div><div class="prop-value">${formatVector(size)}</div></div>
+        <div class="prop-row"><div class="prop-label">BBox taille</div><div class="prop-value">${formatVector(size)}</div></div>
         <div class="prop-row"><div class="prop-label">BBox centre</div><div class="prop-value">${formatVector(center)}</div></div>
       </div>
     </div>
@@ -5725,91 +4014,20 @@ function renderProperties() {
 }
 
 
-function relinkOpeningMeshesForStorey(storeyId) {
-  if (!storeyId) return 0;
-  let count = 0;
-  const openingMeshes = state.meshes.filter((mesh) => isOpeningMesh(mesh) && mesh.userData?.storeyId === storeyId);
-  for (const mesh of openingMeshes) {
-    const link = getOpeningLinkForMesh(mesh);
-    if (!link?.wall || !link?.opening) continue;
-    if (updateOpeningMeshFromWallOpening(mesh, link.wall, link.opening)) count += 1;
-  }
-  return count;
-}
-
 function getOpeningLink(mesh) {
   const openingMeta = mesh?.userData?.opening;
   if (!openingMeta?.id || !openingMeta?.wallId) return null;
   const wall = meshByModelerId(openingMeta.wallId);
   const openings = wall?.userData?.wallPath?.openings;
   if (!wall || !Array.isArray(openings)) return null;
-
-  // Important after storey duplication: the visible copied door/window may still
-  // carry the source wallId until it is re-linked. Never trust a direct wallId
-  // when the mesh and wall belong to different storeys, otherwise deleting the
-  // copied opening restores the source wall instead of the duplicated wall.
-  if (mesh?.userData?.storeyId && wall.userData?.storeyId && mesh.userData.storeyId !== wall.userData.storeyId) return null;
-
-  const openingId = String(openingMeta.id);
-  const opening = openings.find((item) => String(item?.id) === openingId);
+  const opening = openings.find((item) => item.id === openingMeta.id);
   if (!opening) return null;
   return { wall, opening };
 }
 
-function getOpeningLinkForMesh(mesh) {
-  const direct = getOpeningLink(mesh);
-  if (direct) return direct;
-
-  // Defensive fallback for old projects or GLB round-trips where the visible
-  // opening mesh kept its semantic type but lost the wallId/openingId pair.
-  // We rematch by id first, then by proximity to each wall opening center.
-  if (!isOpeningMesh(mesh)) return null;
-  const type = mesh.userData.authoringType === "window" ? "window" : "door";
-  const openingId = mesh.userData?.opening?.id ? String(mesh.userData.opening.id) : null;
-  const meshPosition = new THREE.Vector3();
-  mesh.getWorldPosition(meshPosition);
-  const storeyId = mesh.userData?.storeyId || null;
-
-  let best = null;
-  const walls = state.meshes.filter((candidate) => candidate.userData?.authoringType === "wall" && candidate.userData?.wallPath);
-  for (const wall of walls) {
-    if (storeyId && wall.userData?.storeyId && wall.userData.storeyId !== storeyId) continue;
-    const data = wall.userData.wallPath;
-    const openings = Array.isArray(data.openings) ? data.openings : [];
-    for (const opening of openings) {
-      if (!opening) continue;
-      if (openingId && String(opening.id) === openingId) return { wall, opening };
-      if ((opening.type || type) !== type) continue;
-
-      const point = pointAlongWallData(data, Number(opening.offset) || 0, true);
-      const floorElevation = openingFloorElevationForWall(wall, point, opening);
-      const height = Math.max(0.1, Number(opening.height) || openingDefaults(type).height);
-      const sill = Math.max(0, Number(opening.sill) || 0);
-      const center = new THREE.Vector3(point.x, floorElevation + sill + height * 0.5, point.z);
-      const distance = meshPosition.distanceTo(center);
-      const tolerance = Math.max(0.25, Math.max(Number(opening.width) || 0.9, height) * 0.35);
-      if (distance <= tolerance && (!best || distance < best.distance)) best = { distance, wall, opening };
-    }
-  }
-
-  return best ? { wall: best.wall, opening: best.opening } : null;
-}
-
-function collectOpeningMeshesForWall(wall) {
-  const wallId = wall?.userData?.__modelerId;
-  if (wallId == null) return [];
-  return state.meshes
-    .filter((mesh) => isOpeningMesh(mesh) && mesh.userData?.opening?.wallId === wallId)
-    .map((mesh) => ({
-      mesh,
-      parent: mesh.parent,
-      index: mesh.parent ? mesh.parent.children.indexOf(mesh) : -1,
-    }));
-}
-
 function renderSelectedOpeningEditor(mesh) {
   if (!mesh || !["door", "window"].includes(mesh.userData?.authoringType)) return "";
-  const link = getOpeningLinkForMesh(mesh);
+  const link = getOpeningLink(mesh);
   const tool = mesh.userData.authoringType;
   const dims = mesh.userData.dimensions || {};
   const opening = link?.opening || dims;
@@ -5817,26 +4035,19 @@ function renderSelectedOpeningEditor(mesh) {
   const height = Number(opening.height ?? dims.height ?? openingDefaults(tool).height);
   const sill = Number(opening.sill ?? dims.sill ?? openingDefaults(tool).sill);
   const wallName = link?.wall?.name || "mur lié introuvable";
-  const linkHint = link
-    ? "Modifier ces valeurs redimensionne l’objet 3D et régénère automatiquement la découpe dans le mur."
-    : "Le mur hôte n’a pas été retrouvé : l’objet visible sera redimensionné, mais la découpe du mur ne pourra pas être recalculée.";
-  const objectDepth = Number(dims.objectDepth || openingObjectDepth(tool, Number(dims.wallThickness || 0.2)));
-  const wallThickness = Number(dims.wallThickness || 0.2);
-  const depthRatio = wallThickness > 0 ? Math.round((objectDepth / wallThickness) * 100) : 0;
   const sillRow = tool === "window"
-    ? `<div class="prop-row"><div class="prop-label">Allège</div><div class="prop-value"><input id="selected-opening-sill" class="opening-dimension-input allow-text-selection" type="number" inputmode="decimal" min="0" step="0.05" value="${formatNumber(sill)}" /> m</div></div>`
+    ? `<div class="prop-row"><div class="prop-label">Allège</div><div class="prop-value"><input id="selected-opening-sill" type="number" min="0" step="0.05" value="${formatNumber(sill)}" /> m</div></div>`
     : "";
   return `
     <div class="prop-section">
       <h3>${tool === "window" ? "Fenêtre" : "Porte"}</h3>
       <div class="prop-grid">
         <div class="prop-row"><div class="prop-label">Mur hôte</div><div class="prop-value">${escapeHtml(wallName)}</div></div>
-        <div class="prop-row"><div class="prop-label">Largeur</div><div class="prop-value"><input id="selected-opening-width" class="opening-dimension-input allow-text-selection" type="number" inputmode="decimal" min="0.1" step="0.05" value="${formatNumber(width)}" /> m</div></div>
-        <div class="prop-row"><div class="prop-label">Hauteur</div><div class="prop-value"><input id="selected-opening-height" class="opening-dimension-input allow-text-selection" type="number" inputmode="decimal" min="0.1" step="0.05" value="${formatNumber(height)}" /> m</div></div>
+        <div class="prop-row"><div class="prop-label">Largeur</div><div class="prop-value"><input id="selected-opening-width" type="number" min="0.1" step="0.05" value="${formatNumber(width)}" /> m</div></div>
+        <div class="prop-row"><div class="prop-label">Hauteur</div><div class="prop-value"><input id="selected-opening-height" type="number" min="0.1" step="0.05" value="${formatNumber(height)}" /> m</div></div>
         ${sillRow}
-        <div class="prop-row"><div class="prop-label">Profondeur visible</div><div class="prop-value">${formatNumber(objectDepth)} m <span class="mini">(${depthRatio}% du mur)</span></div></div>
       </div>
-      <div class="hint">${linkHint} La découpe traverse le mur, mais la menuiserie visible reste plus fine que le mur.</div>
+      <div class="hint">Modifier ces valeurs redimensionne l’objet 3D et régénère automatiquement la découpe dans le mur.</div>
     </div>
   `;
 }
@@ -5846,44 +4057,22 @@ function bindSelectedOpeningEditor(mesh) {
   const widthInput = document.getElementById("selected-opening-width");
   const heightInput = document.getElementById("selected-opening-height");
   const sillInput = document.getElementById("selected-opening-sill");
-  const commit = (key) => (event) => updateSelectedOpeningDimension(mesh, key, event.target.value);
-  const commitOnEnter = (key) => (event) => {
-    if (event.key !== "Enter") return;
-    event.preventDefault();
-    updateSelectedOpeningDimension(mesh, key, event.target.value);
-    event.currentTarget.blur();
-  };
-  const keepEditable = (event) => event.stopPropagation();
-  for (const control of [widthInput, heightInput, sillInput].filter(Boolean)) {
-    control.addEventListener("pointerdown", keepEditable);
-    control.addEventListener("mousedown", keepEditable);
-    control.addEventListener("click", keepEditable);
-    control.addEventListener("keydown", keepEditable);
-    control.addEventListener("focus", () => document.body.classList.remove("modeler-no-select"));
-  }
-
-  widthInput?.addEventListener("change", commit("width"));
-  heightInput?.addEventListener("change", commit("height"));
-  sillInput?.addEventListener("change", commit("sill"));
-  widthInput?.addEventListener("keydown", commitOnEnter("width"));
-  heightInput?.addEventListener("keydown", commitOnEnter("height"));
-  sillInput?.addEventListener("keydown", commitOnEnter("sill"));
+  widthInput?.addEventListener("change", (event) => updateSelectedOpeningDimension(mesh, "width", event.target.value));
+  heightInput?.addEventListener("change", (event) => updateSelectedOpeningDimension(mesh, "height", event.target.value));
+  sillInput?.addEventListener("change", (event) => updateSelectedOpeningDimension(mesh, "sill", event.target.value));
 }
 
 function updateSelectedOpeningDimension(mesh, key, value) {
-  const link = getOpeningLinkForMesh(mesh);
-  if (!mesh || !isOpeningMesh(mesh)) return;
-
+  const link = getOpeningLink(mesh);
+  if (!mesh || !link) {
+    setStatus("Ouverture non modifiable : le mur hôte est introuvable.", "warning");
+    return;
+  }
+  const { wall, opening } = link;
   const numeric = Number(value);
   const min = key === "sill" ? 0 : 0.1;
   if (!Number.isFinite(numeric) || numeric < min) return;
 
-  if (!link) {
-    updateStandaloneOpeningMeshDimension(mesh, key, numeric);
-    return;
-  }
-
-  const { wall, opening } = link;
   const before = cloneOpening(opening);
   const defaults = openingDefaults(opening.type || mesh.userData.authoringType);
   opening[key] = key === "sill" ? Math.max(0, numeric) : Math.max(0.1, numeric);
@@ -5917,41 +4106,6 @@ function updateSelectedOpeningDimension(mesh, key, value) {
   setStatus(`${openingToolLabel(opening.type || mesh.userData.authoringType)} mise à jour · découpe du mur recalculée.`, "ok");
 }
 
-function updateStandaloneOpeningMeshDimension(mesh, key, value) {
-  const tool = mesh?.userData?.authoringType === "window" ? "window" : "door";
-  const dims = { ...(mesh?.userData?.dimensions || {}) };
-  const before = { ...dims };
-  dims.width = Math.max(0.1, Number(dims.width) || openingDefaults(tool).width);
-  dims.height = Math.max(0.1, Number(dims.height) || openingDefaults(tool).height);
-  dims.sill = Math.max(0, Number(dims.sill) || openingDefaults(tool).sill);
-  if (key === "sill") dims.sill = Math.max(0, value);
-  else dims[key] = Math.max(0.1, value);
-
-  const wallThickness = Math.max(0.03, Number(dims.wallThickness || state.authoring.wallThickness) || 0.2);
-  const objectDepth = openingObjectDepth(tool, wallThickness);
-  dims.wallThickness = wallThickness;
-  dims.objectDepth = objectDepth;
-
-  const geometry = createOpeningObjectGeometry(tool, dims.width, dims.height, objectDepth);
-  mesh.geometry?.dispose?.();
-  mesh.geometry = geometry;
-  mesh.userData.dimensions = dims;
-  mesh.userData.ifcHint = tool === "window" ? "IfcWindow" : "IfcDoor";
-
-  pushHistory({
-    type: "standaloneOpeningDimension",
-    label: `Modifier ${openingToolLabel(tool)}`,
-    meshId: mesh.userData.__modelerId,
-    before,
-    after: { ...dims },
-  });
-  updateBoxHelper();
-  renderTree();
-  renderProperties();
-  markDirty();
-  setStatus(`${openingToolLabel(tool)} mise à jour · mur hôte introuvable, découpe non recalculée.`, "warning");
-}
-
 function updateOpeningMeshFromWallOpening(mesh, wall, opening) {
   const data = wall?.userData?.wallPath;
   if (!mesh || !data || !opening) return false;
@@ -5961,30 +4115,26 @@ function updateOpeningMeshFromWallOpening(mesh, wall, opening) {
   const sill = Math.max(0, Number(opening.sill) || 0);
   const margin = Math.max(0.05, Number(data.thickness || state.authoring.wallThickness) * 0.35);
   if (opening.offset - width * 0.5 < margin || opening.offset + width * 0.5 > length - margin) return false;
-  const point = pointAlongWallData(data, opening.offset, true);
-  const floorElevation = openingFloorElevationForWall(wall, point, opening);
-  opening.floorElevation = floorElevation;
-  const effectiveSill = Math.max(0, floorElevation - Number(data.baseElevation ?? getActiveStoreyElevation())) + sill;
-  if (effectiveSill + height > Number(data.height || state.authoring.wallHeight) - 0.02) return false;
+  if (sill + height > Number(data.height || state.authoring.wallHeight) - 0.02) return false;
 
   const tool = opening.type || mesh.userData.authoringType || "door";
-  const wallThickness = Math.max(0.03, Number(data.thickness || state.authoring.wallThickness) || 0.2);
-  const objectDepth = openingObjectDepth(tool, wallThickness);
-  const geometry = createOpeningObjectGeometry(tool, width, height, objectDepth);
+  const thickness = Math.max(0.03, Number(data.thickness || state.authoring.wallThickness) + 0.035);
+  const geometry = createOpeningObjectGeometry(tool, width, height, thickness);
   mesh.geometry?.dispose?.();
   mesh.geometry = geometry;
 
-  if (Array.isArray(mesh.material)) {
+  const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+  if (!Array.isArray(mesh.material) || (tool === "window" && materials.length < 2) || (tool === "door" && materials.length < 3)) {
     disposeMaterial(mesh.material);
     mesh.material = createOpeningMaterials(tool);
   }
 
-  mesh.position.set(point.x, floorElevation + sill + height * 0.5, point.z);
+  const point = pointAlongWallData(data, opening.offset, true);
+  mesh.position.set(point.x, Number(data.baseElevation ?? getActiveStoreyElevation()) + sill + height * 0.5, point.z);
   mesh.rotation.y = rotationYForWallDirection(wallDirection(data));
   mesh.userData.authoringType = tool;
   mesh.userData.ifcHint = tool === "window" ? "IfcWindow" : "IfcDoor";
-  mesh.userData.floorElevation = floorElevation;
-  mesh.userData.dimensions = { width, height, sill, wallThickness, objectDepth, floorElevation };
+  mesh.userData.dimensions = { width, height, sill, wallThickness: thickness };
   mesh.userData.opening = {
     id: opening.id,
     wallId: wall.userData.__modelerId,
@@ -5996,115 +4146,10 @@ function updateOpeningMeshFromWallOpening(mesh, wall, opening) {
   return true;
 }
 
-
-function openingMeshStoreyKey(storeyId, openingId) {
-  return `${storeyId || "__no_storey__"}::${String(openingId)}`;
-}
-
-function repairAuthoringRoundTripGeometry() {
-  if (!state.modelRoot) return 0;
-
-  // Rebuild wall meshes from their authoring metadata first. A saved round-trip
-  // GLB contains baked world geometry, but the wallPath is the canonical editable
-  // source for wall length, mitering and openings.
-  let repaired = 0;
-  const wallCount = state.meshes.filter((mesh) => mesh.userData?.authoringType === "wall" && mesh.userData?.wallPath).length;
-  if (wallCount > 0) {
-    refreshAuthoredWallMiters();
-    repaired += wallCount;
-  }
-
-  repaired += repairAuthoringOpeningsFromWallData();
-  if (state.modelRoot) {
-    indexMeshes(state.modelRoot);
-    updateBoxHelper();
-  }
-  return repaired;
-}
-
-function repairAuthoringOpeningsFromWallData() {
-  if (!state.modelRoot) return 0;
-
-  const openingMeshesById = new Map();
-  for (const mesh of state.meshes) {
-    const type = mesh.userData?.authoringType;
-    const openingId = mesh.userData?.opening?.id;
-    if ((type === "door" || type === "window") && openingId) {
-      const key = openingMeshStoreyKey(mesh.userData?.storeyId, openingId);
-      if (!openingMeshesById.has(key)) openingMeshesById.set(key, mesh);
-      if (!openingMeshesById.has(String(openingId))) openingMeshesById.set(String(openingId), mesh);
-    }
-  }
-
-  let count = 0;
-  const walls = state.meshes.filter((mesh) => mesh.userData?.authoringType === "wall" && mesh.userData?.wallPath);
-  for (const wall of walls) {
-    const data = wall.userData.wallPath;
-    normalizeWallPathForRoundTrip(data, wall);
-    const openings = Array.isArray(data.openings) ? data.openings : [];
-    data.openings = openings;
-
-    for (const opening of openings) {
-      if (!opening) continue;
-      if (!opening.id) opening.id = `opening-${Date.now()}-${Math.round(Math.random() * 1e6)}`;
-      const tool = opening.type === "window" ? "window" : "door";
-      opening.type = tool;
-      const key = String(opening.id);
-      let mesh = openingMeshesById.get(openingMeshStoreyKey(wall.userData?.storeyId || data.storeyId, key)) || openingMeshesById.get(key);
-
-      if (mesh) {
-        if (updateOpeningMeshFromWallOpening(mesh, wall, opening)) count += 1;
-        continue;
-      }
-
-      const offset = Number(opening.offset) || 0;
-      const created = createOpeningMesh({
-        wall,
-        wallData: data,
-        offset,
-        point: pointAlongWallData(data, offset, true),
-        dir: wallDirection(data),
-      }, tool, { opening, wall });
-      if (!created) continue;
-
-      const parent = wall.parent || state.modelRoot;
-      parent.add(created);
-      created.updateMatrixWorld(true);
-      openingMeshesById.set(key, created);
-      count += 1;
-    }
-  }
-
-  return count;
-}
-
-function normalizeWallPathForRoundTrip(data, wall) {
-  if (!data) return;
-  const baseElevation = Number(data.baseElevation ?? wall?.userData?.storeyElevation ?? getActiveStoreyElevation());
-  data.baseElevation = Number.isFinite(baseElevation) ? baseElevation : 0;
-  data.kind = data.kind === "partition" || wall?.userData?.dimensions?.kind === "partition" ? "partition" : "wall";
-  data.height = Math.max(0.05, Number(data.height) || Number(wall?.userData?.dimensions?.height) || (data.kind === "partition" ? state.authoring.partitionHeight : state.authoring.wallHeight) || 3);
-  data.thickness = Math.max(0.01, Number(data.thickness) || Number(wall?.userData?.dimensions?.thickness) || (data.kind === "partition" ? state.authoring.partitionThickness : state.authoring.wallThickness) || 0.2);
-  data.alignment = data.kind === "partition" ? "center" : (["left", "center", "right"].includes(data.alignment) ? data.alignment : "center");
-  data.storeyId = data.storeyId || wall?.userData?.storeyId || null;
-  data.storeyName = data.storeyName || wall?.userData?.storeyName || null;
-  data.start = coerceWallPoint(data.start, data.baseElevation);
-  data.end = coerceWallPoint(data.end, data.baseElevation);
-  data.prev = data.prev ? coerceWallPoint(data.prev, data.baseElevation) : null;
-  data.next = data.next ? coerceWallPoint(data.next, data.baseElevation) : null;
-  data.openings = Array.isArray(data.openings) ? data.openings.map((opening) => ({ ...opening })).filter(Boolean) : [];
-}
-
-function coerceWallPoint(point, y = 0) {
-  if (point?.isVector3) return point;
-  return new THREE.Vector3(Number(point?.x) || 0, Number(point?.y ?? y) || 0, Number(point?.z) || 0);
-}
-
 function applyEditOpeningHistory(action, direction) {
   const mesh = meshByModelerId(action.meshId);
   const wall = meshByModelerId(action.wallId);
-  const openingId = String(action.openingId);
-  const opening = wall?.userData?.wallPath?.openings?.find((item) => String(item?.id) === openingId);
+  const opening = wall?.userData?.wallPath?.openings?.find((item) => item.id === action.openingId);
   const payload = direction === "undo" ? action.before : action.after;
   if (!mesh || !wall || !opening || !payload) return;
   Object.assign(opening, cloneOpening(payload));
@@ -6112,24 +4157,10 @@ function applyEditOpeningHistory(action, direction) {
   refreshWallMeshGeometry(wall);
 }
 
-function applyStandaloneOpeningDimensionHistory(action, direction) {
-  const mesh = meshByModelerId(action.meshId);
-  const payload = direction === "undo" ? action.before : action.after;
-  if (!mesh || !payload || !isOpeningMesh(mesh)) return;
-  const tool = mesh.userData.authoringType === "window" ? "window" : "door";
-  const wallThickness = Math.max(0.03, Number(payload.wallThickness || state.authoring.wallThickness) || 0.2);
-  const objectDepth = Number(payload.objectDepth) || openingObjectDepth(tool, wallThickness);
-  const dims = { ...payload, wallThickness, objectDepth };
-  mesh.geometry?.dispose?.();
-  mesh.geometry = createOpeningObjectGeometry(tool, Math.max(0.1, Number(dims.width) || openingDefaults(tool).width), Math.max(0.1, Number(dims.height) || openingDefaults(tool).height), objectDepth);
-  mesh.userData.dimensions = dims;
-  updateBoxHelper();
-}
-
 function renderAuthoringProperties() {
   const hasModel = Boolean(state.modelRoot);
   const meshCount = state.meshes.length;
-  const toolLabel = authoringToolLabel();
+  const toolLabel = state.authoring.tool === "wall" ? "Wall" : state.authoring.tool === "slab" ? "Slab" : state.authoring.tool === "door" ? "Door" : state.authoring.tool === "window" ? "Window" : "Select";
   const activeStorey = getActiveStorey();
   const activeReference = getActiveReferencePlan();
   const refSize = activeReference
@@ -6144,7 +4175,7 @@ function renderAuthoringProperties() {
         <div class="prop-row"><div class="prop-label">Snap grille</div><div class="prop-value">${state.authoring.snap ? "activé" : "désactivé"} · ${formatNumber(state.authoring.gridStep)} m</div></div>
         <div class="prop-row"><div class="prop-label">Wall align</div><div class="prop-value">${wallAlignmentLabel()}</div></div>
       </div>
-      <div class="hint">MVP auteur : Wall affiche un ghost en live avec épaisseur réelle, alignement gauche/centre/droite et feedback de snap. Walls/Roof from slab génèrent des éléments propres depuis une dalle sélectionnée.</div>
+      <div class="hint">MVP auteur : Wall affiche un ghost en live avec épaisseur réelle, alignement gauche/centre/droite et feedback de snap. Walls from slab génère des murs propres sur le contour d’une dalle sélectionnée.</div>
     </div>
 
     <div class="prop-section">
@@ -6172,42 +4203,22 @@ function renderAuthoringProperties() {
       <div class="prop-grid">
         <div class="prop-row"><div class="prop-label">Wall hauteur</div><div class="prop-value"><input id="author-wall-height" type="number" min="0.1" step="0.1" value="${state.authoring.wallHeight}" /> m</div></div>
         <div class="prop-row"><div class="prop-label">Wall épaisseur</div><div class="prop-value"><input id="author-wall-thickness" type="number" min="0.01" step="0.01" value="${state.authoring.wallThickness}" /> m</div></div>
-        <div class="prop-row"><div class="prop-label">Cloison</div><div class="prop-value">ép. <input id="author-partition-thickness" type="number" min="0.01" step="0.005" value="${state.authoring.partitionThickness}" /> m · h <input id="author-partition-height" type="number" min="0.1" step="0.1" value="${state.authoring.partitionHeight}" /> m</div></div>
         <div class="prop-row"><div class="prop-label">Slab épaisseur</div><div class="prop-value"><input id="author-slab-thickness" type="number" min="0.01" step="0.01" value="${state.authoring.slabThickness}" /> m</div></div>
         <div class="prop-row"><div class="prop-label">Door</div><div class="prop-value"><input id="author-door-width" type="number" min="0.1" step="0.05" value="${state.authoring.doorWidth}" /> × <input id="author-door-height" type="number" min="0.1" step="0.05" value="${state.authoring.doorHeight}" /> m</div></div>
         <div class="prop-row"><div class="prop-label">Window</div><div class="prop-value"><input id="author-window-width" type="number" min="0.1" step="0.05" value="${state.authoring.windowWidth}" /> × <input id="author-window-height" type="number" min="0.1" step="0.05" value="${state.authoring.windowHeight}" /> m · sill <input id="author-window-sill" type="number" min="0" step="0.05" value="${state.authoring.windowSill}" /> m</div></div>
-        <div class="prop-row"><div class="prop-label">Roof type</div><div class="prop-value"><select id="author-roof-type"><option value="flat" ${state.authoring.roofType === "flat" ? "selected" : ""}>Flat</option><option value="shed" ${state.authoring.roofType === "shed" ? "selected" : ""}>Shed / monopente</option><option value="gable" ${state.authoring.roofType === "gable" ? "selected" : ""}>Gable / double pente</option></select></div></div>
-        <div class="prop-row"><div class="prop-label">Roof params</div><div class="prop-value">pitch <input id="author-roof-pitch" type="number" min="0" max="80" step="1" value="${state.authoring.roofPitch}" />° · thick <input id="author-roof-thickness" type="number" min="0.03" step="0.01" value="${state.authoring.roofThickness}" /> m · overhang <input id="author-roof-overhang" type="number" min="0" step="0.05" value="${state.authoring.roofOverhang}" /> m</div></div>
-        <div class="prop-row"><div class="prop-label">Roof base</div><div class="prop-value">égout <input id="author-roof-eaves-height" type="number" min="0.1" step="0.1" value="${state.authoring.roofEavesHeight}" /> m · ridge <select id="author-roof-ridge-direction"><option value="x" ${state.authoring.roofRidgeDirection === "x" ? "selected" : ""}>axe X</option><option value="z" ${state.authoring.roofRidgeDirection === "z" ? "selected" : ""}>axe Z</option></select></div></div>
-        <div class="prop-row"><div class="prop-label">Escalier</div><div class="prop-value">mode <select id="author-stair-turn-mode"><option value="landing" ${state.authoring.stairTurnMode === "landing" ? "selected" : ""}>quart tournant avec palier</option><option value="winder" ${state.authoring.stairTurnMode === "winder" ? "selected" : ""}>balancé</option></select> · largeur <input id="author-stair-width" type="number" min="0.2" step="0.05" value="${state.authoring.stairWidth}" /> m · marches <input id="author-stair-steps" type="number" min="1" step="1" value="${state.authoring.stairSteps}" /> · rise <input id="author-stair-rise" type="number" min="0.05" step="0.01" value="${state.authoring.stairRise}" /> m · palier <input id="author-stair-landing" type="number" min="0.2" step="0.05" value="${state.authoring.stairLanding}" /> m · balancé <input id="author-stair-winder-steps" type="number" min="2" step="1" value="${state.authoring.stairWinderSteps}" /> marches · trémie <select id="author-stair-auto-opening"><option value="1" ${state.authoring.stairAutoOpening ? "selected" : ""}>auto</option><option value="0" ${!state.authoring.stairAutoOpening ? "selected" : ""}>off</option></select></div></div>
       </div>
-      <div class="hint">Ces valeurs s’appliquent aux prochains objets créés. Les slabs auteur sont automatiquement rentrées sous l’épaisseur des murs pour éviter de voir leurs chants en façade. Les portes/fenêtres créent une ouverture dans le wall mesh. Roof crée un mesh IfcRoof depuis la slab sélectionnée. Escalier crée une géométrie fermée, suit plusieurs segments, propose palier quart tournant ou balancement, et peut percer automatiquement une trémie dans la slab supérieure.</div>
+      <div class="hint">Ces valeurs s’appliquent aux prochains objets créés. Les slabs auteur sont automatiquement rentrées sous l’épaisseur des murs pour éviter de voir leurs chants en façade. Les portes/fenêtres créent une ouverture dans le wall mesh.</div>
     </div>
   `;
 
   document.getElementById("author-wall-height")?.addEventListener("change", (event) => updateAuthoringSettingFromInput("wallHeight", event.target.value));
   document.getElementById("author-wall-thickness")?.addEventListener("change", (event) => updateAuthoringSettingFromInput("wallThickness", event.target.value));
-  document.getElementById("author-partition-thickness")?.addEventListener("change", (event) => updateAuthoringSettingFromInput("partitionThickness", event.target.value));
-  document.getElementById("author-partition-height")?.addEventListener("change", (event) => updateAuthoringSettingFromInput("partitionHeight", event.target.value));
   document.getElementById("author-slab-thickness")?.addEventListener("change", (event) => updateAuthoringSettingFromInput("slabThickness", event.target.value));
   document.getElementById("author-door-width")?.addEventListener("change", (event) => updateAuthoringSettingFromInput("doorWidth", event.target.value));
   document.getElementById("author-door-height")?.addEventListener("change", (event) => updateAuthoringSettingFromInput("doorHeight", event.target.value));
   document.getElementById("author-window-width")?.addEventListener("change", (event) => updateAuthoringSettingFromInput("windowWidth", event.target.value));
   document.getElementById("author-window-height")?.addEventListener("change", (event) => updateAuthoringSettingFromInput("windowHeight", event.target.value));
   document.getElementById("author-window-sill")?.addEventListener("change", (event) => updateAuthoringSettingFromInput("windowSill", event.target.value));
-  document.getElementById("author-roof-type")?.addEventListener("change", (event) => updateRoofSetting("roofType", event.target.value));
-  document.getElementById("author-roof-pitch")?.addEventListener("change", (event) => updateRoofSetting("roofPitch", event.target.value));
-  document.getElementById("author-roof-thickness")?.addEventListener("change", (event) => updateRoofSetting("roofThickness", event.target.value));
-  document.getElementById("author-roof-overhang")?.addEventListener("change", (event) => updateRoofSetting("roofOverhang", event.target.value));
-  document.getElementById("author-roof-eaves-height")?.addEventListener("change", (event) => updateRoofSetting("roofEavesHeight", event.target.value));
-  document.getElementById("author-roof-ridge-direction")?.addEventListener("change", (event) => updateRoofSetting("roofRidgeDirection", event.target.value));
-  document.getElementById("author-stair-width")?.addEventListener("change", (event) => updateAuthoringSettingFromInput("stairWidth", event.target.value));
-  document.getElementById("author-stair-steps")?.addEventListener("change", (event) => updateAuthoringSettingFromInput("stairSteps", event.target.value));
-  document.getElementById("author-stair-rise")?.addEventListener("change", (event) => updateAuthoringSettingFromInput("stairRise", event.target.value));
-  document.getElementById("author-stair-landing")?.addEventListener("change", (event) => updateAuthoringSettingFromInput("stairLanding", event.target.value));
-  document.getElementById("author-stair-turn-mode")?.addEventListener("change", (event) => { state.authoring.stairTurnMode = event.target.value === "winder" ? "winder" : "landing"; markDirty(); renderProperties(); });
-  document.getElementById("author-stair-winder-steps")?.addEventListener("change", (event) => updateAuthoringSettingFromInput("stairWinderSteps", event.target.value));
-  document.getElementById("author-stair-auto-opening")?.addEventListener("change", (event) => { state.authoring.stairAutoOpening = event.target.value !== "0"; markDirty(); renderProperties(); });
   document.getElementById("author-storey-height")?.addEventListener("change", (event) => updateAuthoringSettingFromInput("storeyHeight", event.target.value));
 }
 
@@ -6281,9 +4292,7 @@ function setTransformMode(mode) {
 }
 
 function setTransformSpace(space) {
-  const next = space === "local" ? "local" : "world";
-  state.transform.setSpace(next);
-  refreshTransformAttachment();
+  state.transform.setSpace(space);
   updateToolbarState();
 }
 
@@ -6291,9 +4300,8 @@ function updateToolbarState() {
   translateButton.classList.toggle("active", state.transform.getMode() === "translate");
   rotateButton.classList.toggle("active", state.transform.getMode() === "rotate");
   scaleButton.classList.toggle("active", state.transform.getMode() === "scale");
-  const transformSpace = currentTransformSpace();
-  localButton.classList.toggle("active", transformSpace === "local");
-  worldButton.classList.toggle("active", transformSpace === "world");
+  localButton.classList.toggle("active", state.transform.space === "local");
+  worldButton.classList.toggle("active", state.transform.space === "world");
 
   objectModeButton?.classList.toggle("active", !state.edit.active);
   editModeButton?.classList.toggle("active", state.edit.active);
@@ -6303,23 +4311,14 @@ function updateToolbarState() {
   boxSelectButton?.classList.toggle("active", state.edit.active && state.selectBox.armed);
   toolSelectButton?.classList.toggle("active", state.authoring.tool === "select");
   toolWallButton?.classList.toggle("active", state.authoring.tool === "wall");
-  toolPartitionButton?.classList.toggle("active", state.authoring.tool === "partition");
   toolSlabButton?.classList.toggle("active", state.authoring.tool === "slab");
   toolDoorButton?.classList.toggle("active", state.authoring.tool === "door");
   toolWindowButton?.classList.toggle("active", state.authoring.tool === "window");
-  toolRoofButton?.classList.toggle("active", state.authoring.tool === "roof");
-  toolStairButton?.classList.toggle("active", state.authoring.tool === "stair");
   if (wallAlignmentSelect && wallAlignmentSelect.value !== state.authoring.wallAlignment) wallAlignmentSelect.value = state.authoring.wallAlignment;
   if (wallsFromSlabButton) wallsFromSlabButton.disabled = !(state.selected?.userData?.authoringType === "slab") || state.edit.active;
-  if (roofFromSlabButton) roofFromSlabButton.disabled = !(state.selected?.userData?.authoringType === "slab") || state.edit.active;
   if (authoringStopButton) authoringStopButton.disabled = !isDrawingAuthoringTool();
   snapToggleButton?.classList.toggle("active", state.authoring.snap);
   xrayToggleButton?.classList.toggle("active", state.xray.active);
-  if (ifcSpacesToggleButton) {
-    ifcSpacesToggleButton.disabled = state.ifcOverlayCount <= 0;
-    ifcSpacesToggleButton.classList.toggle("active", state.ifcSpacesVisible && state.ifcOverlayCount > 0);
-    ifcSpacesToggleButton.textContent = state.ifcOverlayCount > 0 ? `IFC Spaces (${state.ifcOverlayCount})` : "IFC Spaces";
-  }
   helpToggleButton?.classList.toggle("active", shortcutsPanel?.classList.contains("open"));
   if (gridStepSelect) {
     const option = [...gridStepSelect.options].find((item) => Math.abs(Number(item.value) - Number(state.authoring.gridStep)) < 1e-9);
@@ -6328,7 +4327,7 @@ function updateToolbarState() {
   updateStoreySelect();
   if (previousStoreyButton) previousStoreyButton.disabled = !state.modelRoot || getActiveStoreyIndex() <= 0;
   if (nextStoreyButton) nextStoreyButton.disabled = !state.modelRoot || getActiveStoreyIndex() >= state.authoring.storeys.length - 1;
-  if (duplicateStoreyButton) duplicateStoreyButton.disabled = !state.modelRoot || !state.meshes.some((mesh) => mesh.userData?.storeyId === state.authoring.activeStoreyId && ["wall", "slab", "door", "window", "roof", "stair"].includes(mesh.userData?.authoringType));
+  if (duplicateStoreyButton) duplicateStoreyButton.disabled = !state.modelRoot || !state.meshes.some((mesh) => mesh.userData?.storeyId === state.authoring.activeStoreyId && ["wall", "slab", "door", "window"].includes(mesh.userData?.authoringType));
   calibratePlanButton?.classList.toggle("active", state.authoring.calibration.active);
 }
 
@@ -6343,25 +4342,6 @@ function setHelpPanelOpen(open) {
   shortcutsPanel?.classList.toggle("open", Boolean(open));
   shortcutsPanel?.setAttribute("aria-hidden", open ? "false" : "true");
   helpToggleButton?.classList.toggle("active", Boolean(open));
-}
-
-function setIfcSpacesVisible(visible) {
-  state.ifcSpacesVisible = Boolean(visible);
-  if (state.ifcOverlayGroup) state.ifcOverlayGroup.visible = state.ifcSpacesVisible;
-
-  if (!state.ifcSpacesVisible && state.selected?.userData?.smeltEditableGeneratedSpace) {
-    selectMesh(null);
-  }
-
-  updateToolbarState();
-  renderTree();
-  renderProperties();
-
-  if (state.ifcOverlayCount > 0) {
-    setStatus(`IFC Spaces ${state.ifcSpacesVisible ? "affichés" : "masqués"} · ${state.ifcOverlayCount} space(s) généré(s) restent éditables quand affichés.`, "ok");
-  } else {
-    setStatus("Aucun IFC Space généré chargé dans cette scène.", "warning");
-  }
 }
 
 function setXrayEnabled(enabled) {
@@ -6424,22 +4404,19 @@ function deleteSelectedMesh() {
   const mesh = state.selected;
   if (!mesh || !mesh.parent || mesh.userData?.__modelerOverlay) return false;
 
-  if (isOpeningMesh(mesh)) return deleteSelectedOpening(mesh);
-
   if (state.edit.active) setEditMode(false);
   const parent = mesh.parent;
   const index = parent.children.indexOf(mesh);
   const label = `Supprimer ${mesh.name || `Mesh_${mesh.userData.__modelerId}`}`;
 
-  const linkedOpenings = mesh.userData?.authoringType === "wall"
-    ? collectOpeningMeshesForWall(mesh)
-    : [];
-  const slabCut = mesh.userData?.authoringType === "stair" ? removeStairSlabCut(mesh) : null;
+  const linkedOpening = mesh.userData?.opening?.id
+    ? {
+        wallId: mesh.userData.opening.wallId,
+        opening: removeOpeningFromWall(meshByModelerId(mesh.userData.opening.wallId), mesh.userData.opening.id),
+      }
+    : null;
 
   selectMesh(null);
-  for (const openingMesh of linkedOpenings) {
-    if (openingMesh.mesh?.parent) openingMesh.mesh.parent.remove(openingMesh.mesh);
-  }
   parent.remove(mesh);
   if (state.modelRoot) indexMeshes(state.modelRoot);
   pushHistory({
@@ -6448,8 +4425,7 @@ function deleteSelectedMesh() {
     mesh,
     parent,
     index,
-    linkedOpenings,
-    slabCut,
+    linkedOpening,
   });
   renderTree();
   renderProperties();
@@ -6459,61 +4435,13 @@ function deleteSelectedMesh() {
   return true;
 }
 
-function isOpeningMesh(mesh) {
-  return mesh && (mesh.userData?.authoringType === "door" || mesh.userData?.authoringType === "window");
-}
-
-function deleteSelectedOpening(mesh) {
-  if (!mesh || !mesh.parent) return false;
-  if (state.edit.active) setEditMode(false);
-
-  const link = getOpeningLinkForMesh(mesh);
-  if (!link?.wall || !link?.opening) {
-    // Better to fail loudly than to remove the visible door/window while leaving
-    // a permanent cut in the host wall. This usually means the asset lost its
-    // wall/opening metadata during a round-trip.
-    setStatus("Impossible de supprimer proprement cet ouvrant : mur hôte introuvable. Essaie de recharger le projet ou de sélectionner l’ouvrant depuis le tree.", "warning");
-    return false;
-  }
-
-  const parent = mesh.parent;
-  const index = parent.children.indexOf(mesh);
-  const label = `Supprimer ${mesh.name || openingToolLabel(mesh.userData.authoringType)}`;
-  const wallId = link.wall.userData.__modelerId;
-  const opening = cloneOpening(link.opening);
-
-  removeOpeningFromWall(link.wall, opening.id);
-  selectMesh(null);
-  parent.remove(mesh);
-  if (state.modelRoot) indexMeshes(state.modelRoot);
-
-  pushHistory({
-    type: "deleteOpening",
-    label,
-    mesh,
-    parent,
-    index,
-    wallId,
-    opening,
-  });
-
-  renderTree();
-  renderProperties();
-  markDirty();
-  updateUiEnabled();
-  setStatus(`${escapeHtml(label)} · mur restauré · Ctrl/Cmd+Z pour annuler.`, "ok");
-  return true;
-}
-
 function applyDeleteMeshHistory(action, direction) {
   const mesh = action.mesh;
   const parent = action.parent || state.modelRoot || ensureAuthoringRoot();
   if (!mesh || !parent) return;
 
-  const linkedOpenings = Array.isArray(action.linkedOpenings) ? action.linkedOpenings : [];
-
   if (direction === "undo") {
-    if (action.slabCut) applySlabCutSnapshot(action.slabCut, "before");
+    if (action.linkedOpening?.opening) addOpeningToWall(meshByModelerId(action.linkedOpening.wallId), action.linkedOpening.opening);
     if (!mesh.parent) {
       parent.add(mesh);
       if (Number.isFinite(action.index) && action.index >= 0 && action.index < parent.children.length - 1) {
@@ -6524,27 +4452,9 @@ function applyDeleteMeshHistory(action, direction) {
         }
       }
     }
-    for (const item of linkedOpenings) {
-      if (!item?.mesh) continue;
-      const itemParent = item.parent || parent;
-      if (!item.mesh.parent) {
-        itemParent.add(item.mesh);
-        if (Number.isFinite(item.index) && item.index >= 0 && item.index < itemParent.children.length - 1) {
-          const currentIndex = itemParent.children.indexOf(item.mesh);
-          if (currentIndex >= 0) {
-            itemParent.children.splice(currentIndex, 1);
-            itemParent.children.splice(item.index, 0, item.mesh);
-          }
-        }
-      }
-      if (state.xray.active) applyXrayToMesh(item.mesh);
-    }
     if (state.xray.active) applyXrayToMesh(mesh);
   } else if (mesh.parent) {
-    if (action.slabCut) applySlabCutSnapshot(action.slabCut, "after");
-    for (const item of linkedOpenings) {
-      if (item?.mesh?.parent) item.mesh.parent.remove(item.mesh);
-    }
+    if (action.linkedOpening?.opening) removeOpeningFromWall(meshByModelerId(action.linkedOpening.wallId), action.linkedOpening.opening.id);
     if (state.selected === mesh) selectMesh(null);
     mesh.parent.remove(mesh);
   }
@@ -6553,75 +4463,6 @@ function applyDeleteMeshHistory(action, direction) {
     indexMeshes(state.modelRoot);
     refreshAuthoredWallMiters();
   }
-}
-
-function applyDeleteOpeningHistory(action, direction) {
-  const mesh = action.mesh;
-  const parent = action.parent || state.modelRoot || ensureAuthoringRoot();
-  const wall = meshByModelerId(action.wallId);
-  const opening = cloneOpening(action.opening);
-  if (!mesh || !parent || !wall || !opening) return;
-
-  if (direction === "undo") {
-    addOpeningToWall(wall, opening);
-    if (!mesh.parent) {
-      parent.add(mesh);
-      if (Number.isFinite(action.index) && action.index >= 0 && action.index < parent.children.length - 1) {
-        const currentIndex = parent.children.indexOf(mesh);
-        if (currentIndex >= 0) {
-          parent.children.splice(currentIndex, 1);
-          parent.children.splice(action.index, 0, mesh);
-        }
-      }
-    }
-    updateOpeningMeshFromWallOpening(mesh, wall, opening);
-    if (state.xray.active) applyXrayToMesh(mesh);
-  } else {
-    removeOpeningFromWall(wall, opening.id);
-    if (state.selected === mesh) selectMesh(null);
-    if (mesh.parent) mesh.parent.remove(mesh);
-  }
-
-  if (state.modelRoot) {
-    indexMeshes(state.modelRoot);
-    refreshWallMeshGeometry(wall);
-  }
-}
-
-function applyDeleteStoreyHistory(action, direction) {
-  if (!action?.storey) return;
-  const storeyId = action.storey.id;
-  const root = state.modelRoot || ensureAuthoringRoot();
-  const records = Array.isArray(action.meshRecords) ? action.meshRecords : [];
-
-  if (direction === "undo") {
-    if (!state.authoring.storeys.some((storey) => storey.id === storeyId)) {
-      const insertAt = THREE.MathUtils.clamp(Number(action.index) || 0, 0, state.authoring.storeys.length);
-      state.authoring.storeys.splice(insertAt, 0, { ...action.storey });
-    }
-    restoreReferencePlanFromHistory(action.referenceRecord);
-    for (const record of records) {
-      addChildBackAt(record, root);
-      if (state.xray.active && record.mesh) applyXrayToMesh(record.mesh);
-    }
-    state.authoring.activeStoreyId = storeyId;
-  } else {
-    if (state.selected?.userData?.storeyId === storeyId) selectMesh(null);
-    for (const record of records) {
-      if (record?.mesh?.parent) record.mesh.parent.remove(record.mesh);
-    }
-    if (action.referenceRecord?.ref?.mesh?.parent) action.referenceRecord.ref.mesh.parent.remove(action.referenceRecord.ref.mesh);
-    state.authoring.references.delete(storeyId);
-    state.authoring.storeys = (state.authoring.storeys || []).filter((storey) => storey.id !== storeyId);
-    state.authoring.activeStoreyId = getFallbackStoreyIdAfterDeletion(Number(action.index) || 0, action.activeAfter);
-  }
-
-  updateAuthoringPlaneElevation();
-  if (state.modelRoot) {
-    indexMeshes(state.modelRoot);
-    refreshAuthoredWallMiters();
-  }
-  updateReferenceVisibilityAndElevation();
 }
 
 function beginObjectTransformDrag() {
@@ -6724,9 +4565,7 @@ function applyGeometryEntries(mesh, entries) {
 }
 
 function meshByModelerId(id) {
-  if (id == null) return null;
-  const wanted = String(id);
-  return state.meshes.find((mesh) => String(mesh.userData.__modelerId) === wanted) || null;
+  return state.meshes.find((mesh) => mesh.userData.__modelerId === id) || null;
 }
 
 
@@ -6735,17 +4574,13 @@ function refreshAuthoredWallMiters() {
   const eps = Math.max(0.005, (Number(state.authoring.gridStep) || 0.1) * 0.35);
 
   for (const wall of walls) {
-    // GLB extras / localStorage round-trips deserialize THREE.Vector3 values as
-    // plain objects. Normalize before the miter pass so old projects and IFC→GLB
-    // snapshots don't crash on `.clone()` and don't generate invalid wall joins.
-    normalizeWallPathForRoundTrip(wall.userData.wallPath, wall);
     wall.userData.wallPath.prev = null;
     wall.userData.wallPath.next = null;
   }
 
   for (const wall of walls) {
     const data = wall.userData.wallPath;
-    const storeyId = wall.userData.storeyId || data.storeyId || null;
+    const storeyId = wall.userData.storeyId;
     const prev = findConnectedWallForEndpoint(walls, wall, data.start, "start", eps, storeyId);
     const next = findConnectedWallForEndpoint(walls, wall, data.end, "end", eps, storeyId);
     if (prev) data.prev = prev;
@@ -6756,22 +4591,16 @@ function refreshAuthoredWallMiters() {
 }
 
 function findConnectedWallForEndpoint(walls, wall, endpoint, endpointKind, eps, storeyId) {
-  const endpointPoint = coerceWallPoint(endpoint, wall?.userData?.wallPath?.baseElevation ?? wall?.userData?.storeyElevation ?? 0);
   let best = null;
   for (const other of walls) {
-    const data = other.userData?.wallPath;
-    if (!data || other === wall) continue;
-    const otherStoreyId = other.userData?.storeyId || data.storeyId || null;
-    if (otherStoreyId !== storeyId) continue;
-
-    const atStart = coerceWallPoint(data.start, data.baseElevation);
-    const atEnd = coerceWallPoint(data.end, data.baseElevation);
+    if (other === wall || other.userData.storeyId !== storeyId) continue;
+    const data = other.userData.wallPath;
     const candidates = [
-      { at: atStart, opposite: atEnd },
-      { at: atEnd, opposite: atStart },
+      { at: data.start, opposite: data.end },
+      { at: data.end, opposite: data.start },
     ];
     for (const candidate of candidates) {
-      const distance = Math.hypot(endpointPoint.x - candidate.at.x, endpointPoint.z - candidate.at.z);
+      const distance = Math.hypot(endpoint.x - candidate.at.x, endpoint.z - candidate.at.z);
       if (distance <= eps && (!best || distance < best.distance)) {
         best = { distance, point: candidate.opposite.clone() };
       }
@@ -6820,16 +4649,6 @@ function applyHistoryAction(action, direction) {
     return;
   }
 
-  if (action.type === "deleteOpening") {
-    applyDeleteOpeningHistory(action, direction);
-    return;
-  }
-
-  if (action.type === "deleteStorey") {
-    applyDeleteStoreyHistory(action, direction);
-    return;
-  }
-
   if (action.type === "createOpening") {
     applyCreateOpeningHistory(action, direction);
     return;
@@ -6837,11 +4656,6 @@ function applyHistoryAction(action, direction) {
 
   if (action.type === "editOpening") {
     applyEditOpeningHistory(action, direction);
-    return;
-  }
-
-  if (action.type === "standaloneOpeningDimension") {
-    applyStandaloneOpeningDimensionHistory(action, direction);
     return;
   }
 
@@ -6859,11 +4673,9 @@ function applyCreateMeshHistory(action, direction) {
   if (!mesh) return;
   const parent = action.parent || state.modelRoot || ensureAuthoringRoot();
   if (direction === "undo") {
-    if (action.slabCut) applySlabCutSnapshot(action.slabCut, "before");
     if (mesh.parent) mesh.parent.remove(mesh);
   } else if (!mesh.parent) {
     parent.add(mesh);
-    if (action.slabCut) applySlabCutSnapshot(action.slabCut, "after");
   }
   if (state.modelRoot) {
     indexMeshes(state.modelRoot);
@@ -6903,13 +4715,12 @@ function applyCreateOpeningHistory(action, direction) {
 }
 
 function updateAfterHistory(action, prefix) {
-  if (action.type === "deleteMesh" || action.type === "deleteOpening" || action.type === "deleteStorey") {
+  if (action.type === "deleteMesh") {
     if (state.modelRoot) {
       indexMeshes(state.modelRoot);
       refreshAuthoredWallMiters();
     }
-    if (action.type === "deleteStorey") selectMesh(null);
-    else selectMesh(action.mesh?.parent ? action.mesh : null);
+    selectMesh(action.mesh?.parent ? action.mesh : null);
     renderTree();
     renderProperties();
     markDirty();
@@ -6986,20 +4797,15 @@ function updateUiEnabled() {
   if (newSceneButton) newSceneButton.disabled = false;
   if (toolSelectButton) toolSelectButton.disabled = false;
   if (toolWallButton) toolWallButton.disabled = state.edit.active;
-  if (toolPartitionButton) toolPartitionButton.disabled = state.edit.active;
   if (toolSlabButton) toolSlabButton.disabled = state.edit.active;
   if (toolDoorButton) toolDoorButton.disabled = state.edit.active || !state.modelRoot;
   if (toolWindowButton) toolWindowButton.disabled = state.edit.active || !state.modelRoot;
-  if (toolRoofButton) toolRoofButton.disabled = state.edit.active || !state.modelRoot;
-  if (toolStairButton) toolStairButton.disabled = state.edit.active;
   if (wallAlignmentSelect) wallAlignmentSelect.disabled = state.edit.active;
   if (wallsFromSlabButton) wallsFromSlabButton.disabled = !(state.selected?.userData?.authoringType === "slab") || state.edit.active;
-  if (roofFromSlabButton) roofFromSlabButton.disabled = !(state.selected?.userData?.authoringType === "slab") || state.edit.active;
   if (snapToggleButton) snapToggleButton.disabled = false;
   if (gridStepSelect) gridStepSelect.disabled = false;
   if (newStoreyButton) newStoreyButton.disabled = !hasModel;
-  if (duplicateStoreyButton) duplicateStoreyButton.disabled = !hasModel || !state.meshes.some((mesh) => mesh.userData?.storeyId === state.authoring.activeStoreyId && ["wall", "slab", "door", "window", "roof", "stair"].includes(mesh.userData?.authoringType));
-  if (deleteStoreyButton) deleteStoreyButton.disabled = !hasModel || (state.authoring.storeys || []).length <= 1;
+  if (duplicateStoreyButton) duplicateStoreyButton.disabled = !hasModel || !state.meshes.some((mesh) => mesh.userData?.storeyId === state.authoring.activeStoreyId && ["wall", "slab", "door", "window"].includes(mesh.userData?.authoringType));
   if (previousStoreyButton) previousStoreyButton.disabled = !hasModel || getActiveStoreyIndex() <= 0;
   if (nextStoreyButton) nextStoreyButton.disabled = !hasModel || getActiveStoreyIndex() >= state.authoring.storeys.length - 1;
   if (storeySelect) storeySelect.disabled = !hasModel;
@@ -7187,8 +4993,6 @@ async function convertEditedGlbToIfc() {
       return;
     }
 
-    const project = await persistConvertedProject(glbBlob, ifcText, ifcFileName);
-
     downloadBlob(new Blob([ifcText], { type: "application/x-step" }), ifcFileName);
     const editSuffix = editInfo.applied
       ? ` · ${editInfo.applied} reclassification(s) réappliquée(s)${editInfo.errors ? ` · ${editInfo.errors} erreur(s)` : ""}`
@@ -7196,9 +5000,7 @@ async function convertEditedGlbToIfc() {
 
     setStatus(
       `IFC généré depuis le GLB modifié : <strong>${escapeHtml(ifcFileName)}</strong>\n` +
-      `${total} éléments · ${storeys} étage${storeys > 1 ? "s" : ""} · ${spaces} space${spaces > 1 ? "s" : ""}${editSuffix}.\n` +
-      `Projet local lié : tu peux ouvrir cet IFC dans le viewer puis revenir au modeler avec le bon GLB source. ` +
-      `<a class="link-button" href="/viewer.html?project=${encodeURIComponent(project.id)}">Ouvrir dans le viewer lié →</a>`,
+      `${total} éléments · ${storeys} étage${storeys > 1 ? "s" : ""} · ${spaces} space${spaces > 1 ? "s" : ""}${editSuffix}.`,
       "ok"
     );
   } catch (error) {
@@ -7312,14 +5114,6 @@ function cloneSingleMaterialForExport(material) {
 function copyExportUserData(userData = {}) {
   const out = {};
   for (const [key, value] of Object.entries(userData)) {
-    // Keep the stable editor id across local round-trips. Door/window meshes use
-    // this id to relink to their host wall after opening IFC → viewer → modeler.
-    // Other private fields are runtime-only and should not be baked into GLB.
-    if (key === "__modelerId") {
-      out.__modelerId = value;
-      out.modelerId = value;
-      continue;
-    }
     if (key.startsWith("__")) continue;
     if (typeof value === "function") continue;
     try {

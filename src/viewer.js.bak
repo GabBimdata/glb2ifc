@@ -1,13 +1,8 @@
 import * as THREE from "three";
 import * as OBC from "@thatopen/components";
 import * as FRAGS from "@thatopen/fragments";
-import * as WEBIFC from "web-ifc";
-import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
 import { openTypePicker } from './ifc-type-picker.js';
-import { makeProjectId, saveProject, getProject, updateProject, findProjectForIfcFile, findProjectForIfcText, setLastProjectId, editsMapToArray, editsArrayToMap, textToIfcFile, safeFileName } from './project-store.js';
-
-const EDITABLE_GLB_GENERATOR_VERSION = "web-ifc-local-transforms-origin-v4";
-const EDITABLE_GLB_SOURCE = "web-ifc-editable-snapshot";
+import { getProject, updateProject, findProjectForIfcFile, setLastProjectId, getLastProjectId, editsMapToArray, editsArrayToMap, textToIfcFile, safeFileName } from './project-store.js';
 
 const container = document.getElementById("container");
 const dropzone = document.getElementById("dropzone");
@@ -34,8 +29,6 @@ const state = {
   ifcLoader: null,
   caster: null,
   lastModelObject: null,
-  prebuildingEditableProject: false,
-  editableProjectBuildToken: 0,
   activeModel: null,
   activeTreeTab: "spatial",
   initialized: false,
@@ -53,8 +46,6 @@ const state = {
   editMode: false,
   pendingEdits: new Map(),       // localId -> { fromType, toType }
   lastIfcText: null,             // texte brut du dernier IFC chargé
-  lastIfcBuffer: null,           // Uint8Array brut du dernier IFC chargé, utilisé pour créer le GLB éditable
-  lastEditableGlbExportInfo: null,
   ifcCatalog: null,  // { types, categories } from /api/ifc-catalog
   lastEditedBlobUrl: null,
   projectId: null,
@@ -1204,17 +1195,11 @@ fragments.list.onItemSet.add(async ({ value: model }) => {
   await buildTree();
 
   // Les objets Fragments ne sont pas toujours prêts immédiatement.
-  // On attend deux frames avant de créer les edges et de capturer la géométrie
-  // éditable. La capture se fait au chargement de l’IFC, pas au clic
-  // “Modifier géométrie”, pour éviter les états viewer/LOD instables.
+  // On attend deux frames avant de créer les edges.
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
       addEdgesToObject(model.object);
       fragments.core.update(true);
-      maybePrebuildEditableProjectForLoadedIfc().catch((error) => {
-        console.error(error);
-        setStatus(`IFC chargé, mais impossible de préparer le GLB éditable : ${escapeHtml(error.message || error)}`, "error");
-      });
     });
   });
 });
@@ -1343,8 +1328,6 @@ async function clearModels() {
   state.fragments.core.update(true);
 
   state.lastIfcText = null;
-  state.lastIfcBuffer = null;
-  state.lastEditableGlbExportInfo = null;
   state.editMode = false;
   document.body.classList.remove('edit-mode');
   if (editModeButton) {
@@ -1373,34 +1356,7 @@ function updateDownloadCurrentIfcButtonState() {
   }
 }
 
-
-function isIfcEditableSnapshotProject(project) {
-  if (!project) return false;
-  const source = String(project.source || project.createdFrom || "").toLowerCase();
-  if (source.includes("viewer-ifc") || source.includes("web-ifc-editable")) return true;
-  if (String(project.glbFileName || "").includes(".editable-from-ifc")) return true;
-  return false;
-}
-
-function needsEditableGlbRebuild(project) {
-  if (!project?.glbBlob) return true;
-  if (!isIfcEditableSnapshotProject(project)) return false;
-
-  // Any GLB generated before this version can still contain georeferenced
-  // Float32 positions or a viewer fallback snapshot. Those must be rebuilt from
-  // the IFC buffer instead of reused from IndexedDB.
-  if (project.editableGlbGeneratorVersion !== EDITABLE_GLB_GENERATOR_VERSION) return true;
-  if (project.source !== EDITABLE_GLB_SOURCE) return true;
-  if (project.editableGlbPrecisionRebased !== true) return true;
-  return false;
-}
-
-function linkedProjectHasFreshEditableGlb(project) {
-  return Boolean(project?.glbBlob) && !needsEditableGlbRebuild(project);
-}
-
-
-async function attachProjectContextForFile(fileName, ifcText = "") {
+async function attachProjectContextForFile(fileName) {
   if (!fileName || !/\.ifc$/i.test(fileName)) {
     updateModelerButtonState();
     return;
@@ -1409,29 +1365,25 @@ async function attachProjectContextForFile(fileName, ifcText = "") {
   try {
     let project = state.projectId ? await getProject(state.projectId) : null;
 
-    if (!project && ifcText) {
-      project = await findProjectForIfcText(ifcText);
-    }
-
     if (!project) {
       project = await findProjectForIfcFile(fileName);
     }
 
-    if (linkedProjectHasFreshEditableGlb(project)) {
+    if (!project) {
+      const lastId = getLastProjectId();
+      const last = lastId ? await getProject(lastId) : null;
+      if (last && last.glbBlob && last.ifcFileName) {
+        const a = String(last.ifcFileName).replace(/\.ifc$/i, '').toLowerCase();
+        const b = String(fileName).replace(/\.ifc$/i, '').toLowerCase();
+        if (a === b || a.replace(/\.edited$/i, '') === b.replace(/\.edited$/i, '')) project = last;
+      }
+    }
+
+    if (project) {
       state.projectId = project.id;
       state.project = project;
       setLastProjectId(project.id);
       setStatus(`Modèle chargé : ${fileName} · GLB source lié au projet local.`, "ok");
-    } else if (project) {
-      state.projectId = project.id;
-      state.project = project;
-      setLastProjectId(project.id);
-      if (project?.glbBlob && needsEditableGlbRebuild(project)) {
-        setStatus(`Modèle chargé : ${fileName} · ancien GLB éditable détecté, régénération en précision locale…`, "ok");
-      }
-    } else {
-      state.projectId = null;
-      state.project = null;
     }
   } catch (error) {
     console.warn("Project context lookup failed:", error);
@@ -1475,823 +1427,23 @@ async function persistCurrentProjectState() {
 async function ensureLinkedProjectForModeler() {
   let project = state.projectId ? await getProject(state.projectId) : null;
 
-  if (!project && state.lastIfcText) {
-    project = await findProjectForIfcText(state.lastIfcText);
-  }
-
   if (!project && state.currentFileName) {
     project = await findProjectForIfcFile(state.currentFileName);
   }
 
-  if (needsEditableGlbRebuild(project)) {
-    project = await createEditableProjectFromCurrentIfcSnapshot(project || null);
+  if (!project) {
+    const last = await getProject(getLastProjectId());
+    if (last?.glbBlob) project = last;
+  }
+
+  if (!project?.glbBlob) {
+    throw new Error("Aucun GLB source n’est lié à cet IFC. Ouvre le viewer depuis le bouton créé après la conversion GLB → IFC, ou recharge l’IFC généré dans le même navigateur.");
   }
 
   state.projectId = project.id;
   state.project = project;
   setLastProjectId(project.id);
   return project;
-}
-
-async function maybePrebuildEditableProjectForLoadedIfc() {
-  if (!state.lastIfcText || !state.lastModelObject) return null;
-  if (state.prebuildingEditableProject) return state.project || null;
-
-  const token = ++state.editableProjectBuildToken;
-  state.prebuildingEditableProject = true;
-  try {
-    let project = state.projectId ? await getProject(state.projectId) : null;
-    if (!project && state.lastIfcText) project = await findProjectForIfcText(state.lastIfcText);
-    if (!project && state.currentFileName) project = await findProjectForIfcFile(state.currentFileName);
-
-    if (linkedProjectHasFreshEditableGlb(project)) {
-      state.projectId = project.id;
-      state.project = project;
-      setLastProjectId(project.id);
-      return project;
-    }
-
-    // Inspiration: web-ifc-viewer prépare un glTF depuis la géométrie IFC au moment
-    // de l’import, puis réutilise ce glTF comme modèle. Smelt fait pareil ici :
-    // on bake un GLB éditable immédiatement après le chargement Fragments.
-    const created = await createEditableProjectFromCurrentIfcSnapshot(project || null, { silent: true });
-    if (token !== state.editableProjectBuildToken) return created;
-    state.projectId = created.id;
-    state.project = created;
-    setLastProjectId(created.id);
-    updateModelerButtonState();
-    updateDownloadCurrentIfcButtonState();
-    setStatus(`Modèle chargé : ${escapeHtml(state.currentFileName || "model.ifc")} · GLB éditable prêt.`, "ok");
-    return created;
-  } finally {
-    state.prebuildingEditableProject = false;
-  }
-}
-
-async function createEditableProjectFromCurrentIfcSnapshot(existingProject = null, options = {}) {
-  if (!state.lastIfcText) {
-    throw new Error("Charge un IFC avant de créer un projet éditable.");
-  }
-
-  if (!options.silent) setStatus("Préparation d’un GLB éditable depuis l’IFC chargé…");
-  const glbBlob = await exportCurrentViewerModelAsGlbBlob();
-  const ifcFileName = safeFileName(state.currentFileName || existingProject?.ifcFileName || "model.ifc", "model.ifc");
-  const glbFileName = safeFileName(ifcFileName.replace(/\.ifc(zip)?$/i, "") + ".editable-from-ifc.glb", "model.editable-from-ifc.glb");
-  const exportInfo = state.lastEditableGlbExportInfo || {};
-  const patch = {
-    glbBlob,
-    glbFileName,
-    ifcText: state.lastIfcText,
-    ifcFileName,
-    edits: editsMapToArray(state.pendingEdits),
-    lastOpenedIn: "viewer",
-    source: exportInfo.source || EDITABLE_GLB_SOURCE,
-    editableGlbGeneratorVersion: exportInfo.generatorVersion || EDITABLE_GLB_GENERATOR_VERSION,
-    editableGlbPrecisionRebased: exportInfo.precisionRebased === true,
-    editableGlbCreatedAt: new Date().toISOString(),
-  };
-
-  const project = existingProject?.id
-    ? await updateProject(existingProject.id, patch)
-    : await saveProject({
-        id: makeProjectId(),
-        createdFrom: EDITABLE_GLB_SOURCE,
-        ...patch,
-      });
-
-  if (!options.silent) setStatus(`Projet éditable créé depuis l’IFC · ${formatBytes(glbBlob.size)} de géométrie GLB.`, "ok");
-  return project;
-}
-
-async function exportCurrentViewerModelAsGlbBlob() {
-  // The Fragments scene is not a reliable source for editing snapshots: in some
-  // versions the visible triangles live outside model.object, so traverse() can
-  // find no Mesh even though the viewer is displaying the IFC. Build the editable
-  // GLB directly from the raw IFC with web-ifc, at load time, then keep the old
-  // viewer-scene snapshot only as a fallback for non-IFC fragment sources.
-  state.lastEditableGlbExportInfo = null;
-  if (state.lastIfcBuffer?.byteLength) {
-    const blob = await exportIfcBufferAsEditableGlbBlob(state.lastIfcBuffer);
-    state.lastEditableGlbExportInfo = {
-      source: EDITABLE_GLB_SOURCE,
-      generatorVersion: EDITABLE_GLB_GENERATOR_VERSION,
-      precisionRebased: true,
-    };
-    return blob;
-  }
-
-  const snapshot = buildEditableGlbSnapshotFromViewerModel();
-  if (!snapshot.children.length) {
-    disposeSnapshotObject(snapshot);
-    throw new Error("Impossible de créer un GLB éditable : aucune géométrie exploitable n’a été trouvée dans le viewer ni dans le buffer IFC brut.");
-  }
-
-  try {
-    const blob = await exportSnapshotRootToGlbBlob(snapshot);
-    state.lastEditableGlbExportInfo = {
-      source: "viewer-ifc-snapshot",
-      generatorVersion: "viewer-fallback",
-      precisionRebased: false,
-    };
-    return blob;
-  } finally {
-    disposeSnapshotObject(snapshot);
-  }
-}
-
-async function exportIfcBufferAsEditableGlbBlob(ifcBuffer) {
-  const ifcAPI = new WEBIFC.IfcAPI();
-  if (typeof ifcAPI.SetWasmPath === "function") {
-    // Same WASM source as the viewer loader. This keeps the direct web-ifc
-    // conversion independent from the Fragments display pipeline.
-    ifcAPI.SetWasmPath("https://unpkg.com/web-ifc@0.0.77/", true);
-  }
-
-  await ifcAPI.Init();
-  if (typeof ifcAPI.SetLogLevel === "function" && WEBIFC.LogLevel?.LOG_LEVEL_WARN !== undefined) {
-    ifcAPI.SetLogLevel(WEBIFC.LogLevel.LOG_LEVEL_WARN);
-  }
-
-  let modelID = null;
-  const root = new THREE.Group();
-  root.name = safeFileName((state.currentFileName || "ifc-model").replace(/\.ifc(zip)?$/i, ""), "IFC_Model");
-  root.userData.smeltSource = EDITABLE_GLB_SOURCE;
-  root.userData.smeltGeneratorVersion = EDITABLE_GLB_GENERATOR_VERSION;
-  root.userData.ifcFileName = state.currentFileName || "model.ifc";
-
-  try {
-    const data = ifcBuffer instanceof Uint8Array ? ifcBuffer : new Uint8Array(ifcBuffer);
-    modelID = ifcAPI.OpenModel(data, { COORDINATE_TO_ORIGIN: true, USE_FAST_BOOLS: true });
-    const flatMeshes = ifcAPI.LoadAllGeometry(modelID);
-    const precisionOrigin = computeWebIfcEditableOrigin(ifcAPI, modelID, flatMeshes);
-    if (precisionOrigin) {
-      root.userData.smeltPrecisionRebased = true;
-      root.userData.smeltCoordinateOrigin = precisionOrigin;
-      root.userData.smeltCoordinateOriginUnit = "m";
-      root.userData.smeltCoordinateOriginNote = "World coordinates subtracted before writing Float32 GLB positions to preserve edit precision.";
-    }
-    const count = webIfcVectorSize(flatMeshes);
-    for (let i = 0; i < count; i++) {
-      const flatMesh = webIfcVectorGet(flatMeshes, i);
-      appendWebIfcFlatMeshToSnapshotRoot(ifcAPI, modelID, flatMesh, root, precisionOrigin);
-    }
-  } finally {
-    if (modelID !== null && typeof ifcAPI.CloseModel === "function") ifcAPI.CloseModel(modelID);
-  }
-
-  if (!root.children.length) {
-    disposeSnapshotObject(root);
-    throw new Error("web-ifc n’a retourné aucune géométrie triangulée exploitable pour cet IFC.");
-  }
-
-  try {
-    return exportSnapshotRootToGlbBlob(root);
-  } finally {
-    disposeSnapshotObject(root);
-  }
-}
-
-function webIfcVectorSize(vector) {
-  if (!vector) return 0;
-  if (typeof vector.size === "function") return vector.size();
-  if (typeof vector.length === "number") return vector.length;
-  return 0;
-}
-
-function webIfcVectorGet(vector, index) {
-  if (!vector) return null;
-  if (typeof vector.get === "function") return vector.get(index);
-  return vector[index] || null;
-}
-
-
-function computeWebIfcEditableOrigin(ifcAPI, modelID, flatMeshes) {
-  // GLB accessors are Float32. With georeferenced IFC coordinates like
-  // x=1_842_000, z=-5_173_000, Float32 only keeps steps around 12–50 cm.
-  // Compute a local origin in JS Number space, then subtract it before writing
-  // any Float32 buffer. This keeps modeler geometry precise while preserving the
-  // original world offset in node extras for IFC re-export.
-  const bounds = {
-    min: [Infinity, Infinity, Infinity],
-    max: [-Infinity, -Infinity, -Infinity],
-  };
-  const count = webIfcVectorSize(flatMeshes);
-  for (let i = 0; i < count; i++) {
-    const flatMesh = webIfcVectorGet(flatMeshes, i);
-    const geometries = flatMesh?.geometries;
-    const geometryCount = webIfcVectorSize(geometries);
-    for (let j = 0; j < geometryCount; j++) {
-      const placed = webIfcVectorGet(geometries, j);
-      if (!placed) continue;
-      const geometry = ifcAPI.GetGeometry(modelID, placed.geometryExpressID);
-      expandBoundsWithWebIfcPlacedGeometry(ifcAPI, geometry, placed.flatTransformation, bounds);
-    }
-  }
-  if (!bounds.min.every(Number.isFinite) || !bounds.max.every(Number.isFinite)) return null;
-  const size = bounds.max.map((value, index) => value - bounds.min[index]);
-  if (!size.every((value) => Number.isFinite(value) && value >= 0)) return null;
-  return {
-    x: (bounds.min[0] + bounds.max[0]) * 0.5,
-    y: bounds.min[1],
-    z: (bounds.min[2] + bounds.max[2]) * 0.5,
-  };
-}
-
-function expandBoundsWithWebIfcPlacedGeometry(ifcAPI, geometry, flatTransformation, bounds) {
-  if (!geometry || !bounds) return;
-  const vertices = ifcAPI.GetVertexArray(geometry.GetVertexData(), geometry.GetVertexDataSize());
-  const indices = ifcAPI.GetIndexArray(geometry.GetIndexData(), geometry.GetIndexDataSize());
-  if (!vertices?.length || !indices?.length) return;
-
-  const matrix = webIfcMatrixFromFlatTransformation(flatTransformation);
-  const position = new THREE.Vector3();
-  const indexCount = Math.floor(indices.length / 3) * 3;
-  for (let i = 0; i < indexCount; i++) {
-    const vertexIndex = Number(indices[i]);
-    const source = vertexIndex * 6;
-    if (source + 2 >= vertices.length) continue;
-    position.set(vertices[source], vertices[source + 1], vertices[source + 2]).applyMatrix4(matrix);
-    if (!Number.isFinite(position.x) || !Number.isFinite(position.y) || !Number.isFinite(position.z)) continue;
-    bounds.min[0] = Math.min(bounds.min[0], position.x);
-    bounds.min[1] = Math.min(bounds.min[1], position.y);
-    bounds.min[2] = Math.min(bounds.min[2], position.z);
-    bounds.max[0] = Math.max(bounds.max[0], position.x);
-    bounds.max[1] = Math.max(bounds.max[1], position.y);
-    bounds.max[2] = Math.max(bounds.max[2], position.z);
-  }
-}
-
-function webIfcMatrixFromFlatTransformation(flatTransformation) {
-  const matrix = new THREE.Matrix4();
-  if (Array.isArray(flatTransformation) || ArrayBuffer.isView(flatTransformation)) {
-    matrix.fromArray(Array.from(flatTransformation));
-  }
-  return matrix;
-}
-
-function applyWebIfcPlacedTransformToMesh(mesh, flatTransformation, precisionOrigin = null) {
-  const matrix = webIfcMatrixFromFlatTransformation(flatTransformation);
-  if (precisionOrigin) {
-    matrix.elements[12] -= Number(precisionOrigin.x) || 0;
-    matrix.elements[13] -= Number(precisionOrigin.y) || 0;
-    matrix.elements[14] -= Number(precisionOrigin.z) || 0;
-  }
-  matrix.decompose(mesh.position, mesh.quaternion, mesh.scale);
-  mesh.updateMatrix();
-  mesh.updateMatrixWorld(true);
-}
-
-function appendWebIfcFlatMeshToSnapshotRoot(ifcAPI, modelID, flatMesh, root, precisionOrigin = null) {
-  if (!flatMesh) return;
-  const expressID = Number(flatMesh.expressID);
-  const geometries = flatMesh.geometries;
-  const geometryCount = webIfcVectorSize(geometries);
-  if (!geometryCount) return;
-
-  const typeName = webIfcElementTypeName(ifcAPI, modelID, expressID);
-  const itemName = webIfcElementDisplayName(ifcAPI, modelID, expressID, typeName);
-
-  for (let i = 0; i < geometryCount; i++) {
-    const placed = webIfcVectorGet(geometries, i);
-    if (!placed) continue;
-    const geometry = ifcAPI.GetGeometry(modelID, placed.geometryExpressID);
-    const meshGeometry = webIfcPlacedGeometryToBufferGeometry(ifcAPI, geometry);
-    if (!meshGeometry) continue;
-
-    const mesh = new THREE.Mesh(meshGeometry, webIfcPlacedGeometryMaterial(placed, typeName));
-    applyWebIfcPlacedTransformToMesh(mesh, placed.flatTransformation, precisionOrigin);
-    mesh.name = safeFileName(`${itemName}${geometryCount > 1 ? `_${String(i + 1).padStart(2, "0")}` : ""}`, `IfcElement_${expressID}_${i + 1}`);
-    mesh.userData.smeltSource = EDITABLE_GLB_SOURCE;
-    mesh.userData.smeltGeneratorVersion = EDITABLE_GLB_GENERATOR_VERSION;
-    mesh.userData.smeltLocalTransformPreserved = true;
-    mesh.userData.expressID = expressID;
-    mesh.userData.ifcType = typeName;
-    mesh.userData.ifcHint = typeName;
-    if (precisionOrigin) {
-      mesh.userData.smeltPrecisionRebased = true;
-      mesh.userData.smeltCoordinateOrigin = precisionOrigin;
-    }
-    root.add(mesh);
-  }
-}
-
-function webIfcElementTypeName(ifcAPI, modelID, expressID) {
-  try {
-    const typeCode = ifcAPI.GetLineType(modelID, expressID);
-    const name = ifcAPI.GetNameFromTypeCode?.(typeCode);
-    if (name) return String(name).replace(/^IFC/i, "Ifc");
-  } catch {
-    // ignore
-  }
-  return "IfcElement";
-}
-
-function webIfcElementDisplayName(ifcAPI, modelID, expressID, typeName = "IfcElement") {
-  try {
-    const line = ifcAPI.GetLine(modelID, expressID, false);
-    const name = line?.Name?.value || line?.LongName?.value || line?.GlobalId?.value || "";
-    if (name) return `${typeName}_${expressID}_${String(name).trim()}`;
-  } catch {
-    // ignore
-  }
-  return `${typeName}_${expressID}`;
-}
-
-function webIfcPlacedGeometryToBufferGeometry(ifcAPI, geometry) {
-  if (!geometry) return null;
-  const vertices = ifcAPI.GetVertexArray(geometry.GetVertexData(), geometry.GetVertexDataSize());
-  const indices = ifcAPI.GetIndexArray(geometry.GetIndexData(), geometry.GetIndexDataSize());
-  if (!vertices?.length || !indices?.length) return null;
-
-  // web-ifc vertices are packed as x,y,z,nx,ny,nz. Export a non-indexed mesh:
-  // larger, but robust and independent from the internal geometry buffers.
-  const triangleIndexCount = Math.floor(indices.length / 3) * 3;
-  if (triangleIndexCount <= 0) return null;
-
-  const outPositions = new Float32Array(triangleIndexCount * 3);
-  const outNormals = new Float32Array(triangleIndexCount * 3);
-
-  let out = 0;
-  for (let i = 0; i < triangleIndexCount; i++) {
-    const vertexIndex = Number(indices[i]);
-    const source = vertexIndex * 6;
-    if (source + 2 >= vertices.length) continue;
-
-    // Keep the geometry in the IFC item's local coordinates and put the
-    // placement in the mesh transform. Baking flatTransformation into vertices
-    // destroys the object's orientation in Three.js, so the modeler can only
-    // display a large world-aligned AABB. Preserving the transform gives true
-    // object-space bboxes and local gizmo orientation.
-    outPositions[out] = vertices[source];
-    outPositions[out + 1] = vertices[source + 1];
-    outPositions[out + 2] = vertices[source + 2];
-
-    if (source + 5 < vertices.length) {
-      outNormals[out] = vertices[source + 3];
-      outNormals[out + 1] = vertices[source + 4];
-      outNormals[out + 2] = vertices[source + 5];
-    }
-    out += 3;
-  }
-
-  const geometryToExport = new THREE.BufferGeometry();
-  geometryToExport.setAttribute("position", new THREE.BufferAttribute(outPositions, 3));
-  geometryToExport.setAttribute("normal", new THREE.BufferAttribute(outNormals, 3));
-  if (!outNormals.some((value) => Math.abs(value) > 1e-8)) geometryToExport.computeVertexNormals();
-  geometryToExport.computeBoundingBox();
-  geometryToExport.computeBoundingSphere();
-  geometryToExport.clearGroups?.();
-  geometryToExport.addGroup?.(0, triangleIndexCount, 0);
-  return geometryToExport;
-}
-
-function webIfcPlacedGeometryMaterial(placed, typeName = "IfcElement") {
-  const color = placed?.color;
-  const materialColor = color && Number.isFinite(Number(color.x))
-    ? new THREE.Color(Number(color.x), Number(color.y), Number(color.z))
-    : new THREE.Color(defaultIfcTypeColor(typeName));
-  const opacity = color && Number.isFinite(Number(color.w)) ? Math.max(0.15, Math.min(1, Number(color.w))) : 1;
-  return new THREE.MeshStandardMaterial({
-    color: materialColor,
-    opacity,
-    transparent: opacity < 0.999,
-    roughness: 0.82,
-    metalness: 0.02,
-    side: THREE.DoubleSide,
-  });
-}
-
-function defaultIfcTypeColor(typeName = "") {
-  const type = String(typeName).toLowerCase();
-  if (type.includes("wall")) return 0xd8c7af;
-  if (type.includes("slab")) return 0xb6bcc4;
-  if (type.includes("window")) return 0xdbeafe;
-  if (type.includes("door")) return 0x8a6a4f;
-  if (type.includes("roof")) return 0x7f4f3a;
-  if (type.includes("stair")) return 0xc9b99d;
-  if (type.includes("space")) return 0x74b9ff;
-  return 0xcfd6de;
-}
-
-function exportGltfWithExporter(exporter, input, options) {
-  if (typeof exporter.parseAsync === "function") return exporter.parseAsync(input, options);
-  return new Promise((resolve, reject) => {
-    exporter.parse(input, resolve, reject, options);
-  });
-}
-
-function buildEditableGlbSnapshotFromViewerModel() {
-  const source = state.lastModelObject;
-  if (!source) {
-    throw new Error("Aucun modèle IFC n’est actuellement chargé dans le viewer.");
-  }
-
-  source.updateWorldMatrix(true, true);
-
-  const root = new THREE.Group();
-  root.name = safeFileName((state.currentFileName || "ifc-model").replace(/\.ifc(zip)?$/i, ""), "IFC_Model");
-  root.userData.smeltSource = "viewer-ifc-snapshot";
-  root.userData.ifcFileName = state.currentFileName || "model.ifc";
-
-  let meshIndex = 0;
-  const instanceMatrix = new THREE.Matrix4();
-  const worldMatrix = new THREE.Matrix4();
-
-  source.traverse((object) => {
-    if (!object?.isMesh || !object.geometry) return;
-    if (object.userData?.__modelerOverlay) return;
-
-    object.updateWorldMatrix(true, false);
-    const baseName = snapshotMeshBaseName(object, meshIndex + 1);
-
-    if (object.isInstancedMesh) {
-      const count = Math.max(0, Number(object.count) || 0);
-      for (let i = 0; i < count; i++) {
-        object.getMatrixAt(i, instanceMatrix);
-        worldMatrix.copy(object.matrixWorld).multiply(instanceMatrix);
-        const geometry = object.geometry.clone();
-        geometry.applyMatrix4(worldMatrix);
-        const snapshotGeometry = finalizeSnapshotGeometry(geometry);
-        if (!snapshotGeometry) {
-          geometry.dispose?.();
-          continue;
-        }
-        if (snapshotGeometry !== geometry) geometry.dispose?.();
-        const mesh = new THREE.Mesh(snapshotGeometry, cloneSnapshotMaterial(object.material));
-        mesh.name = `${baseName}_Instance_${String(i + 1).padStart(4, "0")}`;
-        mesh.userData.smeltSource = "viewer-ifc-snapshot";
-        root.add(mesh);
-        meshIndex += 1;
-      }
-      return;
-    }
-
-    const geometry = object.geometry.clone();
-    geometry.applyMatrix4(object.matrixWorld);
-    const snapshotGeometry = finalizeSnapshotGeometry(geometry);
-    if (!snapshotGeometry) {
-      geometry.dispose?.();
-      return;
-    }
-    if (snapshotGeometry !== geometry) geometry.dispose?.();
-    const mesh = new THREE.Mesh(snapshotGeometry, cloneSnapshotMaterial(object.material));
-    mesh.name = baseName;
-    mesh.userData.smeltSource = "viewer-ifc-snapshot";
-    root.add(mesh);
-    meshIndex += 1;
-  });
-
-  return root;
-}
-
-function snapshotMeshBaseName(object, fallbackIndex) {
-  const raw = String(object?.name || "").trim();
-  const useful = raw && !/^mesh$/i.test(raw) && !/^object_?\d*$/i.test(raw);
-  return safeFileName(useful ? raw : `IfcMesh_${String(fallbackIndex).padStart(4, "0")}`, `IfcMesh_${fallbackIndex}`);
-}
-
-function finalizeSnapshotGeometry(geometry) {
-  if (!geometry?.getAttribute?.("position")) return null;
-
-  // IFC viewer geometries can contain interleaved attributes, draw groups or
-  // material indices that are fine for display but unsafe for GLB export/editing.
-  // Build a fresh, plain, non-indexed BufferGeometry so every snapshot mesh is
-  // independent, closed when its source is closed, and exportable without custom
-  // attribute classes.
-  const sourcePosition = geometry.getAttribute("position");
-  const sourceIndex = geometry.getIndex?.();
-  const sourceCount = sourceIndex?.count ?? sourcePosition?.count ?? 0;
-  if (!sourcePosition || sourceCount <= 0) return null;
-
-  const triangleCount = Math.floor(sourceCount / 3);
-  if (triangleCount <= 0) return null;
-
-  const positions = new Float32Array(triangleCount * 9);
-  let out = 0;
-  for (let triangle = 0; triangle < triangleCount; triangle++) {
-    for (let corner = 0; corner < 3; corner++) {
-      const sourceVertex = sourceIndex ? sourceIndex.getX(triangle * 3 + corner) : triangle * 3 + corner;
-      positions[out++] = sourcePosition.getX(sourceVertex);
-      positions[out++] = sourcePosition.getY(sourceVertex);
-      positions[out++] = sourcePosition.getZ(sourceVertex);
-    }
-  }
-
-  const clean = new THREE.BufferGeometry();
-  clean.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-  clean.computeVertexNormals();
-  clean.computeBoundingBox();
-  clean.computeBoundingSphere();
-  clean.clearGroups?.();
-  clean.addGroup?.(0, positions.length / 3, 0);
-  clean.userData = { ...(geometry.userData || {}) };
-  return clean;
-}
-
-function cloneSnapshotMaterial(material) {
-  // Do not clone viewer/web-ifc materials directly: they may contain custom
-  // textures, shader uniforms, or partially defined material arrays that are not
-  // safe for GLTFExporter. Keep the visible color when available, then create a
-  // plain MeshStandardMaterial with no texture dependency.
-  const source = Array.isArray(material) ? material.find(Boolean) : material;
-  const color = source?.color?.isColor ? source.color.clone() : new THREE.Color(0xcfd6de);
-  const roughness = Number.isFinite(Number(source?.roughness)) ? Number(source.roughness) : 0.82;
-  const metalness = Number.isFinite(Number(source?.metalness)) ? Number(source.metalness) : 0.02;
-  const opacity = Number.isFinite(Number(source?.opacity)) ? Number(source.opacity) : 1;
-  const clone = new THREE.MeshStandardMaterial({
-    color,
-    roughness,
-    metalness,
-    opacity: Math.max(0.15, Math.min(1, opacity)),
-    transparent: opacity < 0.999,
-    side: THREE.DoubleSide,
-    depthWrite: true,
-  });
-  clone.name = safeFileName(source?.name || "SnapshotMaterial", "SnapshotMaterial");
-  clone.needsUpdate = true;
-  return clone;
-}
-
-
-function exportSnapshotRootToGlbBlob(root) {
-  const meshes = [];
-  root.traverse((object) => {
-    if (object?.isMesh && object.geometry?.getAttribute?.("position")) meshes.push(object);
-  });
-  if (!meshes.length) throw new Error("Snapshot GLB vide : aucun mesh exportable.");
-
-  const json = {
-    asset: { version: "2.0", generator: "Smelt IFC snapshot exporter" },
-    scene: 0,
-    scenes: [{ nodes: [0] }],
-    nodes: [{ name: safeGltfName(root.name || "IFC_Model"), children: [], extras: snapshotExtrasToGltf(root.userData) }],
-    meshes: [],
-    materials: [],
-    buffers: [{ byteLength: 0 }],
-    bufferViews: [],
-    accessors: [],
-  };
-  const binaryParts = [];
-  let byteOffset = 0;
-
-  const appendTypedArray = (typedArray, target) => {
-    const source = typedArray?.buffer?.slice(
-      typedArray.byteOffset || 0,
-      (typedArray.byteOffset || 0) + (typedArray.byteLength || 0),
-    );
-    const padding = (4 - ((source?.byteLength || 0) % 4)) % 4;
-    const padded = new Uint8Array((source?.byteLength || 0) + padding);
-    if (source) padded.set(new Uint8Array(source), 0);
-    const bufferViewIndex = json.bufferViews.length;
-    json.bufferViews.push({
-      buffer: 0,
-      byteOffset,
-      byteLength: source?.byteLength || 0,
-      target,
-    });
-    binaryParts.push(padded);
-    byteOffset += padded.byteLength;
-    return bufferViewIndex;
-  };
-
-  for (const object of meshes) {
-    object.updateWorldMatrix?.(true, false);
-    const geometry = object.geometry;
-    const position = geometry.getAttribute("position");
-    if (!position?.array || !Number.isFinite(position.count) || position.count <= 0) continue;
-
-    const normal = geometry.getAttribute("normal");
-    const index = geometry.getIndex?.();
-    const positionArray = makeFloat32AttributeArray(position, 3);
-    const normalArray = normal ? makeFloat32AttributeArray(normal, 3) : computeFlatNormalsFromPositions(positionArray);
-    const indexArray = index ? makeUint32AttributeArray(index, position.count) : makeSequentialIndices(position.count);
-
-    const positionView = appendTypedArray(positionArray, 34962);
-    const normalView = appendTypedArray(normalArray, 34962);
-    const indexView = appendTypedArray(indexArray, 34963);
-
-    const positionAccessor = json.accessors.length;
-    json.accessors.push({
-      bufferView: positionView,
-      componentType: 5126,
-      count: positionArray.length / 3,
-      type: "VEC3",
-      min: attributeMin(positionArray, 3),
-      max: attributeMax(positionArray, 3),
-    });
-
-    const normalAccessor = json.accessors.length;
-    json.accessors.push({
-      bufferView: normalView,
-      componentType: 5126,
-      count: normalArray.length / 3,
-      type: "VEC3",
-    });
-
-    const indexAccessor = json.accessors.length;
-    json.accessors.push({
-      bufferView: indexView,
-      componentType: 5125,
-      count: indexArray.length,
-      type: "SCALAR",
-    });
-
-    const materialIndex = json.materials.length;
-    json.materials.push(snapshotMaterialToGltf(object.material));
-
-    const meshIndex = json.meshes.length;
-    json.meshes.push({
-      name: safeGltfName(object.name || `IfcMesh_${meshIndex + 1}`),
-      primitives: [{
-        attributes: { POSITION: positionAccessor, NORMAL: normalAccessor },
-        indices: indexAccessor,
-        material: materialIndex,
-        mode: 4,
-      }],
-    });
-
-    const nodeIndex = json.nodes.length;
-    const node = {
-      name: safeGltfName(object.name || `IfcMesh_${nodeIndex}`),
-      mesh: meshIndex,
-      extras: snapshotExtrasToGltf({ smeltSource: "viewer-ifc-snapshot", ...(object.userData || {}) }),
-    };
-    const localMatrix = object.matrix?.clone?.() || new THREE.Matrix4();
-    if (!matrixIsApproximatelyIdentity(localMatrix)) {
-      node.matrix = Array.from(localMatrix.elements).map((value) => Number(value.toFixed(10)));
-    }
-    json.nodes.push(node);
-    json.nodes[0].children.push(nodeIndex);
-  }
-
-  if (!json.nodes[0].children.length) throw new Error("Snapshot GLB vide : aucune géométrie valide après nettoyage.");
-  json.buffers[0].byteLength = byteOffset;
-  return makeGlbBlob(json, binaryParts, byteOffset);
-}
-
-function matrixIsApproximatelyIdentity(matrix, epsilon = 1e-10) {
-  const identity = new THREE.Matrix4();
-  const a = matrix?.elements || [];
-  const b = identity.elements;
-  for (let i = 0; i < 16; i++) {
-    if (Math.abs((Number(a[i]) || 0) - b[i]) > epsilon) return false;
-  }
-  return true;
-}
-
-function makeGlbBlob(json, binaryParts, binaryByteLength) {
-  const encoder = new TextEncoder();
-  const jsonText = JSON.stringify(json);
-  const jsonBytesRaw = encoder.encode(jsonText);
-  const jsonPadding = (4 - (jsonBytesRaw.byteLength % 4)) % 4;
-  const jsonBytes = new Uint8Array(jsonBytesRaw.byteLength + jsonPadding);
-  jsonBytes.set(jsonBytesRaw, 0);
-  for (let i = jsonBytesRaw.byteLength; i < jsonBytes.length; i++) jsonBytes[i] = 0x20;
-
-  const binaryChunk = new Uint8Array(binaryByteLength);
-  let offset = 0;
-  for (const part of binaryParts) {
-    binaryChunk.set(part, offset);
-    offset += part.byteLength;
-  }
-
-  const totalLength = 12 + 8 + jsonBytes.byteLength + 8 + binaryChunk.byteLength;
-  const header = new ArrayBuffer(12);
-  const headerView = new DataView(header);
-  headerView.setUint32(0, 0x46546c67, true); // glTF
-  headerView.setUint32(4, 2, true);
-  headerView.setUint32(8, totalLength, true);
-
-  const jsonHeader = new ArrayBuffer(8);
-  const jsonHeaderView = new DataView(jsonHeader);
-  jsonHeaderView.setUint32(0, jsonBytes.byteLength, true);
-  jsonHeaderView.setUint32(4, 0x4e4f534a, true); // JSON
-
-  const binHeader = new ArrayBuffer(8);
-  const binHeaderView = new DataView(binHeader);
-  binHeaderView.setUint32(0, binaryChunk.byteLength, true);
-  binHeaderView.setUint32(4, 0x004e4942, true); // BIN\0
-
-  return new Blob([header, jsonHeader, jsonBytes, binHeader, binaryChunk], { type: "model/gltf-binary" });
-}
-
-function makeFloat32AttributeArray(attribute, itemSize = 3) {
-  const array = new Float32Array(attribute.count * itemSize);
-  for (let i = 0; i < attribute.count; i++) {
-    array[i * itemSize] = attribute.getX(i);
-    if (itemSize > 1) array[i * itemSize + 1] = attribute.getY(i);
-    if (itemSize > 2) array[i * itemSize + 2] = attribute.getZ(i);
-    if (itemSize > 3) array[i * itemSize + 3] = attribute.getW(i);
-  }
-  return array;
-}
-
-function makeUint32AttributeArray(attribute, fallbackCount = 0) {
-  if (!attribute || !Number.isFinite(attribute.count) || attribute.count <= 0) return makeSequentialIndices(fallbackCount);
-  const array = new Uint32Array(attribute.count);
-  for (let i = 0; i < attribute.count; i++) array[i] = attribute.getX(i);
-  return array;
-}
-
-function makeSequentialIndices(count) {
-  const array = new Uint32Array(Math.max(0, Number(count) || 0));
-  for (let i = 0; i < array.length; i++) array[i] = i;
-  return array;
-}
-
-function computeFlatNormalsFromPositions(positions) {
-  const normals = new Float32Array(positions.length);
-  const a = new THREE.Vector3();
-  const b = new THREE.Vector3();
-  const c = new THREE.Vector3();
-  const cb = new THREE.Vector3();
-  const ab = new THREE.Vector3();
-  for (let i = 0; i < positions.length; i += 9) {
-    a.set(positions[i], positions[i + 1], positions[i + 2]);
-    b.set(positions[i + 3], positions[i + 4], positions[i + 5]);
-    c.set(positions[i + 6], positions[i + 7], positions[i + 8]);
-    cb.subVectors(c, b);
-    ab.subVectors(a, b);
-    cb.cross(ab).normalize();
-    for (let corner = 0; corner < 3; corner++) {
-      normals[i + corner * 3] = cb.x;
-      normals[i + corner * 3 + 1] = cb.y;
-      normals[i + corner * 3 + 2] = cb.z;
-    }
-  }
-  return normals;
-}
-
-function attributeMin(array, itemSize) {
-  const min = Array(itemSize).fill(Infinity);
-  for (let i = 0; i < array.length; i += itemSize) {
-    for (let j = 0; j < itemSize; j++) min[j] = Math.min(min[j], array[i + j]);
-  }
-  return min.map((value) => Number.isFinite(value) ? value : 0);
-}
-
-function attributeMax(array, itemSize) {
-  const max = Array(itemSize).fill(-Infinity);
-  for (let i = 0; i < array.length; i += itemSize) {
-    for (let j = 0; j < itemSize; j++) max[j] = Math.max(max[j], array[i + j]);
-  }
-  return max.map((value) => Number.isFinite(value) ? value : 0);
-}
-
-
-function snapshotExtrasToGltf(userData = {}) {
-  const extras = {};
-  for (const [key, value] of Object.entries(userData || {})) {
-    if (key.startsWith("__")) continue;
-    if (typeof value === "function") continue;
-    if (value === undefined) continue;
-    try {
-      JSON.stringify(value);
-      extras[key] = value;
-    } catch {
-      // ignore non-serializable metadata
-    }
-  }
-  return extras;
-}
-
-function snapshotMaterialToGltf(material) {
-  const source = Array.isArray(material) ? material.find(Boolean) : material;
-  const color = source?.color?.isColor ? source.color : new THREE.Color(0xcfd6de);
-  const opacity = Number.isFinite(Number(source?.opacity)) ? Math.max(0.15, Math.min(1, Number(source.opacity))) : 1;
-  const roughness = Number.isFinite(Number(source?.roughness)) ? Number(source.roughness) : 0.82;
-  const metalness = Number.isFinite(Number(source?.metalness)) ? Number(source.metalness) : 0.02;
-  const gltfMaterial = {
-    name: safeGltfName(source?.name || "SnapshotMaterial"),
-    pbrMetallicRoughness: {
-      baseColorFactor: [color.r, color.g, color.b, opacity],
-      metallicFactor: metalness,
-      roughnessFactor: roughness,
-    },
-    doubleSided: true,
-  };
-  if (opacity < 0.999) {
-    gltfMaterial.alphaMode = "BLEND";
-    gltfMaterial.alphaCutoff = 0.01;
-  }
-  return gltfMaterial;
-}
-
-function safeGltfName(value) {
-  return String(value || "Object").replace(/[\u0000-\u001f\u007f]/g, "").slice(0, 120) || "Object";
-}
-
-function disposeSnapshotMaterial(material) {
-  if (!material) return;
-  const materials = Array.isArray(material) ? material : [material];
-  for (const entry of materials) entry?.dispose?.();
-}
-
-function disposeSnapshotObject(root) {
-  root?.traverse?.((object) => {
-    object.geometry?.dispose?.();
-    disposeSnapshotMaterial(object.material);
-  });
 }
 
 async function openModelerForCurrentProject() {
@@ -2329,7 +1481,7 @@ async function loadProjectFromUrl() {
     setLastProjectId(project.id);
 
     state.restoringProjectEdits = true;
-    await loadFile(textToIfcFile(project.ifcText, project.ifcFileName || "model.ifc"), { fromProject: true, project });
+    await loadFile(textToIfcFile(project.ifcText, project.ifcFileName || "model.ifc"));
     state.restoringProjectEdits = false;
 
     restorePendingEditsFromProject(project);
@@ -2345,19 +1497,10 @@ async function loadProjectFromUrl() {
   }
 }
 
-async function loadFile(file, options = {}) {
+async function loadFile(file) {
   if (!state.initialized) {
     setStatus("Le viewer n’est pas encore prêt.", "error");
     return;
-  }
-
-  const fromProject = Boolean(options.fromProject);
-  const linkedProject = options.project || null;
-
-  if (!fromProject) {
-    state.projectId = null;
-    state.project = null;
-    state.loadedFromModeler = false;
   }
 
   const lower = file.name.toLowerCase();
@@ -2368,13 +1511,7 @@ async function loadFile(file, options = {}) {
   }
 
   try {
-    state.editableProjectBuildToken += 1;
     await clearModels();
-
-    if (fromProject && linkedProject) {
-      state.projectId = linkedProject.id;
-      state.project = linkedProject;
-    }
 
     setStatus(`Chargement de ${file.name} (${formatBytes(file.size)})…`);
 
@@ -2397,7 +1534,6 @@ async function loadFile(file, options = {}) {
      state.ifcIndex = parseIfcText(ifcText, file.name);
      state.selectableIds = allDisplayableIfcElementIds(state.ifcIndex);
      state.lastIfcText = ifcText;     // ← garde le source
-     state.lastIfcBuffer = new Uint8Array(buffer); // ← géométrie brute pour GLB éditable web-ifc
      resetPendingEdits();              // ← reset des edits sur nouveau modèle
      if (editModeButton) editModeButton.disabled = false;
    }
@@ -2418,7 +1554,7 @@ async function loadFile(file, options = {}) {
     resetButton.disabled = false;
     updateSelectionButtons();
     setStatus(`Modèle chargé : ${file.name}`, "ok");
-    await attachProjectContextForFile(file.name, state.lastIfcText);
+    await attachProjectContextForFile(file.name);
     if (state.project?.edits?.length) restorePendingEditsFromProject(state.project);
     updateModelerButtonState();
     updateDownloadCurrentIfcButtonState();
