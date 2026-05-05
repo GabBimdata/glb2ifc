@@ -306,6 +306,7 @@
   <div class="header-actions">
     <a class="viewer-link" href="/modeler.html">Ouvrir Smelt Modeler →</a>
     <a class="viewer-link" href="/viewer.html">Ouvrir Smelt Viewer →</a>
+    <button class="viewer-link" id="plan-toggle" type="button">Plan → IFC ↓</button>
   </div>
 </header>
 
@@ -321,6 +322,43 @@
   <div class="status" id="status"></div>
 
 </main>
+
+<!-- ─── Plan → GLB → IFC panel ─── -->
+<section class="converter plan-section" id="plan-section" style="display:none; margin-top: 2rem;">
+  <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:1rem;">
+    <h2 style="font-size:1.25rem; font-weight:400; color:var(--fg);">
+      Plan image <span class="arrow">→</span> IFC
+    </h2>
+    <button class="viewer-link" id="plan-close" type="button" style="padding:0.4rem 0.7rem; font-size:0.75rem;">Fermer ×</button>
+  </div>
+
+  <label class="dropzone" id="plan-dropzone" for="plan-file-input">
+    <div class="dropzone-icon">⊞</div>
+    <div class="dropzone-text">Glisse un plan image ici</div>
+    <div class="dropzone-hint">PNG / JPG — fond clair, murs sombres (type export CAD)</div>
+    <input type="file" id="plan-file-input" accept="image/*" style="display:none">
+  </label>
+
+  <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.75rem; margin-top:1rem;">
+    <label style="font-size:0.8rem; color:var(--fg-dim);">
+      Échelle (mm / pixel)
+      <input type="number" id="plan-scale" value="10" min="0.01" step="0.01"
+             style="width:100%; margin-top:0.25rem; padding:0.5rem; background:var(--bg-elev); border:1px solid var(--border); color:var(--fg); border-radius:4px; font:inherit;">
+    </label>
+    <label style="font-size:0.8rem; color:var(--fg-dim);">
+      Hauteur des murs (m)
+      <input type="number" id="plan-height" value="2.5" min="0.1" step="0.1"
+             style="width:100%; margin-top:0.25rem; padding:0.5rem; background:var(--bg-elev); border:1px solid var(--border); color:var(--fg); border-radius:4px; font:inherit;">
+    </label>
+  </div>
+
+  <button type="button" id="plan-go" disabled
+          style="margin-top:1rem; width:100%; padding:0.75rem; background:var(--accent); color:var(--bg); border:0; border-radius:4px; font:inherit; cursor:pointer; font-weight:500; opacity:0.4;">
+    Sélectionne d'abord un plan
+  </button>
+
+  <div class="status" id="plan-status" style="margin-top:1rem;"></div>
+</section>
 
 <footer>
   Smelt &middot; runs locally on <code>localhost:3737</code><br>
@@ -599,6 +637,143 @@ async function handleFile(file) {
     showStatus(`<strong>Erreur :</strong> ${err.message}`, 'error');
   }
 }
+
+// ─── Plan → GLB → IFC ───
+
+const planSection = document.getElementById('plan-section');
+const planToggle = document.getElementById('plan-toggle');
+const planClose = document.getElementById('plan-close');
+const planDropzone = document.getElementById('plan-dropzone');
+const planFileInput = document.getElementById('plan-file-input');
+const planGo = document.getElementById('plan-go');
+const planStatus = document.getElementById('plan-status');
+let planFile = null;
+
+planToggle.addEventListener('click', () => {
+  const visible = planSection.style.display !== 'none';
+  planSection.style.display = visible ? 'none' : 'block';
+  planToggle.textContent = visible ? 'Plan → IFC ↓' : 'Plan → IFC ↑';
+});
+
+planClose.addEventListener('click', () => {
+  planSection.style.display = 'none';
+  planToggle.textContent = 'Plan → IFC ↓';
+});
+
+// Drag & drop on plan dropzone
+['dragenter', 'dragover'].forEach(evt => {
+  planDropzone.addEventListener(evt, (e) => { e.preventDefault(); planDropzone.classList.add('drag-over'); });
+});
+['dragleave', 'drop'].forEach(evt => {
+  planDropzone.addEventListener(evt, (e) => { e.preventDefault(); planDropzone.classList.remove('drag-over'); });
+});
+planDropzone.addEventListener('drop', (e) => { if (e.dataTransfer.files[0]) setPlanFile(e.dataTransfer.files[0]); });
+planFileInput.addEventListener('change', (e) => { if (e.target.files[0]) setPlanFile(e.target.files[0]); });
+
+function setPlanFile(f) {
+  planFile = f;
+  planGo.disabled = false;
+  planGo.style.opacity = '1';
+  planGo.textContent = `Détecter les murs de ${f.name}`;
+}
+
+function showPlanStatus(html, type = 'processing') {
+  planStatus.className = 'status visible ' + type;
+  planStatus.innerHTML = html;
+}
+
+planGo.addEventListener('click', async () => {
+  if (!planFile) return;
+  planGo.disabled = true;
+  showPlanStatus('<span class="spinner"></span>Détection des murs en cours...', 'processing');
+
+  const scale = document.getElementById('plan-scale').value;
+  const height = document.getElementById('plan-height').value;
+
+  const fd = new FormData();
+  fd.append('image', planFile);
+  fd.append('scale_mm_per_px', scale);
+  fd.append('wall_height_m', height);
+
+  try {
+    // Step 1: plan → GLB
+    const r1 = await fetch('/plan2glb', { method: 'POST', body: fd });
+    if (!r1.ok) {
+      const err = await r1.json().catch(() => ({ error: 'Erreur inconnue' }));
+      throw new Error(err.error + (err.detail ? ' — ' + err.detail : ''));
+    }
+
+    const wallCount = r1.headers.get('X-Wall-Count') || '?';
+    const glbBlob = await r1.blob();
+
+    showPlanStatus(`<span class="spinner"></span>${wallCount} mur(s) détecté(s) — conversion IFC en cours...`, 'processing');
+
+    // Step 2: GLB → IFC via the existing converter
+    const fd2 = new FormData();
+    fd2.append('glb', new File([glbBlob], 'plan.glb', { type: 'model/gltf-binary' }));
+
+    const r2 = await fetch('/api/convert', { method: 'POST', body: fd2 });
+    if (!r2.ok) {
+      const err = await r2.json().catch(() => ({ error: 'Erreur conversion IFC' }));
+      throw new Error(err.error);
+    }
+
+    const stats = JSON.parse(r2.headers.get('X-Conversion-Stats') || '{}');
+    const ifcBlob = await r2.blob();
+    const outputName = planFile.name.replace(/\.[^.]+$/, '') + '.ifc';
+
+    // Save project
+    const project = await saveProject({
+      id: makeProjectId(),
+      glbBlob: new File([glbBlob], 'plan.glb'),
+      glbFileName: 'plan.glb',
+      ifcText: await blobToText(ifcBlob),
+      ifcFileName: outputName,
+      edits: [],
+      source: 'plan-upload',
+    });
+
+    // Download IFC
+    const url = URL.createObjectURL(ifcBlob);
+    const a = document.createElement('a');
+    a.href = url; a.download = outputName;
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    showPlanStatus(`
+      <div class="status-line">
+        <span class="status-label">Statut</span>
+        <span class="status-value" style="color:var(--success)">✓ ${wallCount} mur(s) → IFC téléchargé</span>
+      </div>
+      <div class="status-line">
+        <span class="status-label">Fichier</span>
+        <span class="status-value">${outputName}</span>
+      </div>
+      <div class="status-line">
+        <span class="status-label">Taille IFC</span>
+        <span class="status-value">${formatBytes(ifcBlob.size)}</span>
+      </div>
+      <div class="status-line">
+        <span class="status-label">Projet local</span>
+        <span class="status-value"><a class="viewer-link" href="/viewer.html?project=${encodeURIComponent(project.id)}">Ouvrir dans le viewer →</a></span>
+      </div>
+      <div class="stats">
+        ${renderStat(statValue(stats, 'wall'), 'walls')}
+        ${renderStat(statValue(stats, 'slab'), 'slabs')}
+        ${renderStat(statValue(stats, 'storeys') || 1, 'storeys')}
+        ${renderStat(statValue(stats, 'materials'), 'materials')}
+        ${renderStat(statValue(stats, 'quantities'), 'quantities')}
+        ${renderStat(statValue(stats, 'uniformatCodes'), 'uniformat')}
+      </div>
+    `, 'success');
+
+  } catch (err) {
+    showPlanStatus(`<strong>Erreur :</strong> ${err.message}`, 'error');
+  } finally {
+    planGo.disabled = false;
+  }
+});
 </script>
 
 </body>
