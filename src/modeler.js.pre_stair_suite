@@ -156,9 +156,6 @@ const state = {
     stairSteps: 12,
     stairRise: 0.17,
     stairLanding: 1,
-    stairTurnMode: "landing",
-    stairWinderSteps: 3,
-    stairAutoOpening: true,
     storeyHeight: 3,
     storeys: [{ id: "storey-0", name: "Storey 0", elevation: 0, height: 3 }],
     activeStoreyId: "storey-0",
@@ -889,7 +886,7 @@ function setAuthoringTool(tool, options = {}) {
     else if (tool === "door") setStatus("Outil Door · survole un mur, preview bleue/brune, clic pour créer la porte et découper le mur.", "ok");
     else if (tool === "window") setStatus("Outil Window · survole un mur, preview vitrée, clic pour créer la fenêtre et découper le mur.", "ok");
     else if (tool === "roof") setStatus("Outil Roof · sélectionne une slab : preview toiture · clique Roof from slab pour créer une toiture Flat/Shed/Gable.", "ok");
-    else if (tool === "stair") setStatus("Outil Escalier · multi-points · mode palier ou balancé · trémie auto dans la slab supérieure · Stop/Entrée finalise.", "ok");
+    else if (tool === "stair") setStatus("Outil Escalier · clique les points du parcours · les virages créent des paliers · Stop/Entrée finalise un escalier fermé.", "ok");
     else setStatus("Outil Select · sélection et transformations objet/édition.", "ok");
   }
 }
@@ -1335,8 +1332,6 @@ function duplicateAuthoredMeshToActiveStorey(mesh, targetStorey) {
       steps: Number(data.steps ?? mesh.userData?.dimensions?.steps ?? state.authoring.stairSteps),
       rise: Number(data.rise ?? mesh.userData?.dimensions?.rise ?? state.authoring.stairRise),
       landing: Number(data.landing ?? mesh.userData?.dimensions?.landingLength ?? state.authoring.stairLanding),
-      turnMode: data.turnMode || mesh.userData?.dimensions?.turnMode || state.authoring.stairTurnMode,
-      winderSteps: Number(data.winderSteps ?? mesh.userData?.dimensions?.winderSteps ?? state.authoring.stairWinderSteps),
     });
     state.authoring.activeStoreyId = oldActiveId;
     if (!copy) return null;
@@ -2008,14 +2003,12 @@ function stopAuthoringTool(options = {}) {
       mesh.updateMatrixWorld(true);
       indexMeshes(root);
       const indexed = state.meshes.find((candidate) => candidate.uuid === mesh.uuid) || mesh;
-      const slabCut = applyAutoStairSlabOpening(indexed);
       pushHistory({
         type: "createMesh",
         label: `Create ${authoringToolLabel("stair")}`,
         mesh: indexed,
         parent: root,
         meshId: indexed.userData.__modelerId,
-        slabCut,
       });
       selectMesh(indexed);
       markDirty();
@@ -3162,11 +3155,9 @@ function createStairMesh(startOrPoints, endOrOptions = {}, maybeOptions = {}) {
 
   const baseElevation = getActiveStoreyElevation();
   const width = Math.max(0.2, Number(options.width ?? state.authoring.stairWidth) || 0.9);
-  let requestedSteps = Math.max(1, Math.round(Number(options.steps ?? state.authoring.stairSteps) || 12));
+  let steps = Math.max(1, Math.round(Number(options.steps ?? state.authoring.stairSteps) || 12));
   const rise = Math.max(0.05, Number(options.rise ?? state.authoring.stairRise) || 0.17);
   const landingLength = Math.max(width, Number(options.landing ?? state.authoring.stairLanding) || width);
-  const turnMode = options.turnMode || state.authoring.stairTurnMode || "landing";
-  const winderSteps = Math.max(2, Math.round(Number(options.winderSteps ?? state.authoring.stairWinderSteps) || 3));
 
   const segments = [];
   let totalRun = 0;
@@ -3175,18 +3166,13 @@ function createStairMesh(startOrPoints, endOrOptions = {}, maybeOptions = {}) {
     const end = cleaned[i + 1];
     const length = Math.hypot(end.x - start.x, end.z - start.z);
     if (length < 1e-5) continue;
-    const dir = new THREE.Vector3((end.x - start.x) / length, 0, (end.z - start.z) / length);
-    const normal = new THREE.Vector3(-dir.z, 0, dir.x);
     totalRun += length;
-    segments.push({ start, end, length, dir, normal });
+    segments.push({ start, end, length });
   }
   if (!segments.length) return null;
 
-  const turnCount = Math.max(0, segments.length - 1);
-  const winderStepTotal = turnMode === "winder" ? turnCount * winderSteps : 0;
-  const flightStepBudget = Math.max(segments.length, requestedSteps - winderStepTotal);
-  const stepDistribution = distributeStairSteps(flightStepBudget, segments.map((segment) => segment.length));
-  const actualSteps = stepDistribution.reduce((sum, value) => sum + value, 0) + winderStepTotal;
+  if (steps < segments.length) steps = segments.length;
+  const stepDistribution = distributeStairSteps(steps, segments.map((segment) => segment.length));
 
   const geometries = [];
   let accumulatedRise = 0;
@@ -3202,14 +3188,8 @@ function createStairMesh(startOrPoints, endOrOptions = {}, maybeOptions = {}) {
     accumulatedRise += segmentSteps * rise;
 
     if (next) {
-      if (turnMode === "winder") {
-        const winder = createWinderTurnGeometry(segment, next, width, landingLength, winderSteps, rise, baseElevation + accumulatedRise);
-        if (winder) geometries.push(winder);
-        accumulatedRise += winderSteps * rise;
-      } else {
-        const landing = createQuarterTurnLandingGeometry(segment, next, width, landingLength, baseElevation + accumulatedRise - rise, rise);
-        if (landing) geometries.push(landing);
-      }
+      const landing = createClosedStairLandingGeometry(segment.end, width, landingLength, baseElevation + accumulatedRise - rise, rise);
+      if (landing) geometries.push(landing);
     }
   }
 
@@ -3236,18 +3216,15 @@ function createStairMesh(startOrPoints, endOrOptions = {}, maybeOptions = {}) {
   mesh.userData.storeyId = storey.id;
   mesh.userData.storeyName = storey.name;
   mesh.userData.storeyElevation = baseElevation;
-  mesh.userData.dimensions = { width, steps: actualSteps, rise, run: totalRun, height: actualSteps * rise, landings: turnMode === "landing" ? turnCount : 0, winderTurns: turnMode === "winder" ? turnCount : 0, landingLength, turnMode, winderSteps };
+  mesh.userData.dimensions = { width, steps, rise, run: totalRun, height: steps * rise, landings: Math.max(0, cleaned.length - 2), landingLength };
   mesh.userData.stairData = {
     points: cleaned.map((point) => point.clone()),
     start: cleaned[0].clone(),
     end: cleaned[cleaned.length - 1].clone(),
     width,
-    steps: actualSteps,
-    requestedSteps,
+    steps,
     rise,
     landing: landingLength,
-    turnMode,
-    winderSteps,
     run: totalRun,
     baseElevation,
     storeyId: storey.id,
@@ -3343,108 +3320,9 @@ function createClosedStairFlightGeometry(start, end, width, steps, rise, baseEle
   return geometry;
 }
 
-function createQuarterTurnLandingGeometry(prevSegment, nextSegment, width, landingLength, elevationBase, thickness) {
-  const corner = prevSegment.end;
-  const back = corner.clone().addScaledVector(prevSegment.dir, -landingLength);
-  const forward = corner.clone().addScaledVector(nextSegment.dir, landingLength);
-  const rectA = orientedRectXZ(back, corner, width);
-  const rectB = orientedRectXZ(corner, forward, width);
-  const pad = Math.max(width, landingLength * 0.55);
-  const centerPadA = corner.clone().addScaledVector(prevSegment.dir, -pad * 0.25);
-  const centerPadB = corner.clone().addScaledVector(nextSegment.dir, pad * 0.25);
-  const rectC = orientedRectXZ(centerPadA, centerPadB, Math.max(width, landingLength));
-  const hull = convexHullXZ([...rectA, ...rectB, ...rectC]);
-  return createHorizontalPrismGeometry(hull, elevationBase, elevationBase + Math.max(0.05, thickness));
-}
-
-function createWinderTurnGeometry(prevSegment, nextSegment, width, landingLength, steps, rise, baseElevation) {
-  const corner = prevSegment.end;
-  const angle0 = Math.atan2(prevSegment.dir.z, prevSegment.dir.x);
-  const angle1 = unwrapAngleNear(Math.atan2(nextSegment.dir.z, nextSegment.dir.x), angle0);
-  const outer = Math.max(width * 1.25, landingLength * 0.8);
-  const inner = Math.max(0.08, width * 0.16);
-  const geometries = [];
-  for (let i = 0; i < steps; i++) {
-    const a0 = THREE.MathUtils.lerp(angle0, angle1, i / steps);
-    const a1 = THREE.MathUtils.lerp(angle0, angle1, (i + 1) / steps);
-    const p0i = polarXZ(corner, inner, a0);
-    const p1i = polarXZ(corner, inner, a1);
-    const p1o = polarXZ(corner, outer, a1);
-    const p0o = polarXZ(corner, outer, a0);
-    const top = baseElevation + (i + 1) * rise;
-    const geom = createHorizontalPrismGeometry([p0i, p1i, p1o, p0o], baseElevation, top);
-    if (geom) geometries.push(geom);
-  }
-  return mergeWorldGeometries(geometries);
-}
-
-function unwrapAngleNear(angle, reference) {
-  let result = angle;
-  while (result - reference > Math.PI) result -= Math.PI * 2;
-  while (result - reference < -Math.PI) result += Math.PI * 2;
-  return result;
-}
-
-function polarXZ(origin, radius, angle) {
-  return new THREE.Vector3(origin.x + Math.cos(angle) * radius, origin.y, origin.z + Math.sin(angle) * radius);
-}
-
-function orientedRectXZ(a, b, width) {
-  const length = Math.hypot(b.x - a.x, b.z - a.z);
-  if (length < 1e-6) return [a.clone(), b.clone()];
-  const dir = new THREE.Vector3((b.x - a.x) / length, 0, (b.z - a.z) / length);
-  const normal = new THREE.Vector3(-dir.z, 0, dir.x).multiplyScalar(width * 0.5);
-  return [
-    a.clone().add(normal),
-    b.clone().add(normal),
-    b.clone().sub(normal),
-    a.clone().sub(normal),
-  ];
-}
-
-function convexHullXZ(points) {
-  const unique = [];
-  for (const p of points || []) {
-    if (!p) continue;
-    if (!unique.some((q) => Math.hypot(q.x - p.x, q.z - p.z) < 1e-6)) unique.push(p.clone());
-  }
-  if (unique.length <= 3) return unique;
-  unique.sort((a, b) => (a.x === b.x ? a.z - b.z : a.x - b.x));
-  const cross = (o, a, b) => (a.x - o.x) * (b.z - o.z) - (a.z - o.z) * (b.x - o.x);
-  const lower = [];
-  for (const p of unique) {
-    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
-    lower.push(p);
-  }
-  const upper = [];
-  for (let i = unique.length - 1; i >= 0; i--) {
-    const p = unique[i];
-    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
-    upper.push(p);
-  }
-  lower.pop();
-  upper.pop();
-  return lower.concat(upper);
-}
-
-function createHorizontalPrismGeometry(points, y0, y1) {
-  const polygon = (points || []).filter(Boolean);
-  if (polygon.length < 3 || y1 - y0 < 1e-5) return null;
-  const vertices = [];
-  const indices = [];
-  for (const p of polygon) vertices.push(p.x, y0, p.z);
-  for (const p of polygon) vertices.push(p.x, y1, p.z);
-  const n = polygon.length;
-  for (let i = 1; i < n - 1; i++) indices.push(0, i + 1, i);
-  for (let i = 1; i < n - 1; i++) indices.push(n, n + i, n + i + 1);
-  for (let i = 0; i < n; i++) {
-    const j = (i + 1) % n;
-    indices.push(i, j, n + j, i, n + j, n + i);
-  }
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
-  geometry.setIndex(indices);
-  geometry.computeVertexNormals();
+function createClosedStairLandingGeometry(corner, width, landingLength, elevationBase, thickness) {
+  const geometry = new THREE.BoxGeometry(landingLength, Math.max(0.05, thickness), landingLength);
+  geometry.translate(corner.x, elevationBase + Math.max(0.05, thickness) * 0.5, corner.z);
   geometry.computeBoundingBox();
   geometry.computeBoundingSphere();
   return geometry;
@@ -3515,21 +3393,20 @@ function createSlabMesh(start, end, options = {}) {
   const min = Math.max(0.02, state.authoring.gridStep * 0.1);
   if (width < min || depth < min) return null;
 
-  const thickness = Math.max(0.01, Number(options.thickness ?? state.authoring.slabThickness) || 0.12);
+  const thickness = Math.max(0.01, Number(state.authoring.slabThickness) || 0.12);
   const baseElevation = getActiveStoreyElevation();
   const storey = getActiveStorey();
   const inset = options.preview ? 0 : slabVisualInset(width, depth);
+  const visualWidth = Math.max(0.02, width - inset * 2);
+  const visualDepth = Math.max(0.02, depth - inset * 2);
   const minX = Math.min(start.x, end.x);
   const maxX = Math.max(start.x, end.x);
   const minZ = Math.min(start.z, end.z);
   const maxZ = Math.max(start.z, end.z);
-  const openings = Array.isArray(options.openings) ? options.openings.map(cloneSlabOpening).filter(Boolean) : [];
-  const slabData = { minX, maxX, minZ, maxZ, elevation: baseElevation, thickness, inset, openings };
-  const built = createSlabGeometryFromData(slabData);
-  if (!built?.geometry) return null;
+  const geometry = new THREE.BoxGeometry(visualWidth, thickness, visualDepth);
   const material = options.preview ? authoringPreviewMaterial.clone() : authoringSlabMaterial.clone();
-  const mesh = new THREE.Mesh(built.geometry, material);
-  mesh.position.copy(built.origin);
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.position.set((start.x + end.x) * 0.5, baseElevation + thickness * 0.5, (start.z + end.z) * 0.5);
   mesh.name = options.preview ? "Slab preview" : `Slab_${String(++state.authoring.slabCount).padStart(3, "0")}`;
   mesh.castShadow = false;
   mesh.receiveShadow = false;
@@ -3538,231 +3415,9 @@ function createSlabMesh(start, end, options = {}) {
   mesh.userData.storeyId = storey.id;
   mesh.userData.storeyName = storey.name;
   mesh.userData.storeyElevation = baseElevation;
-  mesh.userData.dimensions = { width, depth, visualWidth: built.visualWidth, visualDepth: built.visualDepth, thickness, inset, openings: openings.length };
+  mesh.userData.dimensions = { width, depth, visualWidth, visualDepth, thickness, inset };
   mesh.userData.slabBoundary = { minX, maxX, minZ, maxZ, elevation: baseElevation };
-  mesh.userData.slabOpenings = openings;
   return mesh;
-}
-
-function cloneSlabOpening(opening) {
-  if (!opening) return null;
-  const minX = Number(opening.minX);
-  const maxX = Number(opening.maxX);
-  const minZ = Number(opening.minZ);
-  const maxZ = Number(opening.maxZ);
-  if (![minX, maxX, minZ, maxZ].every(Number.isFinite)) return null;
-  if (maxX - minX < 0.02 || maxZ - minZ < 0.02) return null;
-  return {
-    id: opening.id || `slab-opening-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-    minX: Math.min(minX, maxX),
-    maxX: Math.max(minX, maxX),
-    minZ: Math.min(minZ, maxZ),
-    maxZ: Math.max(minZ, maxZ),
-    source: opening.source || "manual",
-    stairId: opening.stairId || null,
-  };
-}
-
-function createSlabGeometryFromData(data) {
-  const minX = Number(data.minX);
-  const maxX = Number(data.maxX);
-  const minZ = Number(data.minZ);
-  const maxZ = Number(data.maxZ);
-  const thickness = Math.max(0.01, Number(data.thickness) || state.authoring.slabThickness || 0.12);
-  const inset = Math.max(0, Number(data.inset) || 0);
-  const y0 = Number(data.elevation) || 0;
-  const y1 = y0 + thickness;
-  const vMinX = minX + inset;
-  const vMaxX = maxX - inset;
-  const vMinZ = minZ + inset;
-  const vMaxZ = maxZ - inset;
-  if (vMaxX - vMinX < 0.02 || vMaxZ - vMinZ < 0.02) return null;
-
-  const openings = (Array.isArray(data.openings) ? data.openings : [])
-    .map(cloneSlabOpening)
-    .filter(Boolean)
-    .map((opening) => ({
-      ...opening,
-      minX: THREE.MathUtils.clamp(opening.minX, vMinX, vMaxX),
-      maxX: THREE.MathUtils.clamp(opening.maxX, vMinX, vMaxX),
-      minZ: THREE.MathUtils.clamp(opening.minZ, vMinZ, vMaxZ),
-      maxZ: THREE.MathUtils.clamp(opening.maxZ, vMinZ, vMaxZ),
-    }))
-    .filter((opening) => opening.maxX - opening.minX >= 0.02 && opening.maxZ - opening.minZ >= 0.02);
-
-  const xs = [vMinX, vMaxX];
-  const zs = [vMinZ, vMaxZ];
-  for (const opening of openings) {
-    xs.push(opening.minX, opening.maxX);
-    zs.push(opening.minZ, opening.maxZ);
-  }
-  xs.sort((a, b) => a - b);
-  zs.sort((a, b) => a - b);
-  const ux = uniqueSortedNumbers(xs);
-  const uz = uniqueSortedNumbers(zs);
-  const origin = new THREE.Vector3((vMinX + vMaxX) * 0.5, y0 + thickness * 0.5, (vMinZ + vMaxZ) * 0.5);
-  const vertices = [];
-  const indices = [];
-  for (let xi = 0; xi < ux.length - 1; xi++) {
-    for (let zi = 0; zi < uz.length - 1; zi++) {
-      const x0 = ux[xi];
-      const x1 = ux[xi + 1];
-      const z0 = uz[zi];
-      const z1 = uz[zi + 1];
-      if (x1 - x0 < 1e-5 || z1 - z0 < 1e-5) continue;
-      const cx = (x0 + x1) * 0.5;
-      const cz = (z0 + z1) * 0.5;
-      if (openings.some((opening) => cx > opening.minX + 1e-6 && cx < opening.maxX - 1e-6 && cz > opening.minZ + 1e-6 && cz < opening.maxZ - 1e-6)) continue;
-      appendAxisAlignedBox(vertices, indices, x0, x1, y0, y1, z0, z1, origin);
-    }
-  }
-  if (!vertices.length || !indices.length) return null;
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
-  geometry.setIndex(indices);
-  geometry.computeVertexNormals();
-  geometry.computeBoundingBox();
-  geometry.computeBoundingSphere();
-  return { geometry, origin, visualWidth: vMaxX - vMinX, visualDepth: vMaxZ - vMinZ };
-}
-
-function uniqueSortedNumbers(values) {
-  const result = [];
-  for (const value of values) {
-    if (!Number.isFinite(value)) continue;
-    if (!result.length || Math.abs(result[result.length - 1] - value) > 1e-6) result.push(value);
-  }
-  return result;
-}
-
-function appendAxisAlignedBox(vertices, indices, minX, maxX, y0, y1, minZ, maxZ, origin) {
-  const base = vertices.length / 3;
-  const corners = [
-    [minX, y0, minZ], [maxX, y0, minZ], [maxX, y0, maxZ], [minX, y0, maxZ],
-    [minX, y1, minZ], [maxX, y1, minZ], [maxX, y1, maxZ], [minX, y1, maxZ],
-  ];
-  for (const [x, y, z] of corners) vertices.push(x - origin.x, y - origin.y, z - origin.z);
-  // Winding is deliberately outward-facing. The first trémie implementation
-  // used the same index order as appendOrientedBox(), but for axis-aligned slab
-  // cells that made the top face back-facing with FrontSide materials, so slabs
-  // looked open from above. Keep this order in sync with the corner contract:
-  // 0-3 bottom CCW in X/Z, 4-7 top.
-  indices.push(
-    // bottom -Y
-    base + 0, base + 1, base + 2, base + 0, base + 2, base + 3,
-    // top +Y
-    base + 4, base + 6, base + 5, base + 4, base + 7, base + 6,
-    // z min -Z
-    base + 0, base + 4, base + 5, base + 0, base + 5, base + 1,
-    // x max +X
-    base + 1, base + 5, base + 6, base + 1, base + 6, base + 2,
-    // z max +Z
-    base + 2, base + 6, base + 7, base + 2, base + 7, base + 3,
-    // x min -X
-    base + 3, base + 7, base + 4, base + 3, base + 4, base + 0,
-  );
-}
-
-function refreshSlabMeshGeometry(mesh) {
-  if (!mesh?.userData?.slabBoundary) return;
-  const boundary = mesh.userData.slabBoundary;
-  const thickness = Number(mesh.userData?.dimensions?.thickness ?? state.authoring.slabThickness) || 0.12;
-  const inset = Number(mesh.userData?.dimensions?.inset ?? 0) || 0;
-  const openings = Array.isArray(mesh.userData.slabOpenings) ? mesh.userData.slabOpenings.map(cloneSlabOpening).filter(Boolean) : [];
-  const built = createSlabGeometryFromData({ ...boundary, thickness, inset, openings });
-  if (!built?.geometry) return;
-  mesh.geometry?.dispose?.();
-  mesh.geometry = built.geometry;
-  mesh.position.copy(built.origin);
-  mesh.userData.dimensions = {
-    ...(mesh.userData.dimensions || {}),
-    width: Math.abs(boundary.maxX - boundary.minX),
-    depth: Math.abs(boundary.maxZ - boundary.minZ),
-    visualWidth: built.visualWidth,
-    visualDepth: built.visualDepth,
-    thickness,
-    inset,
-    openings: openings.length,
-  };
-  mesh.updateMatrixWorld(true);
-}
-
-
-function applyAutoStairSlabOpening(stairMesh) {
-  if (!state.authoring.stairAutoOpening || !stairMesh?.isMesh) return null;
-  const slab = findUpperSlabForStair(stairMesh);
-  if (!slab) return null;
-  const opening = stairOpeningForSlab(stairMesh, slab);
-  if (!opening) return null;
-  const before = (slab.userData.slabOpenings || []).map(cloneSlabOpening).filter(Boolean);
-  const existing = before.find((item) => item.stairId === stairMesh.userData?.__modelerId || item.id === opening.id);
-  const after = before.filter((item) => item.id !== existing?.id);
-  after.push(opening);
-  slab.userData.slabOpenings = after;
-  refreshSlabMeshGeometry(slab);
-  const cut = { slabId: slab.userData.__modelerId, opening: cloneSlabOpening(opening), before, after: after.map(cloneSlabOpening).filter(Boolean) };
-  if (stairMesh.userData?.stairData) stairMesh.userData.stairData.slabCut = cut;
-  return cut;
-}
-
-function findUpperSlabForStair(stairMesh) {
-  if (!stairMesh) return null;
-  stairMesh.updateMatrixWorld(true);
-  const stairBox = new THREE.Box3().setFromObject(stairMesh);
-  const base = Number(stairMesh.userData?.storeyElevation ?? stairMesh.userData?.stairData?.baseElevation ?? getActiveStoreyElevation());
-  const candidates = state.meshes
-    .filter((mesh) => mesh?.userData?.authoringType === "slab" && Number(mesh.userData?.storeyElevation) > base + 0.05)
-    .sort((a, b) => Number(a.userData.storeyElevation) - Number(b.userData.storeyElevation));
-  for (const slab of candidates) {
-    const b = slab.userData?.slabBoundary;
-    if (!b) continue;
-    const overlaps = stairBox.max.x >= b.minX && stairBox.min.x <= b.maxX && stairBox.max.z >= b.minZ && stairBox.min.z <= b.maxZ;
-    if (overlaps) return slab;
-  }
-  return null;
-}
-
-function stairOpeningForSlab(stairMesh, slab) {
-  stairMesh.updateMatrixWorld(true);
-  const box = new THREE.Box3().setFromObject(stairMesh);
-  const b = slab.userData?.slabBoundary;
-  if (!b) return null;
-  const margin = Math.max(0.15, Number(stairMesh.userData?.dimensions?.width || state.authoring.stairWidth || 0.9) * 0.22);
-  const minX = THREE.MathUtils.clamp(box.min.x - margin, b.minX, b.maxX);
-  const maxX = THREE.MathUtils.clamp(box.max.x + margin, b.minX, b.maxX);
-  const minZ = THREE.MathUtils.clamp(box.min.z - margin, b.minZ, b.maxZ);
-  const maxZ = THREE.MathUtils.clamp(box.max.z + margin, b.minZ, b.maxZ);
-  if (maxX - minX < 0.25 || maxZ - minZ < 0.25) return null;
-  return {
-    id: `stair-trimmer-${stairMesh.userData?.__modelerId || stairMesh.uuid}`,
-    minX,
-    maxX,
-    minZ,
-    maxZ,
-    source: "stair-auto-trimmer",
-    stairId: stairMesh.userData?.__modelerId || null,
-  };
-}
-
-function applySlabCutSnapshot(cut, mode = "after") {
-  if (!cut?.slabId) return;
-  const slab = meshByModelerId(cut.slabId);
-  if (!slab) return;
-  const payload = mode === "before" ? cut.before : cut.after;
-  slab.userData.slabOpenings = (payload || []).map(cloneSlabOpening).filter(Boolean);
-  refreshSlabMeshGeometry(slab);
-}
-
-function removeStairSlabCut(stairMesh) {
-  const cut = stairMesh?.userData?.stairData?.slabCut;
-  if (!cut?.slabId) return null;
-  const slab = meshByModelerId(cut.slabId);
-  if (!slab) return null;
-  const before = (slab.userData.slabOpenings || []).map(cloneSlabOpening).filter(Boolean);
-  const after = before.filter((opening) => opening.id !== cut.opening?.id && opening.stairId !== stairMesh.userData?.__modelerId);
-  slab.userData.slabOpenings = after;
-  refreshSlabMeshGeometry(slab);
-  return { ...cut, before, after };
 }
 
 function formatNumber(value) {
@@ -3773,7 +3428,7 @@ function updateAuthoringSettingFromInput(key, value) {
   const numeric = Number(value);
   const min = key === "windowSill" ? 0 : 0.0001;
   if (!Number.isFinite(numeric) || numeric < min) return;
-  state.authoring[key] = (key === "stairSteps" || key === "stairWinderSteps") ? Math.max(key === "stairWinderSteps" ? 2 : 1, Math.round(numeric)) : numeric;
+  state.authoring[key] = key === "stairSteps" ? Math.max(1, Math.round(numeric)) : numeric;
   markDirty();
   renderProperties();
 }
@@ -4255,81 +3910,6 @@ function parseIfcIndexTriplesForModeler(arg) {
   return triples;
 }
 
-function maybeExtractPlanOrientationFromGeometry(object) {
-  if (!object?.isMesh || object.isInstancedMesh || !object.geometry) return;
-  if (object.userData?.__planOrientationExtracted) return;
-
-  // IFC triangulation sometimes arrives with a useful placement matrix but a
-  // residual object yaw baked into the vertex coordinates. The OBB can look
-  // right, while TransformControls still sees an identity local basis. Extract a
-  // stable horizontal principal axis into object.quaternion, and counter-rotate
-  // the geometry so the mesh does not visually move. This gives Local gizmos the
-  // same orientation as the object/bbox.
-  const source = String(object.userData?.smeltSource || object.parent?.userData?.smeltSource || "");
-  const isIfcEditableSnapshot = source === "web-ifc-editable-snapshot" || object.userData?.smeltLocalTransformPreserved === true;
-  if (!isIfcEditableSnapshot) return;
-
-  const scale = object.scale || new THREE.Vector3(1, 1, 1);
-  const maxScale = Math.max(Math.abs(scale.x || 1), Math.abs(scale.y || 1), Math.abs(scale.z || 1));
-  const minScale = Math.min(Math.abs(scale.x || 1), Math.abs(scale.y || 1), Math.abs(scale.z || 1));
-  if (maxScale > 0 && Math.abs(maxScale - minScale) / maxScale > 1e-4) return;
-
-  const position = object.geometry.getAttribute("position");
-  if (!position || position.count < 4) return;
-
-  let meanX = 0;
-  let meanZ = 0;
-  for (let i = 0; i < position.count; i++) {
-    meanX += position.getX(i);
-    meanZ += position.getZ(i);
-  }
-  meanX /= position.count;
-  meanZ /= position.count;
-
-  let xx = 0;
-  let xz = 0;
-  let zz = 0;
-  for (let i = 0; i < position.count; i++) {
-    const x = position.getX(i) - meanX;
-    const z = position.getZ(i) - meanZ;
-    xx += x * x;
-    xz += x * z;
-    zz += z * z;
-  }
-  xx /= position.count;
-  xz /= position.count;
-  zz /= position.count;
-
-  const trace = xx + zz;
-  const diff = xx - zz;
-  const discr = Math.sqrt(Math.max(0, diff * diff + 4 * xz * xz));
-  const lambda0 = (trace + discr) * 0.5;
-  const lambda1 = (trace - discr) * 0.5;
-  if (!Number.isFinite(lambda0) || lambda0 < 1e-8) return;
-  if (lambda1 > 0 && lambda0 / lambda1 < 1.08) return;
-
-  // Principal direction angle in local XZ. Fold it to [-90°, 90°] to avoid
-  // arbitrary 180° flips between similar reloads.
-  const angle = 0.5 * Math.atan2(2 * xz, xx - zz);
-  let normalized = angle;
-  while (normalized > Math.PI / 2) normalized -= Math.PI;
-  while (normalized < -Math.PI / 2) normalized += Math.PI;
-  if (Math.abs(normalized) < THREE.MathUtils.degToRad(0.5)) return;
-
-  const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), normalized);
-  const inverse = new THREE.Matrix4().makeRotationY(-normalized);
-  object.geometry.applyMatrix4(inverse);
-  object.geometry.computeBoundingBox?.();
-  object.geometry.computeBoundingSphere?.();
-  object.geometry.computeVertexNormals?.();
-
-  object.quaternion.multiply(q);
-  object.updateMatrix();
-  object.updateMatrixWorld(true);
-  object.userData.__planOrientationExtracted = true;
-  object.userData.__planOrientationAngle = normalized;
-}
-
 function indexMeshes(root) {
   state.meshes = [];
   const editableObjects = [];
@@ -4369,7 +3949,6 @@ function indexMeshes(root) {
       }
 
       ensureEditableBufferGeometry(object);
-      maybeExtractPlanOrientationFromGeometry(object);
       normalizeEditablePivotToGeometryCenter(object);
       object.geometry.computeBoundingBox();
       object.geometry.computeBoundingSphere();
@@ -4697,7 +4276,9 @@ function selectMesh(mesh) {
     if (state.edit.active) {
       updateEditPivotToSelection();
     } else {
-      attachTransformToSelectedObject();
+      state.transform.enabled = true;
+      state.transform.attach(state.selected);
+      state.transform.setSize?.(1.15);
     }
   } else {
     clearEditComponentSelection();
@@ -4713,33 +4294,6 @@ function selectMesh(mesh) {
   renderTree();
   renderProperties();
   updateUiEnabled();
-}
-
-function currentTransformSpace() {
-  return state.transform?.getSpace?.() || state.transform?.space || "world";
-}
-
-function attachTransformToSelectedObject() {
-  if (!state.selected || !state.transform) return;
-  state.selected.updateMatrix();
-  state.selected.updateMatrixWorld(true);
-  state.transform.enabled = true;
-  state.transform.setSpace(currentTransformSpace());
-  state.transform.attach(state.selected);
-  state.transform.setSize?.(1.15);
-  state.transform.updateMatrixWorld?.(true);
-  state.transform.dispatchEvent?.({ type: "change" });
-}
-
-function refreshTransformAttachment() {
-  if (!state.transform) return;
-  if (state.edit.active) {
-    if (hasEditComponentSelection()) updateEditPivotToSelection();
-    else state.transform.detach();
-    return;
-  }
-  if (state.selected) attachTransformToSelectedObject();
-  else state.transform.detach();
 }
 
 function setEditMode(active) {
@@ -4777,7 +4331,10 @@ function setEditMode(active) {
     cancelBoxSelect();
     removeEditOverlay();
     state.transform.detach();
-    if (state.selected) attachTransformToSelectedObject();
+    if (state.selected) {
+      state.transform.attach(state.selected);
+      state.transform.setSize?.(1.15);
+    }
   }
 
   updateBoxHelper();
@@ -5581,70 +5138,13 @@ function updateBoxHelper() {
   if (!state.selected) return;
 
   state.selected.updateMatrixWorld(true);
-  state.boxHelper = createObjectSpaceBoxHelper(state.selected, 0xff9248);
-  if (!state.boxHelper) return;
-  state.boxHelper.userData.__modelerOverlay = true;
+  const box = new THREE.Box3().setFromObject(state.selected);
+  if (box.isEmpty()) return;
+
+  state.boxHelper = new THREE.Box3Helper(box, 0xff9248);
   state.boxHelper.material.depthTest = false;
   state.boxHelper.renderOrder = 10;
   state.scene.add(state.boxHelper);
-}
-
-function createObjectSpaceBoxHelper(object, color = 0xff9248) {
-  if (!object) return null;
-  const sourceBox = getLocalGeometryBox(object);
-  if (!sourceBox || sourceBox.isEmpty()) return null;
-
-  const min = sourceBox.min;
-  const max = sourceBox.max;
-  const localCorners = [
-    [min.x, min.y, min.z], [max.x, min.y, min.z], [max.x, max.y, min.z], [min.x, max.y, min.z],
-    [min.x, min.y, max.z], [max.x, min.y, max.z], [max.x, max.y, max.z], [min.x, max.y, max.z],
-  ].map(([x, y, z]) => new THREE.Vector3(x, y, z));
-  const edges = [
-    0, 1, 1, 2, 2, 3, 3, 0,
-    4, 5, 5, 6, 6, 7, 7, 4,
-    0, 4, 1, 5, 2, 6, 3, 7,
-  ];
-  const positions = new Float32Array(edges.length * 3);
-  object.updateMatrixWorld(true);
-  for (let i = 0; i < edges.length; i++) {
-    const world = localCorners[edges[i]].clone().applyMatrix4(object.matrixWorld);
-    positions[i * 3] = world.x;
-    positions[i * 3 + 1] = world.y;
-    positions[i * 3 + 2] = world.z;
-  }
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-  const material = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.95, depthTest: false });
-  const helper = new THREE.LineSegments(geometry, material);
-  helper.name = "Object oriented bounding box";
-  return helper;
-}
-
-function getLocalGeometryBox(object) {
-  if (!object?.geometry) return null;
-  const geometry = object.geometry;
-  geometry.computeBoundingBox?.();
-  const box = geometry.boundingBox;
-  if (!box || box.isEmpty()) return null;
-  return box.clone();
-}
-
-function getObjectSpaceBoundingInfo(object) {
-  const box = getLocalGeometryBox(object);
-  if (!box) return null;
-  object.updateMatrixWorld(true);
-  const localSize = new THREE.Vector3();
-  const localCenter = new THREE.Vector3();
-  box.getSize(localSize);
-  box.getCenter(localCenter);
-  const worldCenter = localCenter.clone().applyMatrix4(object.matrixWorld);
-  const worldSize = localSize.clone().multiply(new THREE.Vector3(
-    Math.abs(object.scale.x || 1),
-    Math.abs(object.scale.y || 1),
-    Math.abs(object.scale.z || 1),
-  ));
-  return { size: worldSize, center: worldCenter, localSize, localCenter };
 }
 
 function renderProperties() {
@@ -5661,14 +5161,11 @@ function renderProperties() {
   const mesh = state.selected;
   mesh.updateMatrixWorld(true);
   const stats = geometryStats(mesh);
-  const orientedBox = getObjectSpaceBoundingInfo(mesh);
-  const fallbackBox = new THREE.Box3().setFromObject(mesh);
-  const size = orientedBox?.size || new THREE.Vector3();
-  const center = orientedBox?.center || new THREE.Vector3();
-  if (!orientedBox) {
-    fallbackBox.getSize(size);
-    fallbackBox.getCenter(center);
-  }
+  const box = new THREE.Box3().setFromObject(mesh);
+  const size = new THREE.Vector3();
+  const center = new THREE.Vector3();
+  box.getSize(size);
+  box.getCenter(center);
   const openingEditorHtml = renderSelectedOpeningEditor(mesh);
 
   properties.innerHTML = `
@@ -5690,7 +5187,7 @@ function renderProperties() {
       <div class="prop-grid">
         <div class="prop-row"><div class="prop-label">Vertices</div><div class="prop-value">${stats.vertices}</div></div>
         <div class="prop-row"><div class="prop-label">Triangles</div><div class="prop-value">${stats.triangles}</div></div>
-        <div class="prop-row"><div class="prop-label">BBox orientée</div><div class="prop-value">${formatVector(size)}</div></div>
+        <div class="prop-row"><div class="prop-label">BBox taille</div><div class="prop-value">${formatVector(size)}</div></div>
         <div class="prop-row"><div class="prop-label">BBox centre</div><div class="prop-value">${formatVector(center)}</div></div>
       </div>
     </div>
@@ -6179,9 +5676,9 @@ function renderAuthoringProperties() {
         <div class="prop-row"><div class="prop-label">Roof type</div><div class="prop-value"><select id="author-roof-type"><option value="flat" ${state.authoring.roofType === "flat" ? "selected" : ""}>Flat</option><option value="shed" ${state.authoring.roofType === "shed" ? "selected" : ""}>Shed / monopente</option><option value="gable" ${state.authoring.roofType === "gable" ? "selected" : ""}>Gable / double pente</option></select></div></div>
         <div class="prop-row"><div class="prop-label">Roof params</div><div class="prop-value">pitch <input id="author-roof-pitch" type="number" min="0" max="80" step="1" value="${state.authoring.roofPitch}" />° · thick <input id="author-roof-thickness" type="number" min="0.03" step="0.01" value="${state.authoring.roofThickness}" /> m · overhang <input id="author-roof-overhang" type="number" min="0" step="0.05" value="${state.authoring.roofOverhang}" /> m</div></div>
         <div class="prop-row"><div class="prop-label">Roof base</div><div class="prop-value">égout <input id="author-roof-eaves-height" type="number" min="0.1" step="0.1" value="${state.authoring.roofEavesHeight}" /> m · ridge <select id="author-roof-ridge-direction"><option value="x" ${state.authoring.roofRidgeDirection === "x" ? "selected" : ""}>axe X</option><option value="z" ${state.authoring.roofRidgeDirection === "z" ? "selected" : ""}>axe Z</option></select></div></div>
-        <div class="prop-row"><div class="prop-label">Escalier</div><div class="prop-value">mode <select id="author-stair-turn-mode"><option value="landing" ${state.authoring.stairTurnMode === "landing" ? "selected" : ""}>quart tournant avec palier</option><option value="winder" ${state.authoring.stairTurnMode === "winder" ? "selected" : ""}>balancé</option></select> · largeur <input id="author-stair-width" type="number" min="0.2" step="0.05" value="${state.authoring.stairWidth}" /> m · marches <input id="author-stair-steps" type="number" min="1" step="1" value="${state.authoring.stairSteps}" /> · rise <input id="author-stair-rise" type="number" min="0.05" step="0.01" value="${state.authoring.stairRise}" /> m · palier <input id="author-stair-landing" type="number" min="0.2" step="0.05" value="${state.authoring.stairLanding}" /> m · balancé <input id="author-stair-winder-steps" type="number" min="2" step="1" value="${state.authoring.stairWinderSteps}" /> marches · trémie <select id="author-stair-auto-opening"><option value="1" ${state.authoring.stairAutoOpening ? "selected" : ""}>auto</option><option value="0" ${!state.authoring.stairAutoOpening ? "selected" : ""}>off</option></select></div></div>
+        <div class="prop-row"><div class="prop-label">Escalier</div><div class="prop-value">largeur <input id="author-stair-width" type="number" min="0.2" step="0.05" value="${state.authoring.stairWidth}" /> m · marches <input id="author-stair-steps" type="number" min="1" step="1" value="${state.authoring.stairSteps}" /> · rise <input id="author-stair-rise" type="number" min="0.05" step="0.01" value="${state.authoring.stairRise}" /> m · palier <input id="author-stair-landing" type="number" min="0.2" step="0.05" value="${state.authoring.stairLanding}" /> m</div></div>
       </div>
-      <div class="hint">Ces valeurs s’appliquent aux prochains objets créés. Les slabs auteur sont automatiquement rentrées sous l’épaisseur des murs pour éviter de voir leurs chants en façade. Les portes/fenêtres créent une ouverture dans le wall mesh. Roof crée un mesh IfcRoof depuis la slab sélectionnée. Escalier crée une géométrie fermée, suit plusieurs segments, propose palier quart tournant ou balancement, et peut percer automatiquement une trémie dans la slab supérieure.</div>
+      <div class="hint">Ces valeurs s’appliquent aux prochains objets créés. Les slabs auteur sont automatiquement rentrées sous l’épaisseur des murs pour éviter de voir leurs chants en façade. Les portes/fenêtres créent une ouverture dans le wall mesh. Roof crée un mesh IfcRoof depuis la slab sélectionnée. Escalier crée maintenant une géométrie fermée, peut suivre plusieurs segments et ajoute des paliers aux coudes.</div>
     </div>
   `;
 
@@ -6205,9 +5702,6 @@ function renderAuthoringProperties() {
   document.getElementById("author-stair-steps")?.addEventListener("change", (event) => updateAuthoringSettingFromInput("stairSteps", event.target.value));
   document.getElementById("author-stair-rise")?.addEventListener("change", (event) => updateAuthoringSettingFromInput("stairRise", event.target.value));
   document.getElementById("author-stair-landing")?.addEventListener("change", (event) => updateAuthoringSettingFromInput("stairLanding", event.target.value));
-  document.getElementById("author-stair-turn-mode")?.addEventListener("change", (event) => { state.authoring.stairTurnMode = event.target.value === "winder" ? "winder" : "landing"; markDirty(); renderProperties(); });
-  document.getElementById("author-stair-winder-steps")?.addEventListener("change", (event) => updateAuthoringSettingFromInput("stairWinderSteps", event.target.value));
-  document.getElementById("author-stair-auto-opening")?.addEventListener("change", (event) => { state.authoring.stairAutoOpening = event.target.value !== "0"; markDirty(); renderProperties(); });
   document.getElementById("author-storey-height")?.addEventListener("change", (event) => updateAuthoringSettingFromInput("storeyHeight", event.target.value));
 }
 
@@ -6281,9 +5775,7 @@ function setTransformMode(mode) {
 }
 
 function setTransformSpace(space) {
-  const next = space === "local" ? "local" : "world";
-  state.transform.setSpace(next);
-  refreshTransformAttachment();
+  state.transform.setSpace(space);
   updateToolbarState();
 }
 
@@ -6291,9 +5783,8 @@ function updateToolbarState() {
   translateButton.classList.toggle("active", state.transform.getMode() === "translate");
   rotateButton.classList.toggle("active", state.transform.getMode() === "rotate");
   scaleButton.classList.toggle("active", state.transform.getMode() === "scale");
-  const transformSpace = currentTransformSpace();
-  localButton.classList.toggle("active", transformSpace === "local");
-  worldButton.classList.toggle("active", transformSpace === "world");
+  localButton.classList.toggle("active", state.transform.space === "local");
+  worldButton.classList.toggle("active", state.transform.space === "world");
 
   objectModeButton?.classList.toggle("active", !state.edit.active);
   editModeButton?.classList.toggle("active", state.edit.active);
@@ -6434,7 +5925,6 @@ function deleteSelectedMesh() {
   const linkedOpenings = mesh.userData?.authoringType === "wall"
     ? collectOpeningMeshesForWall(mesh)
     : [];
-  const slabCut = mesh.userData?.authoringType === "stair" ? removeStairSlabCut(mesh) : null;
 
   selectMesh(null);
   for (const openingMesh of linkedOpenings) {
@@ -6449,7 +5939,6 @@ function deleteSelectedMesh() {
     parent,
     index,
     linkedOpenings,
-    slabCut,
   });
   renderTree();
   renderProperties();
@@ -6513,7 +6002,6 @@ function applyDeleteMeshHistory(action, direction) {
   const linkedOpenings = Array.isArray(action.linkedOpenings) ? action.linkedOpenings : [];
 
   if (direction === "undo") {
-    if (action.slabCut) applySlabCutSnapshot(action.slabCut, "before");
     if (!mesh.parent) {
       parent.add(mesh);
       if (Number.isFinite(action.index) && action.index >= 0 && action.index < parent.children.length - 1) {
@@ -6541,7 +6029,6 @@ function applyDeleteMeshHistory(action, direction) {
     }
     if (state.xray.active) applyXrayToMesh(mesh);
   } else if (mesh.parent) {
-    if (action.slabCut) applySlabCutSnapshot(action.slabCut, "after");
     for (const item of linkedOpenings) {
       if (item?.mesh?.parent) item.mesh.parent.remove(item.mesh);
     }
@@ -6735,17 +6222,13 @@ function refreshAuthoredWallMiters() {
   const eps = Math.max(0.005, (Number(state.authoring.gridStep) || 0.1) * 0.35);
 
   for (const wall of walls) {
-    // GLB extras / localStorage round-trips deserialize THREE.Vector3 values as
-    // plain objects. Normalize before the miter pass so old projects and IFC→GLB
-    // snapshots don't crash on `.clone()` and don't generate invalid wall joins.
-    normalizeWallPathForRoundTrip(wall.userData.wallPath, wall);
     wall.userData.wallPath.prev = null;
     wall.userData.wallPath.next = null;
   }
 
   for (const wall of walls) {
     const data = wall.userData.wallPath;
-    const storeyId = wall.userData.storeyId || data.storeyId || null;
+    const storeyId = wall.userData.storeyId;
     const prev = findConnectedWallForEndpoint(walls, wall, data.start, "start", eps, storeyId);
     const next = findConnectedWallForEndpoint(walls, wall, data.end, "end", eps, storeyId);
     if (prev) data.prev = prev;
@@ -6756,22 +6239,16 @@ function refreshAuthoredWallMiters() {
 }
 
 function findConnectedWallForEndpoint(walls, wall, endpoint, endpointKind, eps, storeyId) {
-  const endpointPoint = coerceWallPoint(endpoint, wall?.userData?.wallPath?.baseElevation ?? wall?.userData?.storeyElevation ?? 0);
   let best = null;
   for (const other of walls) {
-    const data = other.userData?.wallPath;
-    if (!data || other === wall) continue;
-    const otherStoreyId = other.userData?.storeyId || data.storeyId || null;
-    if (otherStoreyId !== storeyId) continue;
-
-    const atStart = coerceWallPoint(data.start, data.baseElevation);
-    const atEnd = coerceWallPoint(data.end, data.baseElevation);
+    if (other === wall || other.userData.storeyId !== storeyId) continue;
+    const data = other.userData.wallPath;
     const candidates = [
-      { at: atStart, opposite: atEnd },
-      { at: atEnd, opposite: atStart },
+      { at: data.start, opposite: data.end },
+      { at: data.end, opposite: data.start },
     ];
     for (const candidate of candidates) {
-      const distance = Math.hypot(endpointPoint.x - candidate.at.x, endpointPoint.z - candidate.at.z);
+      const distance = Math.hypot(endpoint.x - candidate.at.x, endpoint.z - candidate.at.z);
       if (distance <= eps && (!best || distance < best.distance)) {
         best = { distance, point: candidate.opposite.clone() };
       }
@@ -6859,11 +6336,9 @@ function applyCreateMeshHistory(action, direction) {
   if (!mesh) return;
   const parent = action.parent || state.modelRoot || ensureAuthoringRoot();
   if (direction === "undo") {
-    if (action.slabCut) applySlabCutSnapshot(action.slabCut, "before");
     if (mesh.parent) mesh.parent.remove(mesh);
   } else if (!mesh.parent) {
     parent.add(mesh);
-    if (action.slabCut) applySlabCutSnapshot(action.slabCut, "after");
   }
   if (state.modelRoot) {
     indexMeshes(state.modelRoot);

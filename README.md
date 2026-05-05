@@ -1,8 +1,8 @@
-# GLB → IFC Converter
+# Smelt
 
 <img width="6304" height="1682" alt="Group 3" src="https://github.com/user-attachments/assets/0faa42d7-5a68-42fe-96f1-d5ba5b1a242c" />
 
-A local web tool that converts `.glb` building models into IFC4 `.ifc` files, with heuristic BIM classification, IFC metadata enrichment, and a lightweight local BIM viewer.
+Smelt is a local web tool for lightweight BIM authoring and GLB → IFC conversion. It can model simple buildings from scratch, edit GLB geometry, classify elements heuristically, enrich IFC metadata, and preview the result in a local IFC viewer.
 
 The project is intentionally experimental: it is not a replacement for BIM authoring software, but it can turn many GLB building models into a more useful IFC starting point.
 
@@ -10,7 +10,7 @@ The project is intentionally experimental: it is not a replacement for BIM autho
 
 ### GLB → IFC conversion
 
-The converter reads a GLB file, extracts mesh geometry, classifies elements, and exports an IFC4 STEP file.
+Smelt reads a GLB file, extracts mesh geometry, classifies elements, and exports an IFC4 STEP file.
 
 Current exported IFC element types include:
 
@@ -148,6 +148,7 @@ Current authoring MVP:
 - `Plan 2D` imports an image reference for the active storey; reference planes are viewport-only overlays and are not exported to GLB / IFC.
 - `Scale plan` calibrates the reference by clicking two points on the plan and entering their real distance in metres.
 - `Wall` is a continuous polyline tool with live ghost preview: after the first click, the full wall volume, thickness, snap target, and alignment are visible before committing the next point. It supports centerline / left-face / right-face alignment; holding `Shift` while placing the next point constrains the wall segment to 0° / 45° / 90° drafting guides; `Stop` or `Esc` ends the trace and returns to `Select`. Connected authored walls are re-trimmed by storey with a tiny anti-collision joint clearance so IFC exports do not contain overlapping wall solids at corners.
+- `Cloison` adds a dedicated interior partition tool: it uses a thinner centered wall profile, continuous tracing, Shift 0°/45°/90° guides, and names objects `Cloison_###` so the GLB → IFC classifier treats them as internal walls/partitions.
 - `Slab` creates a rectangular slab mesh from two short clicks on snapped grid corners, then returns to `Select`. Authored slabs keep the drawn construction boundary for wall snapping, but their exported/visible body is automatically inset under the wall thickness to avoid visible coplanar slab edges on exterior façades. The default slab thickness is now 0.12 m instead of 0.25 m for a lighter floor plate.
 - left-drag remains reserved for camera orbit while authoring; drags do not place points.
 - grid snap can be toggled and the grid step can be changed down to centimetre-level increments; the viewport now shows the active snap target (`Grille`, `Bord slab`, `Coin slab`) next to the cursor. Wall points prioritize active-storey slab boundaries/corners when close enough, and object move snaps to the grid while dragging and re-snaps X/Z on release.
@@ -155,13 +156,14 @@ Current authoring MVP:
 - `Walls from slab` creates perimeter walls from the selected slab contour, using face alignment so the wall boundary hugs the slab outline.
 - `Door` and `Window` are wall-snapped placement tools. Hovering a wall shows a live preview; clicking creates a separate monolithic 3D door/window mesh and regenerates the wall geometry as split solid pieces around the opening, giving a lightweight boolean cut before GLB → IFC conversion. Openings use the top of the active slab as their floor reference, so doors sit flush on the slab rather than at the raw wall base. Selecting a door/window exposes editable width/height values in the right panel; changing them updates both the object and the wall cut.
 - `Roof` is a slab-based authoring tool. Select a slab, choose `Flat`, `Shed / monopente`, or `Gable / double pente`, adjust pitch/thickness/overhang/eaves height/ridge direction in the right panel, then click `Roof from slab`. The preview shows the future roof before creation and the resulting mesh carries an `IfcRoof` hint.
+- `Escalier` creates a first parametric stair mesh in two clicks: click the start, click the end/direction, and Smelt generates one selectable `Stair_###` mesh with configurable width, number of steps, and riser height. The mesh carries an `IfcStair` hint and can be duplicated with storeys.
 - authored doors/windows use bundled custom GLB assets when available, but are still baked as one selectable/exportable mesh each with stable `IfcDoor` / `IfcWindow` hints. The wall cut still passes through the host wall, but the visible joinery asset is no longer stretched to 100% of the wall thickness: doors use about 38% of the wall thickness and fixed windows about 45%, with sensible min/max clamps. This keeps classification cleaner than uncontrolled multi-part visual assets and avoids oversized openings in the viewport/export.
-- created meshes are named `Wall_###`, `Slab_###`, `Door_###`, `Window_###`, and `Roof_###` so the GLB → IFC classifier can map them to wall, slab, door, window, and roof IFC elements.
+- created meshes are named `Wall_###`, `Cloison_###`, `Slab_###`, `Door_###`, `Window_###`, `Roof_###`, and `Stair_###` so the GLB → IFC classifier can map them to wall/partition, slab, door, window, roof, and stair IFC elements.
 - created elements remain editable with object transforms and vertex / edge / face edit mode. The modeler viewport uses a low-contrast CAD lighting setup rather than heavy ambient-occlusion-style shading, so junctions are easier to read while drafting.
 - `Suppr` / `Delete` removes the selected element and is undoable.
 - `Alt+Z` toggles Xray at any time; Xray is viewport-only and exported GLB materials keep their original opacity.
 - Numpad views switch to orthographic front/right/top/opposite views; zoom and pan stay orthographic, while starting a plain left-drag orbit returns to perspective.
-- authoring tools live in a bottom floating dock (`Select`, `Slab`, `Wall`, `Door`, `Window`, `Roof`) while view/storey/edit controls stay in the top toolbar; the shortcuts panel is hidden by default and can be opened from the `?` help button.
+- authoring tools live in a bottom floating dock (`Select`, `Slab`, `Wall`, `Cloison`, `Door`, `Window`, `Roof`, `Escalier`) while view/storey/edit controls stay in the top toolbar; the shortcuts panel is hidden by default and can be opened from the `?` help button.
 - exports remain GLB baked, then the existing converter regenerates IFC.
 
 This is intentionally a lightweight mesh authoring layer, not a full parametric BIM kernel yet.
@@ -350,7 +352,7 @@ You can also set the path manually in `.env.local`:
 
 ```env
 QWEN_LLAMA_SERVER_BIN=F:\Github\llama.cpp\build\bin\Release\llama-server.exe
-QWEN_MODEL_PATH=F:\Github\glb2ifc\models\Qwen3-Reranker-0.6B-Q4_K_M.gguf
+QWEN_MODEL_PATH=F:\Github\Smelt\models\Qwen3-Reranker-0.6B-Q4_K_M.gguf
 ```
 
 Then start the app:
@@ -560,13 +562,13 @@ Modeler from scratch → Convert to IFC → Open in viewer → Modifier géomét
 
 The viewer matches a reloaded IFC to its local project by IFC content fingerprint first, then by file name. This means the link can still work even if the downloaded IFC was reopened manually from disk.
 
-For an IFC that was not generated by this app, the viewer can still display and reclassify it, but it cannot automatically reconstruct a full editable GLB source from arbitrary IFC geometry yet.
+For an IFC that was not generated by this app, the viewer now creates a best-effort editable GLB snapshot from the displayed Fragments geometry when you click `Modifier géométrie`. This is not a perfect semantic IFC reconstruction: it bakes the visible triangulated geometry into GLB meshes, then the modeler can edit that geometry and use the existing GLB → IFC pipeline to regenerate an IFC.
 
 ### Round-trip modeler/viewer: openings and spaces
 
 When reopening geometry from the IFC viewer, the modeler now treats the GLB source as the editable source of truth. Authoring walls are rebuilt from their stored wall paths, and door/window meshes are relinked to their host wall openings so they stay snapped into the wall after a viewer → modeler round-trip.
 
-Generated IFC spaces are no longer loaded automatically as editable blue overlays in the modeler because they can hide the authoring model and make openings look displaced. They remain available for debugging by opening the modeler with `showIfcSpaces=1` or `ifcSpaces=1` in the URL.
+Generated IFC spaces are loaded again by default when reopening geometry from the IFC viewer. They use a very light material and can be shown/hidden with the `IFC Spaces` toolbar toggle. When visible, they remain normal mesh geometry, so Object/Edit mode can be used to move vertices, edges, faces or the full space volume.
 
 ### Custom opening assets
 
@@ -609,3 +611,25 @@ When a placed `Door_###` or `Window_###` is selected in object mode, the propert
 ### UX fix: property inputs
 
 The modeler keeps door/window dimension inputs interactive even while global viewport shortcuts and text-selection guards are active. Editable controls in the property panel now stop event propagation to the 3D viewport, and the no-selection guard no longer disables text selection inside inputs.
+
+### Smelt stair authoring update
+
+The Stair tool now supports two turning strategies:
+
+- quarter-turn stairs with a cleaner landing platform generated from the incoming and outgoing flight directions;
+- winder / balancé stairs, using fan-shaped closed step volumes at each turn.
+
+When stair auto-opening is enabled, creating a stair searches the nearest slab on the upper storey and cuts a rectangular trimmer opening from the stair footprint. The slab keeps its original authoring boundary for snapping, but its visible/exported mesh is regenerated with the trimmer void. Undo/redo of stair creation and stair deletion restores the linked slab opening state.
+
+Generated IFC Spaces remain editable when reopening the modeler from the IFC viewer. They are rehydrated as low-opacity `IfcSpace` meshes and can be shown/hidden with the IFC Spaces toolbar button.
+
+### Fix slabs / trémies
+
+Les slabs percées par les trémies d’escalier sont générées en volumes fermés avec un winding de faces sortant. Cela évite que la face supérieure disparaisse en viewport ou à l’export à cause d’un backface culling involontaire.
+
+
+### IFC externe → Modeler éditable
+
+Le viewer prépare maintenant automatiquement un GLB éditable dès le chargement d’un IFC externe. Le bouton **Modifier géométrie** n’essaie donc plus de reconstruire un snapshot tardif depuis l’état courant du viewer : il ouvre le projet GLB pré-généré, sauvegardé localement avec le texte IFC source.
+
+Cette approche suit le principe du pipeline `web-ifc-viewer` : convertir la géométrie IFC en glTF/GLB propre au moment de l’import, puis réutiliser ce modèle pour les workflows d’édition.

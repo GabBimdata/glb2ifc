@@ -660,7 +660,6 @@
           <button id="undo-action" disabled title="Ctrl/Cmd+Z">Undo</button>
           <button id="redo-action" disabled title="Ctrl/Cmd+Shift+Z">Redo</button>
           <button id="xray-toggle" title="Alt+Z">Xray</button>
-          <button id="ifc-spaces-toggle" title="Afficher/masquer les spaces IFC générés" disabled>IFC Spaces</button>
           <button id="help-toggle" title="Afficher les raccourcis">?</button>
         </div>
         <div class="toolbar-group">

@@ -365,7 +365,7 @@ function getOrCreateClassificationRoot(lines, appender) {
   if (existing) return existing;
 
   const root = appender.nextRef();
-  appender.add(`${root}=IFCCLASSIFICATION('glb2ifc',$,$,${stepString(name)},'IFC class assigned manually in the local viewer',$,$);`);
+  appender.add(`${root}=IFCCLASSIFICATION('Smelt',$,$,${stepString(name)},'IFC class assigned manually in the local viewer',$,$);`);
   return root;
 }
 

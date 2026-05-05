@@ -6,7 +6,7 @@ import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
 import { openTypePicker } from './ifc-type-picker.js';
 import { makeProjectId, saveProject, getProject, updateProject, findProjectForIfcFile, findProjectForIfcText, setLastProjectId, editsMapToArray, editsArrayToMap, textToIfcFile, safeFileName } from './project-store.js';
 
-const EDITABLE_GLB_GENERATOR_VERSION = "web-ifc-local-transforms-origin-v4";
+const EDITABLE_GLB_GENERATOR_VERSION = "web-ifc-raw-local-origin-v3";
 const EDITABLE_GLB_SOURCE = "web-ifc-editable-snapshot";
 
 const container = document.getElementById("container");
@@ -1729,18 +1729,6 @@ function webIfcMatrixFromFlatTransformation(flatTransformation) {
   return matrix;
 }
 
-function applyWebIfcPlacedTransformToMesh(mesh, flatTransformation, precisionOrigin = null) {
-  const matrix = webIfcMatrixFromFlatTransformation(flatTransformation);
-  if (precisionOrigin) {
-    matrix.elements[12] -= Number(precisionOrigin.x) || 0;
-    matrix.elements[13] -= Number(precisionOrigin.y) || 0;
-    matrix.elements[14] -= Number(precisionOrigin.z) || 0;
-  }
-  matrix.decompose(mesh.position, mesh.quaternion, mesh.scale);
-  mesh.updateMatrix();
-  mesh.updateMatrixWorld(true);
-}
-
 function appendWebIfcFlatMeshToSnapshotRoot(ifcAPI, modelID, flatMesh, root, precisionOrigin = null) {
   if (!flatMesh) return;
   const expressID = Number(flatMesh.expressID);
@@ -1755,15 +1743,13 @@ function appendWebIfcFlatMeshToSnapshotRoot(ifcAPI, modelID, flatMesh, root, pre
     const placed = webIfcVectorGet(geometries, i);
     if (!placed) continue;
     const geometry = ifcAPI.GetGeometry(modelID, placed.geometryExpressID);
-    const meshGeometry = webIfcPlacedGeometryToBufferGeometry(ifcAPI, geometry);
+    const meshGeometry = webIfcPlacedGeometryToBufferGeometry(ifcAPI, geometry, placed.flatTransformation, precisionOrigin);
     if (!meshGeometry) continue;
 
     const mesh = new THREE.Mesh(meshGeometry, webIfcPlacedGeometryMaterial(placed, typeName));
-    applyWebIfcPlacedTransformToMesh(mesh, placed.flatTransformation, precisionOrigin);
     mesh.name = safeFileName(`${itemName}${geometryCount > 1 ? `_${String(i + 1).padStart(2, "0")}` : ""}`, `IfcElement_${expressID}_${i + 1}`);
     mesh.userData.smeltSource = EDITABLE_GLB_SOURCE;
     mesh.userData.smeltGeneratorVersion = EDITABLE_GLB_GENERATOR_VERSION;
-    mesh.userData.smeltLocalTransformPreserved = true;
     mesh.userData.expressID = expressID;
     mesh.userData.ifcType = typeName;
     mesh.userData.ifcHint = typeName;
@@ -1797,7 +1783,7 @@ function webIfcElementDisplayName(ifcAPI, modelID, expressID, typeName = "IfcEle
   return `${typeName}_${expressID}`;
 }
 
-function webIfcPlacedGeometryToBufferGeometry(ifcAPI, geometry) {
+function webIfcPlacedGeometryToBufferGeometry(ifcAPI, geometry, flatTransformation, precisionOrigin = null) {
   if (!geometry) return null;
   const vertices = ifcAPI.GetVertexArray(geometry.GetVertexData(), geometry.GetVertexDataSize());
   const indices = ifcAPI.GetIndexArray(geometry.GetIndexData(), geometry.GetIndexDataSize());
@@ -1808,6 +1794,13 @@ function webIfcPlacedGeometryToBufferGeometry(ifcAPI, geometry) {
   const triangleIndexCount = Math.floor(indices.length / 3) * 3;
   if (triangleIndexCount <= 0) return null;
 
+  const matrix = webIfcMatrixFromFlatTransformation(flatTransformation);
+  const normalMatrix = new THREE.Matrix3().getNormalMatrix(matrix);
+  const originX = Number(precisionOrigin?.x) || 0;
+  const originY = Number(precisionOrigin?.y) || 0;
+  const originZ = Number(precisionOrigin?.z) || 0;
+  const position = new THREE.Vector3();
+  const normal = new THREE.Vector3();
   const outPositions = new Float32Array(triangleIndexCount * 3);
   const outNormals = new Float32Array(triangleIndexCount * 3);
 
@@ -1817,19 +1810,16 @@ function webIfcPlacedGeometryToBufferGeometry(ifcAPI, geometry) {
     const source = vertexIndex * 6;
     if (source + 2 >= vertices.length) continue;
 
-    // Keep the geometry in the IFC item's local coordinates and put the
-    // placement in the mesh transform. Baking flatTransformation into vertices
-    // destroys the object's orientation in Three.js, so the modeler can only
-    // display a large world-aligned AABB. Preserving the transform gives true
-    // object-space bboxes and local gizmo orientation.
-    outPositions[out] = vertices[source];
-    outPositions[out + 1] = vertices[source + 1];
-    outPositions[out + 2] = vertices[source + 2];
+    position.set(vertices[source], vertices[source + 1], vertices[source + 2]).applyMatrix4(matrix);
+    outPositions[out] = position.x - originX;
+    outPositions[out + 1] = position.y - originY;
+    outPositions[out + 2] = position.z - originZ;
 
     if (source + 5 < vertices.length) {
-      outNormals[out] = vertices[source + 3];
-      outNormals[out + 1] = vertices[source + 4];
-      outNormals[out + 2] = vertices[source + 5];
+      normal.set(vertices[source + 3], vertices[source + 4], vertices[source + 5]).applyMatrix3(normalMatrix).normalize();
+      outNormals[out] = normal.x;
+      outNormals[out + 1] = normal.y;
+      outNormals[out + 2] = normal.z;
     }
     out += 3;
   }
@@ -2111,32 +2101,17 @@ function exportSnapshotRootToGlbBlob(root) {
     });
 
     const nodeIndex = json.nodes.length;
-    const node = {
+    json.nodes.push({
       name: safeGltfName(object.name || `IfcMesh_${nodeIndex}`),
       mesh: meshIndex,
       extras: snapshotExtrasToGltf({ smeltSource: "viewer-ifc-snapshot", ...(object.userData || {}) }),
-    };
-    const localMatrix = object.matrix?.clone?.() || new THREE.Matrix4();
-    if (!matrixIsApproximatelyIdentity(localMatrix)) {
-      node.matrix = Array.from(localMatrix.elements).map((value) => Number(value.toFixed(10)));
-    }
-    json.nodes.push(node);
+    });
     json.nodes[0].children.push(nodeIndex);
   }
 
   if (!json.nodes[0].children.length) throw new Error("Snapshot GLB vide : aucune géométrie valide après nettoyage.");
   json.buffers[0].byteLength = byteOffset;
   return makeGlbBlob(json, binaryParts, byteOffset);
-}
-
-function matrixIsApproximatelyIdentity(matrix, epsilon = 1e-10) {
-  const identity = new THREE.Matrix4();
-  const a = matrix?.elements || [];
-  const b = identity.elements;
-  for (let i = 0; i < 16; i++) {
-    if (Math.abs((Number(a[i]) || 0) - b[i]) > epsilon) return false;
-  }
-  return true;
 }
 
 function makeGlbBlob(json, binaryParts, binaryByteLength) {

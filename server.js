@@ -179,6 +179,17 @@ function safeNodeExtras(node) {
   }
 }
 
+
+function parseSmeltCoordinateOrigin(extras = {}) {
+  const source = extras?.smeltCoordinateOrigin || extras?.smeltWorldOrigin || extras?.coordinateOrigin;
+  if (!source || typeof source !== 'object') return null;
+  const x = Number(source.x ?? source[0]);
+  const y = Number(source.y ?? source[1]);
+  const z = Number(source.z ?? source[2]);
+  if (![x, y, z].every(Number.isFinite)) return null;
+  return { x, y, z };
+}
+
 function manualIfcTypeFromExtras(extras, nodeName = '') {
   const raw = String(extras?.smeltIfcType || extras?.ifcType || extras?.IFCType || '').toUpperCase();
   if (raw === 'IFCSPACE') return 'IFCSPACE';
@@ -233,12 +244,20 @@ async function extractMeshesFromGLB(glbPath) {
       const indices = indicesAccessor ? indicesAccessor.getArray() : null;
       if (!indices || indices.length === 0) continue;
 
-      const transformed = new Float32Array(positions.length);
+      const coordinateOrigin = parseSmeltCoordinateOrigin(extras);
+      // Keep this as Float64Array/JS double. Some IFC-derived GLBs are rebased
+      // around a local origin to avoid Float32 quantization during editing; when
+      // converting back to IFC, re-apply the world offset here without collapsing
+      // the precision back into Float32.
+      const transformed = new Float64Array(positions.length);
+      const originX = coordinateOrigin?.x || 0;
+      const originY = coordinateOrigin?.y || 0;
+      const originZ = coordinateOrigin?.z || 0;
       for (let i = 0; i < positions.length; i += 3) {
         const x = positions[i], y = positions[i + 1], z = positions[i + 2];
-        transformed[i]     = worldMatrix[0] * x + worldMatrix[4] * y + worldMatrix[8]  * z + worldMatrix[12];
-        transformed[i + 1] = worldMatrix[1] * x + worldMatrix[5] * y + worldMatrix[9]  * z + worldMatrix[13];
-        transformed[i + 2] = worldMatrix[2] * x + worldMatrix[6] * y + worldMatrix[10] * z + worldMatrix[14];
+        transformed[i]     = worldMatrix[0] * x + worldMatrix[4] * y + worldMatrix[8]  * z + worldMatrix[12] + originX;
+        transformed[i + 1] = worldMatrix[1] * x + worldMatrix[5] * y + worldMatrix[9]  * z + worldMatrix[13] + originY;
+        transformed[i + 2] = worldMatrix[2] * x + worldMatrix[6] * y + worldMatrix[10] * z + worldMatrix[14] + originZ;
       }
 
       const materialInfo = extractMaterialInfo(primitive);
@@ -1874,7 +1893,7 @@ function generateIFC(meshes, storeys, originalFilename, scaleInfo = null) {
     'ISO-10303-21;',
     'HEADER;',
     `FILE_DESCRIPTION(('ViewDefinition [CoordinationView]'),'2;1');`,
-    `FILE_NAME('${escapeIFCString(originalFilename)}','${now}',(''),(''),'glb2ifc converter','glb2ifc','');`,
+    `FILE_NAME('${escapeIFCString(originalFilename)}','${now}',(''),(''),'Smelt converter','Smelt','');`,
     `FILE_SCHEMA(('IFC4'));`,
     'ENDSEC;',
     'DATA;'
@@ -1901,10 +1920,10 @@ function generateIFC(meshes, storeys, originalFilename, scaleInfo = null) {
   lines.push(`${styleContext}=IFCGEOMETRICREPRESENTATIONSUBCONTEXT('Body','Model',*,*,*,*,${geomContext},$,.MODEL_VIEW.,$);`);
 
   // Owner history
-  const person = nextId();      lines.push(`${person}=IFCPERSON($,$,'glb2ifc',$,$,$,$,$);`);
-  const org    = nextId();      lines.push(`${org}=IFCORGANIZATION($,'glb2ifc',$,$,$);`);
+  const person = nextId();      lines.push(`${person}=IFCPERSON($,$,'Smelt',$,$,$,$,$);`);
+  const org    = nextId();      lines.push(`${org}=IFCORGANIZATION($,'Smelt',$,$,$);`);
   const personOrg = nextId();   lines.push(`${personOrg}=IFCPERSONANDORGANIZATION(${person},${org},$);`);
-  const application = nextId(); lines.push(`${application}=IFCAPPLICATION(${org},'1.0','glb2ifc','glb2ifc');`);
+  const application = nextId(); lines.push(`${application}=IFCAPPLICATION(${org},'1.0','Smelt','Smelt');`);
   const ownerHistory = nextId();
   const timestamp = Math.floor(Date.now() / 1000);
   lines.push(`${ownerHistory}=IFCOWNERHISTORY(${personOrg},${application},$,.ADDED.,${timestamp},${personOrg},${application},${timestamp});`);
@@ -5504,7 +5523,7 @@ app.get('/api/reclassifiable-types', (req, res) => {
 startManagedQwenServer();
 
 app.listen(PORT, () => {
-  console.log(`\n  GLB → IFC converter`);
+  console.log(`\n  Smelt`);
   console.log(`  ───────────────────`);
   console.log(`  Open http://localhost:${PORT} in your browser\n`);
 });

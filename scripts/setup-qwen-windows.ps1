@@ -81,7 +81,7 @@ function Install-PortableCMake {
 
   $asset = $null
   try {
-    $headers = @{ "User-Agent" = "glb2ifc-qwen-setup" }
+    $headers = @{ "User-Agent" = "smelt-qwen-setup" }
     $release = Invoke-RestMethod -Uri "https://api.github.com/repos/Kitware/CMake/releases/latest" -Headers $headers -ErrorAction Stop
     $asset = $release.assets |
       Where-Object { $_.name -match "^cmake-.*-windows-x86_64\.zip$" } |

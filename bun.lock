@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "glb2ifc",
+      "name": "smelt",
       "dependencies": {
         "@gltf-transform/core": "^4.1.1",
         "@gltf-transform/extensions": "^4.1.1",

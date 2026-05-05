@@ -4255,81 +4255,6 @@ function parseIfcIndexTriplesForModeler(arg) {
   return triples;
 }
 
-function maybeExtractPlanOrientationFromGeometry(object) {
-  if (!object?.isMesh || object.isInstancedMesh || !object.geometry) return;
-  if (object.userData?.__planOrientationExtracted) return;
-
-  // IFC triangulation sometimes arrives with a useful placement matrix but a
-  // residual object yaw baked into the vertex coordinates. The OBB can look
-  // right, while TransformControls still sees an identity local basis. Extract a
-  // stable horizontal principal axis into object.quaternion, and counter-rotate
-  // the geometry so the mesh does not visually move. This gives Local gizmos the
-  // same orientation as the object/bbox.
-  const source = String(object.userData?.smeltSource || object.parent?.userData?.smeltSource || "");
-  const isIfcEditableSnapshot = source === "web-ifc-editable-snapshot" || object.userData?.smeltLocalTransformPreserved === true;
-  if (!isIfcEditableSnapshot) return;
-
-  const scale = object.scale || new THREE.Vector3(1, 1, 1);
-  const maxScale = Math.max(Math.abs(scale.x || 1), Math.abs(scale.y || 1), Math.abs(scale.z || 1));
-  const minScale = Math.min(Math.abs(scale.x || 1), Math.abs(scale.y || 1), Math.abs(scale.z || 1));
-  if (maxScale > 0 && Math.abs(maxScale - minScale) / maxScale > 1e-4) return;
-
-  const position = object.geometry.getAttribute("position");
-  if (!position || position.count < 4) return;
-
-  let meanX = 0;
-  let meanZ = 0;
-  for (let i = 0; i < position.count; i++) {
-    meanX += position.getX(i);
-    meanZ += position.getZ(i);
-  }
-  meanX /= position.count;
-  meanZ /= position.count;
-
-  let xx = 0;
-  let xz = 0;
-  let zz = 0;
-  for (let i = 0; i < position.count; i++) {
-    const x = position.getX(i) - meanX;
-    const z = position.getZ(i) - meanZ;
-    xx += x * x;
-    xz += x * z;
-    zz += z * z;
-  }
-  xx /= position.count;
-  xz /= position.count;
-  zz /= position.count;
-
-  const trace = xx + zz;
-  const diff = xx - zz;
-  const discr = Math.sqrt(Math.max(0, diff * diff + 4 * xz * xz));
-  const lambda0 = (trace + discr) * 0.5;
-  const lambda1 = (trace - discr) * 0.5;
-  if (!Number.isFinite(lambda0) || lambda0 < 1e-8) return;
-  if (lambda1 > 0 && lambda0 / lambda1 < 1.08) return;
-
-  // Principal direction angle in local XZ. Fold it to [-90°, 90°] to avoid
-  // arbitrary 180° flips between similar reloads.
-  const angle = 0.5 * Math.atan2(2 * xz, xx - zz);
-  let normalized = angle;
-  while (normalized > Math.PI / 2) normalized -= Math.PI;
-  while (normalized < -Math.PI / 2) normalized += Math.PI;
-  if (Math.abs(normalized) < THREE.MathUtils.degToRad(0.5)) return;
-
-  const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), normalized);
-  const inverse = new THREE.Matrix4().makeRotationY(-normalized);
-  object.geometry.applyMatrix4(inverse);
-  object.geometry.computeBoundingBox?.();
-  object.geometry.computeBoundingSphere?.();
-  object.geometry.computeVertexNormals?.();
-
-  object.quaternion.multiply(q);
-  object.updateMatrix();
-  object.updateMatrixWorld(true);
-  object.userData.__planOrientationExtracted = true;
-  object.userData.__planOrientationAngle = normalized;
-}
-
 function indexMeshes(root) {
   state.meshes = [];
   const editableObjects = [];
@@ -4369,7 +4294,6 @@ function indexMeshes(root) {
       }
 
       ensureEditableBufferGeometry(object);
-      maybeExtractPlanOrientationFromGeometry(object);
       normalizeEditablePivotToGeometryCenter(object);
       object.geometry.computeBoundingBox();
       object.geometry.computeBoundingSphere();
@@ -4697,7 +4621,9 @@ function selectMesh(mesh) {
     if (state.edit.active) {
       updateEditPivotToSelection();
     } else {
-      attachTransformToSelectedObject();
+      state.transform.enabled = true;
+      state.transform.attach(state.selected);
+      state.transform.setSize?.(1.15);
     }
   } else {
     clearEditComponentSelection();
@@ -4713,33 +4639,6 @@ function selectMesh(mesh) {
   renderTree();
   renderProperties();
   updateUiEnabled();
-}
-
-function currentTransformSpace() {
-  return state.transform?.getSpace?.() || state.transform?.space || "world";
-}
-
-function attachTransformToSelectedObject() {
-  if (!state.selected || !state.transform) return;
-  state.selected.updateMatrix();
-  state.selected.updateMatrixWorld(true);
-  state.transform.enabled = true;
-  state.transform.setSpace(currentTransformSpace());
-  state.transform.attach(state.selected);
-  state.transform.setSize?.(1.15);
-  state.transform.updateMatrixWorld?.(true);
-  state.transform.dispatchEvent?.({ type: "change" });
-}
-
-function refreshTransformAttachment() {
-  if (!state.transform) return;
-  if (state.edit.active) {
-    if (hasEditComponentSelection()) updateEditPivotToSelection();
-    else state.transform.detach();
-    return;
-  }
-  if (state.selected) attachTransformToSelectedObject();
-  else state.transform.detach();
 }
 
 function setEditMode(active) {
@@ -4777,7 +4676,10 @@ function setEditMode(active) {
     cancelBoxSelect();
     removeEditOverlay();
     state.transform.detach();
-    if (state.selected) attachTransformToSelectedObject();
+    if (state.selected) {
+      state.transform.attach(state.selected);
+      state.transform.setSize?.(1.15);
+    }
   }
 
   updateBoxHelper();
@@ -5581,70 +5483,13 @@ function updateBoxHelper() {
   if (!state.selected) return;
 
   state.selected.updateMatrixWorld(true);
-  state.boxHelper = createObjectSpaceBoxHelper(state.selected, 0xff9248);
-  if (!state.boxHelper) return;
-  state.boxHelper.userData.__modelerOverlay = true;
+  const box = new THREE.Box3().setFromObject(state.selected);
+  if (box.isEmpty()) return;
+
+  state.boxHelper = new THREE.Box3Helper(box, 0xff9248);
   state.boxHelper.material.depthTest = false;
   state.boxHelper.renderOrder = 10;
   state.scene.add(state.boxHelper);
-}
-
-function createObjectSpaceBoxHelper(object, color = 0xff9248) {
-  if (!object) return null;
-  const sourceBox = getLocalGeometryBox(object);
-  if (!sourceBox || sourceBox.isEmpty()) return null;
-
-  const min = sourceBox.min;
-  const max = sourceBox.max;
-  const localCorners = [
-    [min.x, min.y, min.z], [max.x, min.y, min.z], [max.x, max.y, min.z], [min.x, max.y, min.z],
-    [min.x, min.y, max.z], [max.x, min.y, max.z], [max.x, max.y, max.z], [min.x, max.y, max.z],
-  ].map(([x, y, z]) => new THREE.Vector3(x, y, z));
-  const edges = [
-    0, 1, 1, 2, 2, 3, 3, 0,
-    4, 5, 5, 6, 6, 7, 7, 4,
-    0, 4, 1, 5, 2, 6, 3, 7,
-  ];
-  const positions = new Float32Array(edges.length * 3);
-  object.updateMatrixWorld(true);
-  for (let i = 0; i < edges.length; i++) {
-    const world = localCorners[edges[i]].clone().applyMatrix4(object.matrixWorld);
-    positions[i * 3] = world.x;
-    positions[i * 3 + 1] = world.y;
-    positions[i * 3 + 2] = world.z;
-  }
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-  const material = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.95, depthTest: false });
-  const helper = new THREE.LineSegments(geometry, material);
-  helper.name = "Object oriented bounding box";
-  return helper;
-}
-
-function getLocalGeometryBox(object) {
-  if (!object?.geometry) return null;
-  const geometry = object.geometry;
-  geometry.computeBoundingBox?.();
-  const box = geometry.boundingBox;
-  if (!box || box.isEmpty()) return null;
-  return box.clone();
-}
-
-function getObjectSpaceBoundingInfo(object) {
-  const box = getLocalGeometryBox(object);
-  if (!box) return null;
-  object.updateMatrixWorld(true);
-  const localSize = new THREE.Vector3();
-  const localCenter = new THREE.Vector3();
-  box.getSize(localSize);
-  box.getCenter(localCenter);
-  const worldCenter = localCenter.clone().applyMatrix4(object.matrixWorld);
-  const worldSize = localSize.clone().multiply(new THREE.Vector3(
-    Math.abs(object.scale.x || 1),
-    Math.abs(object.scale.y || 1),
-    Math.abs(object.scale.z || 1),
-  ));
-  return { size: worldSize, center: worldCenter, localSize, localCenter };
 }
 
 function renderProperties() {
@@ -5661,14 +5506,11 @@ function renderProperties() {
   const mesh = state.selected;
   mesh.updateMatrixWorld(true);
   const stats = geometryStats(mesh);
-  const orientedBox = getObjectSpaceBoundingInfo(mesh);
-  const fallbackBox = new THREE.Box3().setFromObject(mesh);
-  const size = orientedBox?.size || new THREE.Vector3();
-  const center = orientedBox?.center || new THREE.Vector3();
-  if (!orientedBox) {
-    fallbackBox.getSize(size);
-    fallbackBox.getCenter(center);
-  }
+  const box = new THREE.Box3().setFromObject(mesh);
+  const size = new THREE.Vector3();
+  const center = new THREE.Vector3();
+  box.getSize(size);
+  box.getCenter(center);
   const openingEditorHtml = renderSelectedOpeningEditor(mesh);
 
   properties.innerHTML = `
@@ -5690,7 +5532,7 @@ function renderProperties() {
       <div class="prop-grid">
         <div class="prop-row"><div class="prop-label">Vertices</div><div class="prop-value">${stats.vertices}</div></div>
         <div class="prop-row"><div class="prop-label">Triangles</div><div class="prop-value">${stats.triangles}</div></div>
-        <div class="prop-row"><div class="prop-label">BBox orientée</div><div class="prop-value">${formatVector(size)}</div></div>
+        <div class="prop-row"><div class="prop-label">BBox taille</div><div class="prop-value">${formatVector(size)}</div></div>
         <div class="prop-row"><div class="prop-label">BBox centre</div><div class="prop-value">${formatVector(center)}</div></div>
       </div>
     </div>
@@ -6281,9 +6123,7 @@ function setTransformMode(mode) {
 }
 
 function setTransformSpace(space) {
-  const next = space === "local" ? "local" : "world";
-  state.transform.setSpace(next);
-  refreshTransformAttachment();
+  state.transform.setSpace(space);
   updateToolbarState();
 }
 
@@ -6291,9 +6131,8 @@ function updateToolbarState() {
   translateButton.classList.toggle("active", state.transform.getMode() === "translate");
   rotateButton.classList.toggle("active", state.transform.getMode() === "rotate");
   scaleButton.classList.toggle("active", state.transform.getMode() === "scale");
-  const transformSpace = currentTransformSpace();
-  localButton.classList.toggle("active", transformSpace === "local");
-  worldButton.classList.toggle("active", transformSpace === "world");
+  localButton.classList.toggle("active", state.transform.space === "local");
+  worldButton.classList.toggle("active", state.transform.space === "world");
 
   objectModeButton?.classList.toggle("active", !state.edit.active);
   editModeButton?.classList.toggle("active", state.edit.active);
@@ -6735,17 +6574,13 @@ function refreshAuthoredWallMiters() {
   const eps = Math.max(0.005, (Number(state.authoring.gridStep) || 0.1) * 0.35);
 
   for (const wall of walls) {
-    // GLB extras / localStorage round-trips deserialize THREE.Vector3 values as
-    // plain objects. Normalize before the miter pass so old projects and IFC→GLB
-    // snapshots don't crash on `.clone()` and don't generate invalid wall joins.
-    normalizeWallPathForRoundTrip(wall.userData.wallPath, wall);
     wall.userData.wallPath.prev = null;
     wall.userData.wallPath.next = null;
   }
 
   for (const wall of walls) {
     const data = wall.userData.wallPath;
-    const storeyId = wall.userData.storeyId || data.storeyId || null;
+    const storeyId = wall.userData.storeyId;
     const prev = findConnectedWallForEndpoint(walls, wall, data.start, "start", eps, storeyId);
     const next = findConnectedWallForEndpoint(walls, wall, data.end, "end", eps, storeyId);
     if (prev) data.prev = prev;
@@ -6756,22 +6591,16 @@ function refreshAuthoredWallMiters() {
 }
 
 function findConnectedWallForEndpoint(walls, wall, endpoint, endpointKind, eps, storeyId) {
-  const endpointPoint = coerceWallPoint(endpoint, wall?.userData?.wallPath?.baseElevation ?? wall?.userData?.storeyElevation ?? 0);
   let best = null;
   for (const other of walls) {
-    const data = other.userData?.wallPath;
-    if (!data || other === wall) continue;
-    const otherStoreyId = other.userData?.storeyId || data.storeyId || null;
-    if (otherStoreyId !== storeyId) continue;
-
-    const atStart = coerceWallPoint(data.start, data.baseElevation);
-    const atEnd = coerceWallPoint(data.end, data.baseElevation);
+    if (other === wall || other.userData.storeyId !== storeyId) continue;
+    const data = other.userData.wallPath;
     const candidates = [
-      { at: atStart, opposite: atEnd },
-      { at: atEnd, opposite: atStart },
+      { at: data.start, opposite: data.end },
+      { at: data.end, opposite: data.start },
     ];
     for (const candidate of candidates) {
-      const distance = Math.hypot(endpointPoint.x - candidate.at.x, endpointPoint.z - candidate.at.z);
+      const distance = Math.hypot(endpoint.x - candidate.at.x, endpoint.z - candidate.at.z);
       if (distance <= eps && (!best || distance < best.distance)) {
         best = { distance, point: candidate.opposite.clone() };
       }

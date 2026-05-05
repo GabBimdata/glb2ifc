@@ -1,7 +1,7 @@
 {
-  "name": "glb2ifc",
+  "name": "smelt",
   "version": "1.0.0",
-  "description": "Local GLB to IFC converter with web UI",
+  "description": "Smelt local GLB/IFC authoring tool",
   "type": "module",
   "main": "server.js",
   "scripts": {
