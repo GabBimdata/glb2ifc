@@ -12,6 +12,7 @@ import { createServer as createViteServer } from 'vite';
 import { applyReclassifications, IFC_TYPES, reclassifiableTypeNames } from './src/ifc-patcher.js';
 import { IFC_CATEGORIES } from './src/ifc-catalog.js';
 import { candidateDocumentForIfcType } from './src/ifc-classification-kb.js';
+import planToGlb from './src/plan2glb_route.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -121,6 +122,8 @@ const vite = await createViteServer({
   publicDir: false
 });
 app.use(vite.middlewares);
+
+app.use(planToGlb);
 
 app.get('/viewer.html', (req, res, next) => {
   const viewerPath = path.join(__dirname, 'public', 'viewer.html');

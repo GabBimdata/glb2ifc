@@ -24,3 +24,14 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+
+.venv/
+venv/
+plan_detector/.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+
+.tools/
