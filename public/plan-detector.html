@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Smelt · Plan → GLB</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #151b23;
+      --panel-2: #1a2028;
+      --text: #e8eaed;
+      --muted: #8b95a3;
+      --border: #2a3441;
+      --accent: #ff9248;
+      --accent-soft: rgba(255,146,72,.14);
+      --success: #5dd39e;
+      --error: #ff6b6b;
+      --warning: #ffd166;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: radial-gradient(circle at 20% 0%, rgba(255,146,72,.12), transparent 34%), var(--bg);
+      color: var(--text);
+      font-family: "JetBrains Mono", Consolas, Monaco, monospace;
+      min-height: 100vh;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 1rem;
+      padding: 1rem 1.1rem;
+      border-bottom: 1px solid var(--border);
+      background: rgba(15,20,25,.86);
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      backdrop-filter: blur(12px);
+    }
+    h1 { margin: 0; font-size: 1.1rem; letter-spacing: -.04em; }
+    a, button, input, label { font: inherit; }
+    a, button {
+      color: var(--text);
+      text-decoration: none;
+      border: 1px solid var(--border);
+      background: var(--panel-2);
+      border-radius: 12px;
+      padding: .62rem .72rem;
+      cursor: pointer;
+      font-size: .78rem;
+    }
+    button:hover, a:hover { border-color: var(--accent); background: var(--accent-soft); }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    main {
+      display: grid;
+      grid-template-columns: 380px minmax(0, 1fr);
+      gap: 1rem;
+      padding: 1rem;
+      max-width: 1500px;
+      margin: 0 auto;
+    }
+    section {
+      background: rgba(21,27,35,.88);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      overflow: hidden;
+    }
+    .panel-body { padding: 1rem; }
+    .field { display: grid; gap: .35rem; margin-bottom: .9rem; }
+    .field label { color: var(--muted); font-size: .72rem; }
+    input[type="number"], input[type="text"], input[type="file"] {
+      width: 100%;
+      border: 1px solid var(--border);
+      background: #10161d;
+      color: var(--text);
+      border-radius: 12px;
+      padding: .65rem .75rem;
+      outline: none;
+      font-size: .78rem;
+    }
+    input:focus { border-color: var(--accent); }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: .65rem; }
+    .actions { display: grid; gap: .65rem; margin-top: .95rem; }
+    .hint { color: var(--muted); font-size: .70rem; line-height: 1.55; }
+    .status { padding: .85rem 1rem; border-top: 1px solid var(--border); color: var(--muted); font-size: .72rem; white-space: pre-wrap; min-height: 3.2rem; }
+    .status.ok { color: var(--success); }
+    .status.error { color: var(--error); }
+    .status.warning { color: var(--warning); }
+    .canvas-wrap { position: relative; min-height: 70vh; display: grid; place-items: center; background: #0b1016; }
+    canvas { max-width: 100%; max-height: calc(100vh - 120px); background: #fff; border-radius: 12px; cursor: crosshair; }
+    .badge { display: inline-block; color: var(--accent); border: 1px solid rgba(255,146,72,.35); border-radius: 999px; padding: .18rem .45rem; font-size: .66rem; margin-left: .35rem; }
+    .download-link { display: none; text-align: center; color: var(--success); border-color: rgba(93,211,158,.45); }
+    .download-link.visible { display: block; }
+    @media (max-width: 900px) { main { grid-template-columns: 1fr; } .canvas-wrap { min-height: 45vh; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Plan → GLB <span class="badge">plan_detector</span></h1>
+    <nav>
+      <a href="/modeler.html">Modeler</a>
+      <a href="/">Convert</a>
+    </nav>
+  </header>
+  <main>
+    <section>
+      <div class="panel-body">
+        <div class="field">
+          <label for="image-input">Image du plan</label>
+          <input id="image-input" type="file" accept="image/*" />
+        </div>
+        <div class="row">
+          <div class="field">
+            <label for="scale-input">Échelle mm / pixel</label>
+            <input id="scale-input" type="number" min="0.0001" step="0.001" value="10" />
+          </div>
+          <div class="field">
+            <label for="height-input">Hauteur murs m</label>
+            <input id="height-input" type="number" min="0.1" step="0.1" value="2.5" />
+          </div>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label for="min-length-input">Longueur min mm</label>
+            <input id="min-length-input" type="number" min="1" step="10" value="400" />
+          </div>
+          <div class="field">
+            <label for="filename-input">Nom GLB</label>
+            <input id="filename-input" type="text" value="plan_detected_walls.glb" />
+          </div>
+        </div>
+        <div class="actions">
+          <button id="calibrate-button" disabled>Calibrer avec 2 points</button>
+          <button id="detect-button" disabled>Générer le GLB</button>
+          <a id="download-link" class="download-link" download="plan_detected_walls.glb">Télécharger le GLB généré</a>
+        </div>
+        <p class="hint">
+          Workflow conseillé : charge l’image, calibre l’échelle en cliquant deux points d’une cote connue,
+          génère le GLB, puis ouvre ce GLB dans le Modeler. Ce chemin évite de passer par IFC avant l’édition,
+          ce qui garde les murs comme hôtes Door/Window.
+        </p>
+      </div>
+      <div id="status" class="status">Charge une image pour commencer.</div>
+    </section>
+    <section class="canvas-wrap">
+      <canvas id="preview"></canvas>
+    </section>
+  </main>
+
+  <script>
+    const input = document.getElementById('image-input');
+    const canvas = document.getElementById('preview');
+    const ctx = canvas.getContext('2d');
+    const scaleInput = document.getElementById('scale-input');
+    const heightInput = document.getElementById('height-input');
+    const minLengthInput = document.getElementById('min-length-input');
+    const filenameInput = document.getElementById('filename-input');
+    const calibrateButton = document.getElementById('calibrate-button');
+    const detectButton = document.getElementById('detect-button');
+    const downloadLink = document.getElementById('download-link');
+    const statusBox = document.getElementById('status');
+
+    let imageFile = null;
+    let imageBitmap = null;
+    let objectUrl = null;
+    let calibrating = false;
+    let points = [];
+
+    function setStatus(text, kind = '') {
+      statusBox.textContent = text;
+      statusBox.className = 'status ' + kind;
+    }
+
+    function redraw() {
+      if (!imageBitmap) return;
+      canvas.width = imageBitmap.width;
+      canvas.height = imageBitmap.height;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(imageBitmap, 0, 0);
+      if (points.length) {
+        ctx.save();
+        ctx.strokeStyle = '#ff9248';
+        ctx.fillStyle = '#ff9248';
+        ctx.lineWidth = Math.max(2, canvas.width / 900);
+        for (const p of points) {
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, Math.max(5, canvas.width / 300), 0, Math.PI * 2);
+          ctx.fill();
+        }
+        if (points.length === 2) {
+          ctx.beginPath();
+          ctx.moveTo(points[0].x, points[0].y);
+          ctx.lineTo(points[1].x, points[1].y);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+    }
+
+    function canvasPoint(event) {
+      const rect = canvas.getBoundingClientRect();
+      return {
+        x: (event.clientX - rect.left) * (canvas.width / rect.width),
+        y: (event.clientY - rect.top) * (canvas.height / rect.height),
+      };
+    }
+
+    input.addEventListener('change', async (event) => {
+      imageFile = event.target.files?.[0] || null;
+      downloadLink.classList.remove('visible');
+      if (!imageFile) return;
+      imageBitmap = await createImageBitmap(imageFile);
+      points = [];
+      redraw();
+      calibrateButton.disabled = false;
+      detectButton.disabled = false;
+      setStatus(`Image chargée : ${imageFile.name} (${imageBitmap.width}×${imageBitmap.height}px).`, 'ok');
+    });
+
+    calibrateButton.addEventListener('click', () => {
+      if (!imageBitmap) return;
+      calibrating = true;
+      points = [];
+      redraw();
+      setStatus('Clique deux extrémités d’une cote connue sur le plan.', 'warning');
+    });
+
+    canvas.addEventListener('click', (event) => {
+      if (!calibrating || !imageBitmap) return;
+      points.push(canvasPoint(event));
+      if (points.length > 2) points = points.slice(-2);
+      redraw();
+      if (points.length === 2) {
+        const px = Math.hypot(points[1].x - points[0].x, points[1].y - points[0].y);
+        const real = prompt('Distance réelle entre les deux points ? Exemple : 8.02m, 802cm ou 8020mm', '1m');
+        const mm = parseDistanceToMm(real);
+        if (mm && px > 0) {
+          const scale = mm / px;
+          scaleInput.value = scale.toFixed(4);
+          setStatus(`Échelle calculée : ${scale.toFixed(4)} mm/pixel.`, 'ok');
+        } else {
+          setStatus('Calibration annulée ou distance invalide.', 'warning');
+        }
+        calibrating = false;
+      }
+    });
+
+    function parseDistanceToMm(value) {
+      const s = String(value || '').trim().toLowerCase().replace(',', '.');
+      const m = s.match(/^([0-9]+(?:\.[0-9]+)?)\s*(mm|cm|m)?$/);
+      if (!m) return null;
+      const n = Number(m[1]);
+      const unit = m[2] || 'm';
+      if (!Number.isFinite(n) || n <= 0) return null;
+      if (unit === 'mm') return n;
+      if (unit === 'cm') return n * 10;
+      return n * 1000;
+    }
+
+    detectButton.addEventListener('click', async () => {
+      if (!imageFile) return;
+      const scale = Number(scaleInput.value);
+      const height = Number(heightInput.value);
+      if (!Number.isFinite(scale) || scale <= 0) return setStatus('Échelle invalide.', 'error');
+      if (!Number.isFinite(height) || height <= 0) return setStatus('Hauteur invalide.', 'error');
+
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      downloadLink.classList.remove('visible');
+      detectButton.disabled = true;
+      setStatus('Détection en cours… le service Python peut démarrer automatiquement au premier appel.', 'warning');
+
+      try {
+        const fd = new FormData();
+        fd.append('image', imageFile, imageFile.name || 'plan.png');
+        fd.append('scale_mm_per_px', String(scale));
+        fd.append('wall_height_m', String(height));
+        fd.append('min_wall_length_mm', String(Number(minLengthInput.value) || 400));
+        fd.append('filename', filenameInput.value || 'plan_detected_walls.glb');
+
+        const response = await fetch('/plan2glb', { method: 'POST', body: fd });
+        if (!response.ok) {
+          const text = await response.text();
+          throw new Error(text || response.statusText);
+        }
+
+        const blob = await response.blob();
+        objectUrl = URL.createObjectURL(blob);
+        const name = (filenameInput.value || 'plan_detected_walls.glb').replace(/[^A-Za-z0-9_.-]+/g, '_');
+        downloadLink.href = objectUrl;
+        downloadLink.download = name.endsWith('.glb') ? name : `${name}.glb`;
+        downloadLink.classList.add('visible');
+        const wallCount = response.headers.get('X-Wall-Count') || '?';
+        setStatus(`GLB généré : ${wallCount} murs. Télécharge-le puis ouvre-le dans le Modeler.`, 'ok');
+      } catch (error) {
+        console.error(error);
+        setStatus(`Erreur génération GLB : ${error.message || error}`, 'error');
+      } finally {
+        detectButton.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
