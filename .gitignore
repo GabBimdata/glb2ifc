@@ -35,3 +35,12 @@ __pycache__/
 .env
 
 .tools/
+
+# Backups & patch snapshots
+*.bak
+*.bak-*
+*.pre_*
+*.orig
+*~
+
+# Doublon à nettoyer : .env et __pycache__ apparaissent 2×
