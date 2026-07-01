@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="fr">
 <head>
   <meta charset="UTF-8" />
@@ -698,7 +698,6 @@
             <option value="right">Wall droite</option>
           </select>
           <button id="walls-from-slab" title="Créer des murs sur le contour de la slab sélectionnée" disabled>Walls from slab</button>
-          <button id="merge-slabs" title="Fusionner les slabs de lâ€™Ã©tage actif en un seul objet">Merge slabs</button>
           <button id="roof-from-slab" title="Créer une toiture depuis la slab sélectionnée" disabled>Roof from slab</button>
           <button id="authoring-stop" class="danger-tool" title="Terminer le tracé courant et revenir en Select" disabled>Stop</button>
         </div>

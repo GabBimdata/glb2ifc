@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Smelt · Modeler Plus</title>
+  <style>
+    body { margin:0; background:#0f1419; color:#e8eaed; font-family: system-ui, sans-serif; }
+    .boot { min-height:100vh; display:grid; place-items:center; text-align:center; padding:2rem; }
+    .boot code { color:#ff9248; }
+  </style>
+</head>
+<body>
+  <div class="boot">Chargement de <code>Smelt Modeler Plus</code>…</div>
+  <script>
+    (async () => {
+      try {
+        let html = await fetch('/modeler.html', { cache: 'no-store' }).then((r) => {
+          if (!r.ok) throw new Error('Impossible de charger /modeler.html');
+          return r.text();
+        });
+
+        html = html.replace('<title>Smelt · Modeler</title>', '<title>Smelt · Modeler Plus</title>');
+
+        if (!html.includes('id="merge-slabs"')) {
+          html = html.replace(
+            /(<button\s+id="roof-from-slab"[\s\S]*?<\/button>)/,
+            '$1\n          <button id="merge-slabs" title="Shift+clic sur plusieurs slabs puis Merge" disabled>Merge slabs</button>'
+          );
+        }
+
+        html = html.replace(
+          /<script\s+type="module"\s+src="\/src\/modeler\.js"\s*><\/script>/,
+          '<script type="module" src="/src/modeler-plus-bootstrap.js"><\\/script>'
+        );
+
+        document.open();
+        document.write(html);
+        document.close();
+      } catch (error) {
+        document.body.innerHTML = '<pre style="padding:2rem;color:#ff6b6b;white-space:pre-wrap">Erreur Modeler Plus: ' + String(error && error.message || error) + '</pre>';
+      }
+    })();
+  </script>
+</body>
+</html>
