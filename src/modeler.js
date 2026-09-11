@@ -167,6 +167,7 @@ const state = {
     drawStart: null,
     drawCurrent: null,
     stairPath: [],
+    roomPath: [],
     wallChainLastMesh: null,
     preview: null,
     openingPlacement: null,
@@ -494,6 +495,7 @@ function bindEvents() {
   toolWindowButton?.addEventListener("click", () => setAuthoringTool("window"));
   toolRoofButton?.addEventListener("click", () => setAuthoringTool("roof"));
   toolStairButton?.addEventListener("click", () => setAuthoringTool("stair"));
+  document.getElementById("tool-room")?.addEventListener("click", () => setAuthoringTool("room"));
   wallAlignmentSelect?.addEventListener("change", () => setWallAlignment(wallAlignmentSelect.value));
   wallsFromSlabButton?.addEventListener("click", createWallsFromSelectedSlabBoundary);
   roofFromSlabButton?.addEventListener("click", createRoofFromSelectedSlab);
@@ -569,6 +571,12 @@ function bindEvents() {
       return;
     }
 
+    if (event.key === "Enter" && state.authoring.tool === "room" && state.authoring.roomPath?.length > 2) {
+      event.preventDefault();
+      finishRoomLoop();
+      return;
+    }
+
     if (event.key === "Enter" && state.authoring.tool === "stair" && state.authoring.stairPath?.length > 1) {
       event.preventDefault();
       stopAuthoringTool({ silent: false });
@@ -608,6 +616,7 @@ function bindEvents() {
       if (key === "f") setAuthoringTool("window");
       if (key === "h") setAuthoringTool("roof");
       if (key === "e") setAuthoringTool("stair");
+      if (key === "k") setAuthoringTool("room");
       if (key === "p") setAuthoringSnap(!state.authoring.snap);
       if (key === "pageup") navigateStorey(1);
       if (key === "pagedown") navigateStorey(-1);
@@ -872,7 +881,7 @@ function ensureAuthoringRoot() {
 }
 
 function setAuthoringTool(tool, options = {}) {
-  if (!["select", "wall", "partition", "slab", "door", "window", "roof", "stair"].includes(tool)) return;
+  if (!["select", "wall", "partition", "slab", "door", "window", "roof", "stair", "room"].includes(tool)) return;
   if (state.authoring.tool !== tool) cancelAuthoringDraw();
   state.authoring.tool = tool;
   if (tool !== "select" && state.edit.active) setEditMode(false);
@@ -889,6 +898,7 @@ function setAuthoringTool(tool, options = {}) {
     else if (tool === "door") setStatus("Outil Door · survole un mur, preview bleue/brune, clic pour créer la porte et découper le mur.", "ok");
     else if (tool === "window") setStatus("Outil Window · survole un mur, preview vitrée, clic pour créer la fenêtre et découper le mur.", "ok");
     else if (tool === "roof") setStatus("Outil Roof · sélectionne une slab : preview toiture · clique Roof from slab pour créer une toiture Flat/Shed/Gable.", "ok");
+    else if (tool === "room") setStatus("Outil Pièce · clique les coins (tracé à angle droit) · reviens près du 1er point ou Entrée pour fermer · murs + dalle générés automatiquement.", "ok");
     else if (tool === "stair") setStatus("Outil Escalier · multi-points · mode palier ou balancé · trémie auto dans la slab supérieure · Stop/Entrée finalise.", "ok");
     else setStatus("Outil Select · sélection et transformations objet/édition.", "ok");
   }
@@ -1634,11 +1644,188 @@ function applyReferencePlanScale(ref, factor, anchorWorld) {
 }
 
 function isDrawingAuthoringTool() {
-  return !state.edit.active && ["wall", "partition", "slab", "door", "window", "stair"].includes(state.authoring.tool);
+  return !state.edit.active && ["wall", "partition", "slab", "door", "window", "stair", "room"].includes(state.authoring.tool);
 }
 
 function isOpeningTool(tool = state.authoring.tool) {
   return tool === "door" || tool === "window";
+}
+
+// ---------------------------------------------------------------------------
+// Outil "Pièce" (peindre une pièce) — niveau 1 : tracé orthogonal, fermeture
+// auto, génération murs + dalle(s) + historique groupé. Réutilise createWallMesh,
+// createSlabMesh, refreshAuthoredWallMiters, indexMeshes, pushHistory.
+// ---------------------------------------------------------------------------
+
+// Contraint 'point' à un angle droit par rapport au dernier sommet posé :
+// on garde l'axe (X ou Z) dont le déplacement est le plus grand, et on aligne
+// l'autre coordonnée sur celle du sommet précédent. C'est ce qui rend le tracé
+// "propre" comme dans les jeux de construction grand public.
+function orthogonalizeRoomPoint(point) {
+  const path = state.authoring.roomPath;
+  if (!path || !path.length) return point.clone();
+  const last = path[path.length - 1];
+  const dx = point.x - last.x;
+  const dz = point.z - last.z;
+  const out = point.clone();
+  if (Math.abs(dx) >= Math.abs(dz)) out.z = last.z; // segment horizontal (le long de X)
+  else out.x = last.x;                              // segment vertical (le long de Z)
+  return out;
+}
+
+// Distance planaire (XZ) entre deux points.
+function roomPlanarDist(a, b) {
+  return Math.hypot(a.x - b.x, a.z - b.z);
+}
+
+function handleRoomClick(rawPoint) {
+  const path = state.authoring.roomPath;
+  const closeTol = Math.max(0.05, state.authoring.gridStep * 0.6);
+
+  if (!path.length) {
+    state.authoring.roomPath = [rawPoint.clone()];
+    state.authoring.drawStart = rawPoint.clone();
+    state.authoring.drawCurrent = rawPoint.clone();
+    createOrUpdateAuthoringPreview();
+    setStatus("Point 1 de la pièce posé. Clique les coins suivants (tracé à angle droit). Reviens près du 1er point ou Entrée pour fermer.", "ok");
+    return;
+  }
+
+  const point = orthogonalizeRoomPoint(rawPoint);
+
+  // Fermeture : clic près du premier point et au moins un rectangle tracé.
+  if (path.length >= 3 && roomPlanarDist(rawPoint, path[0]) <= closeTol) {
+    finishRoomLoop();
+    return;
+  }
+
+  const last = path[path.length - 1];
+  if (roomPlanarDist(point, last) < Math.max(0.02, state.authoring.gridStep * 0.25)) {
+    setStatus("Segment trop court : choisis un point plus éloigné.", "warning");
+    return;
+  }
+
+  path.push(point.clone());
+  state.authoring.drawStart = point.clone();
+  state.authoring.drawCurrent = point.clone();
+  createOrUpdateAuthoringPreview();
+  setStatus(`${path.length} coins posés · continue le contour, ou reviens près du 1er point / Entrée pour fermer et générer la pièce.`, "ok");
+}
+
+// Décompose un polygone orthogonal (liste de sommets, arêtes horizontales ou
+// verticales seulement) en une liste de rectangles {minX,maxX,minZ,maxZ} par
+// balayage vertical (slabs). Chaque bande entre deux X consécutifs est testée
+// par son point milieu : si le centre est dans le polygone, on émet le rectangle.
+function decomposeOrthogonalPolygon(points) {
+  const xs = [...new Set(points.map((p) => Math.round(p.x * 1e4) / 1e4))].sort((a, b) => a - b);
+  const zs = [...new Set(points.map((p) => Math.round(p.z * 1e4) / 1e4))].sort((a, b) => a - b);
+  if (xs.length < 2 || zs.length < 2) return [];
+
+  const rects = [];
+  for (let xi = 0; xi < xs.length - 1; xi++) {
+    for (let zi = 0; zi < zs.length - 1; zi++) {
+      const x0 = xs[xi], x1 = xs[xi + 1];
+      const z0 = zs[zi], z1 = zs[zi + 1];
+      if (x1 - x0 < 1e-4 || z1 - z0 < 1e-4) continue;
+      const cx = (x0 + x1) / 2, cz = (z0 + z1) / 2;
+      if (pointInPolygonXZ(cx, cz, points)) {
+        rects.push({ minX: x0, maxX: x1, minZ: z0, maxZ: z1 });
+      }
+    }
+  }
+  // Fusion horizontale simple des cellules adjacentes de même bande Z (moins de dalles).
+  const merged = [];
+  for (const r of rects) {
+    const prev = merged[merged.length - 1];
+    if (prev && Math.abs(prev.minZ - r.minZ) < 1e-6 && Math.abs(prev.maxZ - r.maxZ) < 1e-6 && Math.abs(prev.maxX - r.minX) < 1e-6) {
+      prev.maxX = r.maxX;
+    } else {
+      merged.push({ ...r });
+    }
+  }
+  return merged;
+}
+
+// Test point-dans-polygone (ray casting) dans le plan XZ.
+function pointInPolygonXZ(x, z, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i].x, zi = poly[i].z;
+    const xj = poly[j].x, zj = poly[j].z;
+    const intersect = (zi > z) !== (zj > z) && x < ((xj - xi) * (z - zi)) / (zj - zi) + xi;
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+function finishRoomLoop() {
+  const path = (state.authoring.roomPath || []).map((p) => p.clone());
+  cancelAuthoringDraw();
+  state.authoring.roomPath = [];
+
+  if (path.length < 3) {
+    setStatus("Pièce annulée : au moins 3 coins nécessaires.", "warning");
+    return;
+  }
+
+  ensureAuthoringRoot();
+  const root = ensureAuthoringRoot();
+  createRoomFromLoop(path, root);
+}
+
+function createRoomFromLoop(path, root) {
+  const created = [];
+
+  // 1) Dalles : décomposition orthogonale -> un createSlabMesh par rectangle.
+  const rects = decomposeOrthogonalPolygon(path);
+  for (const r of rects) {
+    const start = new THREE.Vector3(r.minX, 0, r.minZ);
+    const end = new THREE.Vector3(r.maxX, 0, r.maxZ);
+    const slab = createSlabMesh(start, end);
+    if (slab) { root.add(slab); created.push(slab); }
+  }
+
+  // 2) Murs : un createWallMesh par arête du contour, avec voisins pour les miters.
+  const n = path.length;
+  for (let i = 0; i < n; i++) {
+    const prev = path[(i - 1 + n) % n];
+    const start = path[i];
+    const end = path[(i + 1) % n];
+    const next = path[(i + 2) % n];
+    const mesh = createWallMesh(start, end, { prevPoint: prev, nextPoint: next, alignment: "left", kind: "wall" });
+    if (!mesh) continue;
+    if (mesh.userData.wallPath) {
+      mesh.userData.wallPath.prev = prev.clone();
+      mesh.userData.wallPath.next = next.clone();
+    }
+    root.add(mesh);
+    created.push(mesh);
+  }
+
+  if (!created.length) {
+    setStatus("Aucune pièce créée : contour invalide ou trop petit.", "warning");
+    return;
+  }
+
+  indexMeshes(root);
+  refreshAuthoredWallMiters();
+
+  const indexed = created.map((mesh) => state.meshes.find((c) => c.uuid === mesh.uuid) || mesh);
+  pushHistory({
+    type: "createMeshes",
+    label: `Peindre une pièce (${indexed.length} objets)`,
+    meshes: indexed,
+    parent: root,
+  });
+
+  selectMesh(indexed[0] || null);
+  markDirty();
+  renderTree();
+  renderProperties();
+  updateUiEnabled();
+  const wallCount = created.filter((m) => m.userData?.authoringType === "wall" || m.userData?.ifcHint === "IfcWall").length;
+  const slabCount = created.filter((m) => m.userData?.authoringType === "slab").length;
+  setStatus(`Pièce créée : ${wallCount} murs + ${slabCount} dalle(s) · Ctrl+Z défait tout d'un coup.`, "ok");
 }
 
 function handleAuthoringClick(event) {
@@ -1654,6 +1841,11 @@ function handleAuthoringClick(event) {
   }
 
   ensureAuthoringRoot();
+
+  if (state.authoring.tool === "room") {
+    handleRoomClick(point);
+    return;
+  }
 
   if (state.authoring.tool === "stair") {
     const minSize = Math.max(0.02, state.authoring.gridStep * 0.25);
@@ -1938,6 +2130,47 @@ function clearAuthoringSnapFeedback() {
   clearSnapHud();
 }
 
+// Construit l'aperçu du tracé de pièce : un mur-aperçu par arête déjà posée,
+// plus le segment courant (dernier point -> curseur, contraint à angle droit).
+// Remplace l'ancien fallback rectangle de dalle.
+function buildRoomPreviewGroup() {
+  const path = (state.authoring.roomPath || []).map((p) => p.clone());
+  if (!path.length) return null;
+
+  const segments = [];
+  for (let i = 0; i < path.length - 1; i++) {
+    segments.push([path[i], path[i + 1]]);
+  }
+  // Segment courant : du dernier point posé vers le curseur, orthogonalisé.
+  if (state.authoring.drawCurrent) {
+    const last = path[path.length - 1];
+    const cur = orthogonalizeRoomPoint(state.authoring.drawCurrent);
+    if (Math.hypot(cur.x - last.x, cur.z - last.z) > 1e-4) {
+      segments.push([last, cur]);
+    }
+  }
+  if (!segments.length) return null;
+
+  const group = new THREE.Group();
+  for (let i = 0; i < segments.length; i++) {
+    const [a, b] = segments[i];
+    const prev = i > 0 ? segments[i - 1][0] : null;
+    const next = i < segments.length - 1 ? segments[i + 1][1] : null;
+    const wall = createWallMesh(a, b, {
+      preview: true,
+      prevPoint: prev,
+      nextPoint: next,
+      alignment: "left",
+      kind: "wall",
+    });
+    if (wall) {
+      wall.userData.__modelerOverlay = true;
+      group.add(wall);
+    }
+  }
+  return group.children.length ? group : null;
+}
+
 function createOrUpdateAuthoringPreview() {
   removeAuthoringPreview();
 
@@ -1950,6 +2183,17 @@ function createOrUpdateAuthoringPreview() {
     mesh.name = `${openingToolLabel(state.authoring.tool)} preview`;
     state.authoring.preview = mesh;
     state.scene.add(mesh);
+    return;
+  }
+
+  if (state.authoring.tool === "room") {
+    const group = buildRoomPreviewGroup();
+    if (group) {
+      group.userData.__modelerOverlay = true;
+      group.name = "Room preview";
+      state.authoring.preview = group;
+      state.scene.add(group);
+    }
     return;
   }
 

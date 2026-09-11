@@ -2545,6 +2545,48 @@ function generateIFC(meshes, storeys, originalFilename, scaleInfo = null) {
     return 2.8;
   }
 
+  function makeBoxExtrudedSolid(bounds) {
+    // Prisme vertical droit -> IfcExtrudedAreaSolid (solide paramétrique,
+    // éditable) au lieu d'une soupe de triangles. Convention d'axes du projet :
+    // IFC (X, Y, Z) = glTF (X, -Z, Y). L'extrusion se fait le long de Z IFC.
+    const sizeX = bounds.maxX - bounds.minX;
+    const sizeZ = bounds.maxZ - bounds.minZ;
+    const depth = bounds.maxY - bounds.minY;
+
+    if (!(sizeX > 1e-6 && sizeZ > 1e-6 && depth > 1e-6)) {
+      return makeBoxTriangulatedFaceSet(bounds); // dégénéré -> fallback
+    }
+
+    // Centre du profil (plan XZ glTF -> plan XY IFC du profil).
+    const cx = (bounds.minX + bounds.maxX) / 2;
+    const cz = (bounds.minZ + bounds.maxZ) / 2;
+    const baseZ = bounds.minY; // face inférieure, en Z IFC
+
+    const profileCenter = nextId();
+    lines.push(`${profileCenter}=IFCCARTESIANPOINT((${cx.toFixed(6)},${(-cz).toFixed(6)}));`);
+
+    const axis2d = nextId();
+    lines.push(`${axis2d}=IFCAXIS2PLACEMENT2D(${profileCenter},$);`);
+
+    const profile = nextId();
+    // IfcRectangleProfileDef(ProfileType, ProfileName, Position, XDim, YDim)
+    lines.push(`${profile}=IFCRECTANGLEPROFILEDEF(.AREA.,$,${axis2d},${sizeX.toFixed(6)},${sizeZ.toFixed(6)});`);
+
+    const solidOrigin = nextId();
+    lines.push(`${solidOrigin}=IFCCARTESIANPOINT((0.,0.,${baseZ.toFixed(6)}));`);
+
+    const solidPlacement = nextId();
+    lines.push(`${solidPlacement}=IFCAXIS2PLACEMENT3D(${solidOrigin},$,$);`);
+
+    const extrudeDir = nextId();
+    lines.push(`${extrudeDir}=IFCDIRECTION((0.,0.,1.));`);
+
+    const solid = nextId();
+    lines.push(`${solid}=IFCEXTRUDEDAREASOLID(${profile},${solidPlacement},${extrudeDir},${depth.toFixed(6)});`);
+
+    return solid;
+  }
+
   function makeBoxTriangulatedFaceSet(bounds) {
     const points = [
       [bounds.minX, bounds.minY, bounds.minZ],
@@ -3698,6 +3740,8 @@ function generateIFC(meshes, storeys, originalFilename, scaleInfo = null) {
         let weightedHeight = 0;
         let hasSlopedRoofTop = false;
         let roofTopSource = null;
+        let hasSweptSolid = false;
+        let hasTessellation = false;
 
         for (const rect of sourceRects) {
           const bounds = createSpacePrismBoundsForRect(rect, minY, maxY);
@@ -3712,7 +3756,8 @@ function generateIFC(meshes, storeys, originalFilename, scaleInfo = null) {
 
           const faceSet = roofTop
             ? makeVariableTopBoxTriangulatedFaceSet(bounds, roofTop)
-            : makeBoxTriangulatedFaceSet(bounds);
+            : makeBoxExtrudedSolid(bounds);
+          if (roofTop) hasTessellation = true; else hasSweptSolid = true;
 
           const topAverage = roofTop
             ? (roofTop.p0 + roofTop.p1 + roofTop.p2 + roofTop.p3) / 4
@@ -3756,7 +3801,8 @@ function generateIFC(meshes, storeys, originalFilename, scaleInfo = null) {
         }
 
         const shapeRep = nextId();
-        lines.push(`${shapeRep}=IFCSHAPEREPRESENTATION(${styleContext},'Body','Tessellation',(${faceSets.join(',')}));`);
+        const repType = (hasSweptSolid && !hasTessellation) ? 'SweptSolid' : 'Tessellation';
+        lines.push(`${shapeRep}=IFCSHAPEREPRESENTATION(${styleContext},'Body',repType,(${faceSets.join(',')}));`.replace("repType", `'${repType}'`));
         queuePresentationLayer({ classification: 'space' }, shapeRep);
 
         const productShape = nextId();
