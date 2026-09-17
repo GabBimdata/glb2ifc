@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Smelt Studio</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 16 16%27%3E%3Crect x=%273%27 y=%273%27 width=%2710%27 height=%2710%27 transform=%27rotate(45 8 8)%27 fill=%27%23e8672a%27/%3E%3C/svg%3E" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --table: #e6e9eb;
+      --paper: #fbfbfa;
+      --paper-2: #f1f3f3;
+      --ink: #1f2a30;
+      --ink-2: #56626a;
+      --ink-3: #8a959b;
+      --rule: #d8dde0;
+      --rule-2: #c3cacd;
+      --molten: #e8672a;
+      --molten-ink: #a9441a;
+      --molten-soft: #fbe6da;
+      --sage: #2c5d55;
+      --sage-soft: #dcebe6;
+      --danger: #b43a26;
+      --r: 6px;
+      --font: "Instrument Sans", "Segoe UI", system-ui, -apple-system, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; background: var(--table); color: var(--ink); font: 14px/1.45 var(--font); font-variant-numeric: tabular-nums; }
+    button, input, select { font: inherit; color: inherit; }
+    button { cursor: pointer; }
+    :focus-visible { outline: 2px solid var(--molten); outline-offset: 1px; }
+
+    #app {
+      height: 100vh;
+      display: grid;
+      grid-template-columns: 300px 1fr 280px;
+      grid-template-rows: 52px 1fr 30px;
+      grid-template-areas: "top top top" "rail stage inspector" "status status status";
+    }
+
+    /* ── Barre haute ───────────────────────────── */
+    .top { grid-area: top; display: flex; align-items: center; gap: 14px; padding: 0 14px; background: var(--paper); border-bottom: 1px solid var(--rule); }
+    .brand { display: flex; align-items: baseline; gap: 6px; font-weight: 600; font-size: 16px; letter-spacing: -0.01em; white-space: nowrap; }
+    .brand i { width: 10px; height: 10px; background: var(--molten); display: inline-block; transform: rotate(45deg); margin-right: 4px; }
+    .brand span { color: var(--ink-3); font-weight: 400; }
+    .top input.project-name { border: 1px solid transparent; background: transparent; padding: 5px 8px; border-radius: var(--r); font-weight: 500; width: 200px; }
+    .top input.project-name:hover { border-color: var(--rule); }
+    .top input.project-name:focus { border-color: var(--rule-2); background: #fff; outline: none; }
+    .levels { display: flex; align-items: center; gap: 2px; padding: 3px; background: var(--paper-2); border-radius: 8px; overflow-x: auto; max-width: 40vw; }
+    .levels button { border: 0; background: transparent; padding: 4px 10px; border-radius: 5px; white-space: nowrap; color: var(--ink-2); }
+    .levels button.on { background: #fff; color: var(--ink); box-shadow: 0 0 0 1px var(--rule); font-weight: 500; }
+    .levels button.add { color: var(--ink-3); font-size: 16px; line-height: 1; padding: 4px 8px; }
+    .spacer { flex: 1; }
+    .seg { display: flex; background: var(--paper-2); border-radius: 8px; padding: 3px; gap: 2px; }
+    .seg button { border: 0; background: transparent; padding: 4px 10px; border-radius: 5px; color: var(--ink-2); white-space: nowrap; }
+    .seg button.on { background: #fff; color: var(--ink); box-shadow: 0 0 0 1px var(--rule); }
+    .icon-btn { border: 1px solid var(--rule); background: #fff; border-radius: var(--r); height: 32px; min-width: 32px; display: inline-flex; align-items: center; justify-content: center; padding: 0 8px; color: var(--ink-2); }
+    .icon-btn:disabled { opacity: .4; cursor: default; }
+    .icon-btn svg { width: 16px; height: 16px; }
+
+    .btn { border: 1px solid var(--rule-2); background: #fff; border-radius: var(--r); padding: 7px 12px; white-space: nowrap; text-decoration: none; color: var(--ink); display: inline-flex; align-items: center; justify-content: center; gap: 6px; font-weight: 500; }
+    .btn:hover { border-color: var(--ink-3); }
+    .btn.primary { background: var(--molten); border-color: var(--molten); color: #fff; }
+    .btn.danger { color: var(--danger); }
+    .btn.primary:hover { background: #d95b20; }
+    .btn.ghost { border-color: transparent; background: transparent; color: var(--ink-2); }
+    .btn.ghost:hover { background: var(--paper-2); }
+    .btn.danger { color: var(--danger); }
+    .btn.block { width: 100%; }
+    .btn:disabled { opacity: .45; cursor: default; }
+
+    /* ── Parcours ──────────────────────────────── */
+    .rail { grid-area: rail; background: var(--paper); border-right: 1px solid var(--rule); display: flex; flex-direction: column; min-height: 0; }
+    .steps { flex: 1; overflow-y: auto; padding: 10px 0; }
+    .step { border-bottom: 1px solid var(--paper-2); }
+    .step-head { width: 100%; display: grid; grid-template-columns: 26px 1fr 16px; align-items: center; gap: 10px; padding: 9px 16px; border: 0; background: transparent; text-align: left; }
+    .step-head:hover { background: var(--paper-2); }
+    .step-num { width: 26px; height: 26px; border: 1px solid var(--rule-2); border-radius: 4px; display: grid; place-items: center; font-size: 12px; color: var(--ink-2); background: #fff; }
+    .step.active .step-num { background: var(--ink); border-color: var(--ink); color: #fff; }
+    .step.done .step-num { background: var(--sage-soft); border-color: var(--sage-soft); color: var(--sage); }
+    .step.active.done .step-num { background: var(--ink); color: #fff; }
+    .step-title { font-weight: 500; }
+    .step:not(.active) .step-title { color: var(--ink-2); }
+    .step-check { color: var(--sage); font-size: 13px; }
+    .step-body { display: none; padding: 4px 16px 16px 52px; }
+    .step.active .step-body { display: block; }
+    .step-body p { margin: 0 0 10px; color: var(--ink-2); font-size: 13px; }
+    .step-body .row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+    .step-body label.field { display: block; margin-bottom: 10px; }
+    .field-label { display: block; font-size: 12px; color: var(--ink-2); margin-bottom: 4px; }
+    .note { border-left: 2px solid var(--molten); background: var(--molten-soft); padding: 7px 10px; font-size: 13px; color: var(--molten-ink); margin: 0 0 10px; border-radius: 0; }
+    .ok { border-left: 2px solid var(--sage); background: var(--sage-soft); padding: 7px 10px; font-size: 13px; color: var(--sage); margin: 0 0 10px; }
+    .keys { margin: 10px 0 0; padding: 0; list-style: none; font-size: 12px; color: var(--ink-2); display: grid; gap: 4px; }
+    kbd { font: 500 11px var(--font); border: 1px solid var(--rule-2); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; background: #fff; color: var(--ink); }
+
+    .choices { display: grid; gap: 4px; margin-bottom: 10px; }
+    .choice { display: flex; align-items: center; justify-content: space-between; gap: 8px; border: 1px solid var(--rule); background: #fff; border-radius: var(--r); padding: 7px 10px; text-align: left; }
+    .choice:hover { border-color: var(--rule-2); }
+    .choice.on { border-color: var(--molten); box-shadow: inset 0 0 0 1px var(--molten); }
+    .choice small { color: var(--ink-3); }
+    .swatch { width: 26px; height: 10px; border-radius: 2px; background: var(--ink); flex: none; }
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 10px; }
+    .tile { border: 1px solid var(--rule); background: #fff; border-radius: var(--r); padding: 8px; text-align: left; display: grid; gap: 2px; }
+    .tile.on { border-color: var(--molten); box-shadow: inset 0 0 0 1px var(--molten); }
+    .tile svg { width: 100%; height: 30px; }
+    .tile small { color: var(--ink-3); font-size: 11px; }
+
+    input[type=text], input[type=number], select { width: 100%; border: 1px solid var(--rule-2); border-radius: var(--r); padding: 6px 8px; background: #fff; }
+    input[type=range] { width: 100%; accent-color: var(--molten); }
+    .inline { display: flex; align-items: center; gap: 8px; }
+    .unit { position: relative; }
+    .unit input { padding-right: 30px; }
+    .unit::after { content: attr(data-unit); position: absolute; right: 9px; top: 50%; transform: translateY(-50%); color: var(--ink-3); font-size: 12px; pointer-events: none; }
+
+    .table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 8px; }
+    .table td { padding: 5px 0; border-bottom: 1px solid var(--paper-2); }
+    .table td:last-child { text-align: right; color: var(--ink-2); }
+    .table tr.sel td { color: var(--molten-ink); }
+    .table tr { cursor: pointer; }
+    .table tfoot td { font-weight: 500; color: var(--ink); border: 0; padding-top: 8px; }
+
+    .cartouche { border-top: 1px solid var(--ink); margin: 0 12px 12px; display: grid; grid-template-columns: 1fr 1fr; font-size: 12px; }
+    .cartouche div { padding: 6px 4px; border-bottom: 1px solid var(--rule); }
+    .cartouche div:nth-child(odd) { border-right: 1px solid var(--rule); }
+    .cartouche span { display: block; color: var(--ink-3); font-size: 11px; }
+    .cartouche b { font-weight: 500; }
+    .cartouche .wide { grid-column: 1 / -1; border-right: 0 !important; }
+
+    /* ── Scène ─────────────────────────────────── */
+    .stage { grid-area: stage; display: grid; grid-template-columns: 1fr 0fr; min-width: 0; min-height: 0; position: relative; }
+    .stage[data-mode="split"] { grid-template-columns: 1fr 1fr; }
+    .stage[data-mode="3d"] { grid-template-columns: 0fr 1fr; }
+    .pane { position: relative; overflow: hidden; min-width: 0; }
+    .view-pane { border-left: 1px solid var(--rule); }
+    .stage[data-mode="plan"] .view-pane { border: 0; }
+    #plan { display: block; touch-action: none; cursor: default; }
+    #plan[data-tool="wall"], #plan[data-tool="scale"], #plan[data-tool="measure"], #plan[data-tool="calage"], #plan[data-tool="opening"] { cursor: crosshair; }
+    #plan[data-tool="movePlan"] { cursor: move; }
+    .floating { position: absolute; left: 12px; top: 12px; display: flex; gap: 2px; background: var(--paper); border: 1px solid var(--rule); border-radius: 8px; padding: 3px; box-shadow: 0 2px 8px rgba(31,42,48,.06); }
+    .floating button { border: 0; background: transparent; border-radius: 5px; padding: 5px 9px; display: inline-flex; gap: 6px; align-items: center; color: var(--ink-2); }
+    .floating button.on { background: var(--ink); color: #fff; }
+    .floating button kbd { opacity: .7; }
+    .floating button.on kbd { background: transparent; color: #fff; border-color: rgba(255,255,255,.4); }
+    .floating.right { left: auto; right: 12px; }
+    .stage[data-mode="split"] .floating kbd { display: none; }
+    .stage[data-mode="split"] #fitBtn { display: none; }
+    .stage[data-mode="split"] .plan-pane .floating.right { display: none; }
+    .typed { position: absolute; pointer-events: none; background: var(--ink); color: #fff; border-radius: 4px; padding: 3px 8px; font-weight: 500; display: none; }
+    .empty-hint[hidden] { display: none; }
+    .empty-hint { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; }
+    .empty-hint div { background: var(--paper); border: 1px dashed var(--rule-2); border-radius: 10px; padding: 18px 22px; max-width: 360px; text-align: center; pointer-events: auto; }
+    .empty-hint h3 { margin: 0 0 6px; font-size: 16px; font-weight: 500; }
+    .empty-hint p { margin: 0 0 12px; color: var(--ink-2); }
+
+    /* ── Inspecteur ────────────────────────────── */
+    .inspector { grid-area: inspector; background: var(--paper); border-left: 1px solid var(--rule); overflow-y: auto; padding: 16px; }
+    .inspector h2 { font-size: 15px; font-weight: 500; margin: 0 0 2px; }
+    .inspector .sub { color: var(--ink-3); font-size: 12px; margin: 0 0 14px; }
+    .inspector section { border-top: 1px solid var(--paper-2); padding-top: 12px; margin-top: 12px; }
+    .chips { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0 10px; }
+    .chip { border: 1px solid var(--rule); background: #fff; border-radius: 999px; padding: 2px 9px; font-size: 12px; color: var(--ink-2); }
+    .chip:hover { border-color: var(--molten); color: var(--molten-ink); }
+    .stat { display: flex; justify-content: space-between; padding: 4px 0; font-size: 13px; }
+    .stat span { color: var(--ink-2); }
+
+    /* ── Statut ────────────────────────────────── */
+    .status { grid-area: status; display: flex; align-items: center; gap: 18px; padding: 0 14px; background: var(--paper); border-top: 1px solid var(--rule); font-size: 12px; color: var(--ink-2); white-space: nowrap; overflow: hidden; }
+    .status .hint { flex: 1; overflow: hidden; text-overflow: ellipsis; color: var(--ink); }
+    .status .snap { color: var(--molten-ink); min-width: 90px; }
+
+    /* ── Fenêtres et notifications ─────────────── */
+    .modal-back { position: fixed; inset: 0; background: rgba(31,42,48,.35); display: grid; place-items: center; z-index: 20; }
+    .modal { background: var(--paper); border-radius: 10px; width: min(460px, calc(100vw - 32px)); max-height: calc(100vh - 60px); overflow: auto; box-shadow: 0 20px 50px rgba(31,42,48,.25); }
+    .modal.wide { width: min(760px, calc(100vw - 32px)); }
+    .modal header { padding: 16px 20px 0; }
+    .modal h3 { margin: 0; font-size: 17px; font-weight: 500; }
+    .modal .content { padding: 12px 20px; color: var(--ink-2); }
+    .modal footer { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 20px 16px; }
+    .check { display: flex; align-items: center; gap: 8px; padding: 4px 0; color: var(--ink); }
+    .check input { accent-color: var(--molten); width: 16px; height: 16px; }
+    .pages { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+    .page { border: 1px solid var(--rule); background: #fff; border-radius: var(--r); padding: 6px; text-align: center; font-size: 12px; color: var(--ink-2); }
+    .page:hover { border-color: var(--molten); }
+    .page img { width: 100%; height: 110px; object-fit: contain; display: block; margin-bottom: 4px; }
+    #toasts { position: fixed; bottom: 42px; left: 50%; transform: translateX(-50%); display: grid; gap: 6px; z-index: 30; pointer-events: none; }
+    .toast { background: var(--ink); color: #fff; padding: 8px 14px; border-radius: 6px; font-size: 13px; box-shadow: 0 6px 20px rgba(31,42,48,.25); animation: toast-in .18s ease-out; }
+    .toast.warn { background: var(--molten-ink); }
+    @keyframes toast-in { from { opacity: 0; transform: translateY(6px); } }
+    @media (prefers-reduced-motion: reduce) { .toast { animation: none; } }
+    .busy { position: fixed; inset: 0; background: rgba(251,251,250,.7); display: grid; place-items: center; z-index: 40; font-weight: 500; }
+
+    @media (max-width: 1100px) {
+      #app { grid-template-columns: 260px 1fr 0; }
+      .inspector { display: none; }
+      .top input.project-name { width: 130px; }
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <header class="top">
+      <div class="brand"><i></i>Smelt <span>Studio</span></div>
+      <input id="projectName" class="project-name" type="text" aria-label="Nom du projet" />
+      <nav class="levels" id="levelTabs" aria-label="Niveaux"></nav>
+      <div class="spacer"></div>
+      <button class="icon-btn" id="undoBtn" title="Annuler (Ctrl+Z)" aria-label="Annuler">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M5.5 3.5 2.5 6.5l3 3"/><path d="M2.5 6.5h7a4 4 0 0 1 0 8H7"/></svg>
+      </button>
+      <button class="icon-btn" id="redoBtn" title="Rétablir (Ctrl+Y)" aria-label="Rétablir">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m10.5 3.5 3 3-3 3"/><path d="M13.5 6.5h-7a4 4 0 0 0 0 8H9"/></svg>
+      </button>
+      <div class="seg" id="viewMode" role="group" aria-label="Affichage">
+        <button data-mode="plan" class="on">Plan</button>
+        <button data-mode="split">Plan et 3D</button>
+        <button data-mode="3d">3D</button>
+      </div>
+      <button class="btn primary" id="exportTop">Exporter l'IFC</button>
+    </header>
+
+    <aside class="rail">
+      <div class="steps" id="steps"></div>
+      <div class="cartouche" id="cartouche"></div>
+    </aside>
+
+    <main class="stage" id="stage" data-mode="plan">
+      <div class="pane plan-pane" id="planPane">
+        <canvas id="plan" data-tool="select"></canvas>
+        <div class="floating" id="toolbar" role="toolbar" aria-label="Outils">
+          <button data-tool="select">Sélection <kbd>V</kbd></button>
+          <button data-tool="wall">Mur <kbd>M</kbd></button>
+          <button data-tool="opening">Ouverture <kbd>O</kbd></button>
+          <button data-tool="measure">Mesurer</button>
+        </div>
+        <div class="floating right">
+          <button id="fitBtn" title="Recentrer (C)">Recentrer <kbd>C</kbd></button>
+        </div>
+        <div class="typed" id="typed"></div>
+        <div class="empty-hint" id="emptyHint" hidden>
+          <div>
+            <h3>Commencez par votre plan</h3>
+            <p>Importez l'image ou le PDF d'un étage, ou tracez directement vos murs sur la grille.</p>
+            <button class="btn primary" id="emptyImport">Importer un plan</button>
+            <button class="btn ghost" id="emptyDraw">Tracer sans plan</button>
+          </div>
+        </div>
+      </div>
+      <div class="pane view-pane" id="viewPane">
+        <div class="floating">
+          <button id="scopeBtn">Tous les niveaux</button>
+          <button id="frame3d">Recentrer</button>
+        </div>
+      </div>
+    </main>
+
+    <aside class="inspector" id="inspector" aria-live="polite"></aside>
+
+    <footer class="status">
+      <span class="hint" id="statusHint"></span>
+      <span class="snap" id="statusSnap"></span>
+      <span id="statusCoords"></span>
+      <span id="statusZoom"></span>
+    </footer>
+  </div>
+  <div id="modalRoot"></div>
+  <div id="toasts" aria-live="polite"></div>
+  <input type="file" id="planFile" accept="image/*,application/pdf" hidden />
+  <input type="file" id="projectFile" accept=".json,application/json" hidden />
+  <script type="module" src="/src/studio/main.js"></script>
+</body>
+</html>
