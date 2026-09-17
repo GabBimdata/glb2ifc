@@ -1,4 +1,6 @@
 ﻿import * as THREE from "three";
+import { ObjectSelection } from "./modeler/object-selection.js";
+import { createMergeSlabsCommand, mergeEligibility, restoreMergedSlabGroups } from "./modeler/merge-slabs.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
@@ -46,6 +48,7 @@ const toolStairButton = document.getElementById("tool-stair");
 const wallAlignmentSelect = document.getElementById("wall-alignment");
 const wallsFromSlabButton = document.getElementById("walls-from-slab");
 const roofFromSlabButton = document.getElementById("roof-from-slab");
+const mergeSlabsButton = document.getElementById("merge-slabs");
 const authoringStopButton = document.getElementById("authoring-stop");
 const snapToggleButton = document.getElementById("snap-toggle");
 const gridStepSelect = document.getElementById("grid-step");
@@ -62,6 +65,8 @@ const helpToggleButton = document.getElementById("help-toggle");
 const helpCloseButton = document.getElementById("help-close");
 const shortcutsPanel = document.getElementById("shortcuts-panel");
 const snapHud = document.getElementById("snap-hud");
+
+const objectSelection = new ObjectSelection();
 
 const state = {
   scene: null,
@@ -499,6 +504,7 @@ function bindEvents() {
   wallAlignmentSelect?.addEventListener("change", () => setWallAlignment(wallAlignmentSelect.value));
   wallsFromSlabButton?.addEventListener("click", createWallsFromSelectedSlabBoundary);
   roofFromSlabButton?.addEventListener("click", createRoofFromSelectedSlab);
+  mergeSlabsButton?.addEventListener("click", mergeSelectedSlabs);
   authoringStopButton?.addEventListener("click", () => stopAuthoringTool());
   snapToggleButton?.addEventListener("click", () => setAuthoringSnap(!state.authoring.snap));
   gridStepSelect?.addEventListener("change", () => setGridStep(Number(gridStepSelect.value || 0.5)));
@@ -775,6 +781,7 @@ function maybeSwitchFromOrthoToPerspectiveOnDrag(event) {
 function animate() {
   requestAnimationFrame(animate);
   state.controls.update();
+  for (const helper of objectSelection.helpers.values()) helper.update();
   state.renderer.render(state.scene, state.camera);
 }
 
@@ -4046,6 +4053,7 @@ async function loadFile(file, options = {}) {
     const root = gltf.scene || gltf.scenes?.[0];
     if (!root) throw new Error("Le GLB ne contient pas de scène exploitable.");
 
+    restoreMergedSlabGroups(root);
     root.name = root.name || file.name.replace(/\.(glb|gltf)$/i, "");
     state.scene.add(root);
     state.modelRoot = root;
@@ -4780,7 +4788,7 @@ function renderTree() {
 
   tree.innerHTML = meshes.map((mesh) => {
     const stats = geometryStats(mesh);
-    const selected = mesh === state.selected ? " selected" : "";
+    const selected = objectSelection.objects.has(mesh) ? " selected" : "";
     return `
       <div class="tree-item${selected}" data-id="${mesh.userData.__modelerId}">
         <div class="tree-main">
@@ -4793,9 +4801,9 @@ function renderTree() {
   }).join("");
 
   for (const item of tree.querySelectorAll(".tree-item")) {
-    item.addEventListener("click", () => {
+    item.addEventListener("click", (event) => {
       const id = Number(item.dataset.id);
-      selectMesh(state.meshes.find((mesh) => mesh.userData.__modelerId === id) || null);
+      selectMesh(state.meshes.find((mesh) => mesh.userData.__modelerId === id) || null, { additive: !state.edit.active && (event.shiftKey || event.ctrlKey || event.metaKey) });
     });
   }
 }
@@ -4927,10 +4935,12 @@ function selectFromPointer(event) {
   state.raycaster.setFromCamera(state.pointer, state.camera);
   const hits = state.raycaster.intersectObjects(state.meshes, false);
   const hit = hits.find((entry) => entry.object?.isMesh || entry.object?.isInstancedMesh);
-  selectMesh(hit?.object || null);
+  selectMesh(hit?.object || null, { additive: event.shiftKey || event.ctrlKey || event.metaKey });
 }
 
-function selectMesh(mesh) {
+function selectMesh(mesh, { additive = false } = {}) {
+  mesh = objectSelection.select(mesh, additive);
+  objectSelection.sync(state.scene, state.meshes);
   if (state.edit.active && mesh !== state.selected) {
     setEditMode(false);
   }
@@ -5009,6 +5019,11 @@ function setEditMode(active) {
   }
 
   state.edit.active = nextActive;
+  if (nextActive) {
+    objectSelection.select(state.selected);
+    objectSelection.sync(state.scene, state.meshes);
+    renderTree();
+  }
   clearEditComponentSelection({ keepOverlayShell: nextActive });
 
   if (state.edit.active) {
@@ -7024,6 +7039,28 @@ function findConnectedWallForEndpoint(walls, wall, endpoint, endpointKind, eps, 
   return best?.point || null;
 }
 
+function mergeSelectedSlabs() {
+  if (state.edit.active) return;
+  try {
+    const meshes = [...objectSelection.objects];
+    const command = createMergeSlabsCommand(meshes, state.modelRoot, {
+      id: state.nextModelerId,
+      name: `Slab_Merged_${state.authoring.slabCount + 1}`,
+    });
+    command.redo();
+    state.nextModelerId++;
+    state.authoring.slabCount++;
+    indexMeshes(state.modelRoot);
+    pushHistory(command);
+    selectMesh(command.mesh);
+    markDirty();
+    setStatus(`${meshes.length} dalles regroupées en un mesh libre. Les triangles et matériaux sont conservés ; les chevauchements restent présents. Ctrl/Cmd+Z pour annuler.`, "ok");
+  } catch (error) {
+    console.error(error);
+    setStatus(`Regroupement impossible : ${escapeHtml(error.message)}`, "warning");
+  }
+}
+
 function pushHistory(action) {
   if (!action) return;
   state.history.undoStack.push(action);
@@ -7049,6 +7086,10 @@ function redoLastAction() {
 }
 
 function applyHistoryAction(action, direction) {
+  if (action.type === "mergeSlabs") {
+    action[direction]();
+    return;
+  }
   if (action.type === "createMesh") {
     applyCreateMeshHistory(action, direction);
     return;
@@ -7147,6 +7188,13 @@ function applyCreateOpeningHistory(action, direction) {
 }
 
 function updateAfterHistory(action, prefix) {
+  if (action.type === "mergeSlabs") {
+    indexMeshes(state.modelRoot);
+    selectMesh(action.mesh.parent ? action.mesh : action.records[0].mesh);
+    markDirty();
+    setStatus(`${prefix} : ${escapeHtml(action.label)}.`, "ok");
+    return;
+  }
   if (action.type === "deleteMesh" || action.type === "deleteOpening" || action.type === "deleteStorey") {
     if (state.modelRoot) {
       indexMeshes(state.modelRoot);
@@ -7217,6 +7265,13 @@ function resetSelectedTransform() {
 }
 
 function updateUiEnabled() {
+  objectSelection.sync(state.scene, state.meshes);
+  if (mergeSlabsButton) {
+    const reason = mergeEligibility([...objectSelection.objects]);
+    mergeSlabsButton.disabled = state.edit.active || Boolean(reason);
+    mergeSlabsButton.title = reason || "Regrouper en un mesh libre, sans union des volumes";
+    mergeSlabsButton.textContent = objectSelection.objects.size > 1 ? `Regrouper dalles (${objectSelection.objects.size})` : "Regrouper dalles";
+  }
   const hasModel = Boolean(state.modelRoot);
   const hasSelection = Boolean(state.selected);
   const canSubEdit = hasSelection && canEditSubGeometry(state.selected);
