@@ -113,8 +113,16 @@ export function exportIfc(project) {
     if (styles[id]) return styles[id];
     const [r, g, b] = hexToRgb(colour || '#cccccc');
     const col = w.add(`IFCCOLOURRGB($,${num(r)},${num(g)},${num(b)})`);
-    const shading = w.add(`IFCSURFACESTYLESHADING(${col},${num(transparency)})`);
-    const style = w.add(`IFCSURFACESTYLE(${stepString(key)},.BOTH.,(${shading}))`);
+
+    // Pour les matériaux transparents, IfcSurfaceStyleRendering est mieux
+    // interprété par les viewers IFC que la transparence portée uniquement
+    // par IfcSurfaceStyleShading.
+    // IFC : 0 = opaque, 1 = totalement transparent.
+    const surface = transparency > 0
+      ? w.add(`IFCSURFACESTYLERENDERING(${col},${num(transparency)},$,$,$,$,$,$,.GLASS.)`)
+      : w.add(`IFCSURFACESTYLESHADING(${col})`);
+
+    const style = w.add(`IFCSURFACESTYLE(${stepString(key)},.BOTH.,(${surface}))`);
     styles[id] = style;
     return style;
   };
@@ -263,7 +271,7 @@ export function exportIfc(project) {
       // Menuiserie
       const pl = placement(st.placement);
       const frame = styled(faceSet(el.frame, st.z), 'frame', el.body);
-      const panel = styled(faceSet(el.panel, st.z), el.kind, el.body, el.kind === 'window' ? 0.6 : 0);
+      const panel = styled(faceSet(el.panel, st.z), el.kind, el.body, el.kind === 'window' ? 0.55 : 0);
       const rep = shape([frame, panel], 'Tessellation');
       const o = el.opening;
       const ent = el.kind === 'door'
@@ -290,7 +298,7 @@ export function exportIfc(project) {
       const opening = w.add(`IFCOPENINGELEMENT(${guid(`void-${key}`)},${oh},'Ouverture de toiture',$,$,${pl},${shape([voidSolid])},$,.OPENING.)`);
       if (host) w.add(`IFCRELVOIDSELEMENT(${guid(`relvoid-${key}`)},${oh},$,$,${host},${opening})`);
       const frame = styled(faceSet(el.frame, st.z), 'frame', el.body);
-      const panel = styled(faceSet(el.panel, st.z), 'window', el.body, 0.6);
+      const panel = styled(faceSet(el.panel, st.z), 'window', el.body, 0.55);
       const it = el.roofOpening.item;
       const ent = w.add(`IFCWINDOW(${guid(key)},${oh},${stepString(el.name)},$,$,${pl},${shape([frame, panel], 'Tessellation')},$,${num(it.height)},${num(it.width)},.SKYLIGHT.,.SINGLE_PANEL.,$)`);
       w.add(`IFCRELFILLSELEMENT(${guid(`relfill-${key}`)},${oh},$,$,${opening},${ent})`);
@@ -306,7 +314,7 @@ export function exportIfc(project) {
       const walls = w.add(`IFCWALL(${guid(`walls-${key}`)},${oh},${stepString(`${el.name} — joues et façade`)},$,$,${pl},${shape([styled(faceSet(el.walls, st.z), 'exterior', el.body)], 'Tessellation')},$,.STANDARD.)`);
       const cover = w.add(`IFCSLAB(${guid(`roof-${key}`)},${oh},${stepString(`${el.name} — couverture`)},$,$,${pl},${shape([styled(faceSet(el.roofMesh, st.z), 'roof', el.body)], 'Tessellation')},$,.ROOF.)`);
       const frame = styled(faceSet(el.frame, st.z), 'frame', el.body);
-      const panel = styled(faceSet(el.panel, st.z), 'window', el.body, 0.6);
+      const panel = styled(faceSet(el.panel, st.z), 'window', el.body, 0.55);
       const win = w.add(`IFCWINDOW(${guid(key)},${oh},${stepString(`${el.name} — baie`)},$,$,${pl},${shape([frame, panel], 'Tessellation')},$,${num(el.window.height)},${num(el.window.width)},.WINDOW.,.SINGLE_PANEL.,$)`);
       for (const ent of [walls, cover, win]) contained[el.level.id].push(noteBody(el, ent));
       linkMaterial('Maçonnerie', walls);
