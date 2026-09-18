@@ -5,15 +5,32 @@ import { WALL_TYPES, DEFAULTS } from './catalog.js';
 let idCounter = Date.now() % 100000;
 export const uid = (p) => `${p}${(idCounter++).toString(36)}${Math.random().toString(36).slice(2, 5)}`;
 
-export function newProject(name = 'Nouveau projet') {
+export function newBody(name, roof) {
   return {
+    id: uid('B'),
+    name,
+    elevation: 0,      // décalage du sol par rapport au niveau (m)
+    height: null,      // hauteur des murs ; null = hauteur du niveau
+    colors: {},
+    roofItems: [],
+    ceiling: true,
+    ceilingThickness: 0.15,
+    roof: roof || { enabled: true, type: 'gable', pitch: 35, overhang: 0.4, thickness: 0.25, followSetbacks: false },
+  };
+}
+
+export function newProject(name = 'Nouveau projet') {
+  const main = newBody('Bâtiment principal');
+  return {
+    bodies: [main],
+    activeBodyId: main.id,
+    drawBodyId: null,
     format: 'smelt-studio',
     version: 1,
     uid: uid('P'),
     name,
     settings: { slabThickness: DEFAULTS.slabThickness },
     levels: [newLevel('Rez-de-chaussée')],
-    roof: { enabled: true, type: 'gable', pitch: 35, overhang: 0.4, thickness: 0.25 },
     assets: {},
   };
 }
@@ -31,9 +48,69 @@ export function levelElevation(project, levelId) {
   return z;
 }
 
-export function wallHeight(project, level) {
+// Les murs extérieurs montent sur toute la hauteur d'étage : la façade reste continue
+// et la dalle du niveau supérieur, retirée au nu intérieur, ne se voit pas de l'extérieur.
+export function mainBody(project) {
+  return project.bodies[0];
+}
+
+export function bodyById(project, id) {
+  return project.bodies.find((b) => b.id === id) || mainBody(project);
+}
+
+export function bodyHeight(project, level, body) {
+  return body.height || level.height;
+}
+
+// Niveau le plus haut où le corps possède des pièces (c'est là qu'il est couvert).
+export function bodyTopLevelIndex(project, bodyId) {
+  let idx = -1;
+  project.levels.forEach((l, i) => {
+    if (l.rooms.some((r) => (r.bodyId || mainBody(project).id) === bodyId)) idx = i;
+  });
+  return idx;
+}
+
+/**
+ * Contour d'un corps sur un niveau : on ne garde que les murs de bordure.
+ * Les murs mitoyens entre deux corps sont comptés sans épaisseur (le contour s'arrête sur leur axe),
+ * ce qui évite que deux corps se chevauchent.
+ * sign = +1 pour le nu extérieur, -1 pour le nu intérieur.
+ */
+export function bodyOutlines(project, level, bodyId, sign = 1) {
+  const faces = G.detectFaces(level);
+  const roomOf = (face) => level.rooms.find((r) => G.pointInPolygon([r.x, r.y], face.poly));
+  const idOf = (face) => {
+    const room = roomOf(face);
+    return room ? (room.bodyId || mainBody(project).id) : null;
+  };
+  const inBody = new Map();
+  for (const f of faces.rooms) inBody.set(f, idOf(f) === bodyId);
+  const border = [];
+  const seen = new Set();
+  for (const f of faces.rooms) {
+    if (!inBody.get(f)) continue;
+    for (const h of f.halfEdges) {
+      const twinFace = faces.rooms.find((g) => g.halfEdges.includes(h.twin));
+      const shared = twinFace && inBody.get(twinFace);
+      if (shared) continue;
+      if (seen.has(h.wall.id)) continue;
+      seen.add(h.wall.id);
+      const neighbourBody = twinFace ? idOf(twinFace) : null;
+      const party = !!twinFace && neighbourBody !== bodyId;
+      border.push({ ...h.wall, thickness: party ? 0 : h.wall.thickness * 1 });
+    }
+  }
+  if (!border.length) return [];
+  const sub = { nodes: level.nodes, walls: border, rooms: [] };
+  const subFaces = G.detectFaces(sub);
+  return subFaces.outers.map((f) => (sign > 0 ? G.outerGrossPolygon(f) : G.outerNetPolygon(f)));
+}
+
+export function wallHeight(project, level, category = 'interior') {
   const isTop = project.levels[project.levels.length - 1].id === level.id;
-  return isTop ? level.height : level.height - project.settings.slabThickness;
+  if (isTop || category === 'exterior') return level.height;
+  return level.height - project.settings.slabThickness;
 }
 
 export function levelName(index) {
@@ -128,27 +205,45 @@ export class Store {
 // ─── Calculs dérivés ──────────────────────────────────────────────────────────
 
 export function recomputeAll(project) {
-  for (const level of project.levels) recomputeRooms(level);
+  const fallback = project.bodies?.[0]?.id || null;
+  // drawBodyId : corps auquel rattacher les pièces nouvellement tracées (null = héritage du voisinage).
+  const draw = project.bodies?.some((b) => b.id === project.drawBodyId) ? project.drawBodyId : fallback;
+  for (const level of project.levels) {
+    recomputeRooms(level, draw);
+    for (const r of level.rooms) if (!r.bodyId || !project.bodies?.some((b) => b.id === r.bodyId)) r.bodyId = fallback;
+  }
 }
 
-export function recomputeRooms(level) {
+export function recomputeRooms(level, defaultBodyId = null) {
   const { rooms } = G.detectFaces(level);
   const previous = level.rooms || [];
   const used = new Set();
-  const next = [];
+  const matched = new Map(); // face → pièce reprise
+  const fresh = [];
   let counter = previous.length;
   for (const face of rooms) {
-    let match = previous.find((r) => !used.has(r.id) && G.pointInPolygon([r.x, r.y], face.poly));
-    if (!match) {
-      const p = G.interiorPoint(face.poly);
-      counter += 1;
-      match = { id: uid('R'), name: `Pièce ${counter}`, x: p[0], y: p[1] };
-    } else {
-      used.add(match.id);
-    }
-    next.push(match);
+    const match = previous.find((r) => !used.has(r.id) && G.pointInPolygon([r.x, r.y], face.poly));
+    if (match) { used.add(match.id); matched.set(face, match); }
+    else fresh.push(face);
   }
-  level.rooms = next;
+  // Une pièce qui apparaît hérite du corps de ses voisines (une cloison posée dans le séjour
+  // crée deux pièces du même corps), et seulement à défaut du corps choisi pour le tracé.
+  const bodyOfFace = (face) => matched.get(face)?.bodyId || null;
+  for (const face of fresh) {
+    const votes = new Map();
+    for (const h of face.halfEdges) {
+      const neighbour = rooms.find((g) => g !== face && g.halfEdges.includes(h.twin));
+      const id = neighbour ? bodyOfFace(neighbour) : null;
+      if (id) votes.set(id, (votes.get(id) || 0) + 1);
+    }
+    let best = defaultBodyId;
+    let bestCount = 0;
+    for (const [id, n] of votes) if (n > bestCount) { best = id; bestCount = n; }
+    const p = G.interiorPoint(face.poly);
+    counter += 1;
+    matched.set(face, { id: uid('R'), name: `Pièce ${counter}`, x: p[0], y: p[1], bodyId: best });
+  }
+  level.rooms = rooms.map((face) => matched.get(face));
 }
 
 export function levelFaces(level) {
@@ -159,7 +254,8 @@ export function levelFaces(level) {
     return { face, room, net, area: Math.abs(G.polygonArea(net)) };
   });
   const outlines = faces.outers.map((f) => G.outerGrossPolygon(f));
-  return { rooms, outlines };
+  const innerOutlines = faces.outers.map((f) => G.outerNetPolygon(f));
+  return { rooms, outlines, innerOutlines };
 }
 
 // ─── Opérations sur les murs ──────────────────────────────────────────────────
@@ -394,14 +490,32 @@ export function validateProject(data) {
     throw new Error("Ce fichier n'est pas un projet Smelt Studio (.smelt.json).");
   }
   data.assets = data.assets || {};
+  data.colors = data.colors || {};
+  if (!Array.isArray(data.bodies) || !data.bodies.length) {
+    const main = newBody('Bâtiment principal', data.roof);
+    data.bodies = [main];
+    data.activeBodyId = main.id;
+  }
+  for (const b of data.bodies) {
+    b.roof = { enabled: true, type: 'gable', pitch: 35, overhang: 0.4, thickness: 0.25, followSetbacks: false, ridgeFlip: false, ...(b.roof || {}) };
+    b.elevation = b.elevation || 0;
+    b.colors = b.colors || {};
+    b.roofItems = b.roofItems || [];
+    if (b.ceiling === undefined) b.ceiling = true;
+    b.ceilingThickness = b.ceilingThickness || 0.15;
+    if (b.height === undefined) b.height = null;
+  }
+  if (!data.bodies.some((b) => b.id === data.activeBodyId)) data.activeBodyId = data.bodies[0].id;
+  if (!data.bodies.some((b) => b.id === data.drawBodyId)) data.drawBodyId = null;
+  delete data.roof;
   data.uid = data.uid || uid('P');
   data.settings = { slabThickness: DEFAULTS.slabThickness, ...(data.settings || {}) };
-  data.roof = { enabled: true, type: 'gable', pitch: 35, overhang: 0.4, thickness: 0.25, ...(data.roof || {}) };
   for (const l of data.levels) {
     l.nodes = l.nodes || {};
     l.walls = l.walls || [];
     l.rooms = l.rooms || [];
     for (const w of l.walls) w.openings = w.openings || [];
+    for (const r of l.rooms) r.bodyId = r.bodyId || data.bodies[0].id;
   }
   return data;
 }

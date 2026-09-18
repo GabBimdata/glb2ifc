@@ -1,10 +1,11 @@
 // Smelt Studio — point d'entrée de l'interface.
 import * as M from './model.js';
 import * as G from './geometry.js';
-import { WALL_TYPES, OPENING_TYPES, ROOM_NAMES, ROOF_TYPES } from './catalog.js';
+import { WALL_TYPES, OPENING_TYPES, ROOM_NAMES, ROOF_TYPES, ROOF_OPENINGS, COLOR_LABELS, colorsOf } from './catalog.js';
 import { Editor2D } from './editor2d.js';
 import { View3D, exportGlb } from './view3d.js';
 import { exportIfc } from './ifc-export.js';
+import * as B from './build.js';
 import * as IO from './io.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -13,7 +14,15 @@ const fmt = (v, d = 2) => Number(v).toFixed(d).replace('.', ',');
 const parseNum = (v) => parseFloat(String(v).replace(',', '.'));
 
 const store = new M.Store(M.newProject('Ma maison'));
-const ui = { step: 'plan', viewMode: 'plan', scope: 'all', exported: false };
+const ui = { step: 'plan', viewMode: 'plan', scope: 'all', exported: false, colorScope: 'project' };
+
+function applyColor(pr, scope, key, value) {
+  if (scope === 'project') pr.colors = { ...(pr.colors || {}), [key]: value };
+  else {
+    const b = M.bodyById(pr, scope);
+    b.colors = { ...(b.colors || {}), [key]: value };
+  }
+}
 
 // ─── Notifications et fenêtres ────────────────────────────────────────────────
 
@@ -74,7 +83,7 @@ function busy(text) {
 // ─── Éditeur et vue 3D ────────────────────────────────────────────────────────
 
 const editor = new Editor2D($('#plan'), store, {
-  onSelect: () => renderInspector(),
+  onSelect: () => { renderInspector(); if (ui.step === 'bodies' || ui.step === 'rooms') renderSteps(); },
   onToast: toast,
   onStatus: (s) => {
     $('#statusHint').textContent = s.hint || '';
@@ -86,6 +95,7 @@ const editor = new Editor2D($('#plan'), store, {
     for (const b of document.querySelectorAll('#toolbar button')) b.classList.toggle('on', b.dataset.tool === tool);
   },
   requestTool: (tool) => setTool(tool),
+  requestLevel: (id) => switchLevel(id),
   onTyped: (value) => {
     const el = $('#typed');
     if (!value) { el.style.display = 'none'; return; }
@@ -118,7 +128,18 @@ const editor = new Editor2D($('#plan'), store, {
 
 let view3d = null;
 function ensure3D() {
-  if (!view3d) view3d = new View3D($('#viewPane'));
+  if (!view3d) {
+    view3d = new View3D($('#viewPane'));
+    // pose d'une ouverture de toiture directement dans la 3D : c'est là que les pans existent
+    view3d.onPick = (hit) => {
+      if (editor.tool !== 'skylight') return;
+      if (hit.key && !hit.key.startsWith('roof-')) {
+        toast('Cliquez sur un pan de toiture.', 'warn');
+        return;
+      }
+      editor.skylightClick(hit.point);
+    };
+  }
   return view3d;
 }
 
@@ -135,6 +156,7 @@ function schedule3D(immediate = false) {
     const warnings = v.update(store.project, {
       upToLevelIndex: ui.scope === 'all' ? undefined : editor.levelIndex,
       selectedKey,
+      selectedWallId: sel?.type === 'wall' ? sel.id : null,
     });
     ui.roofWarning = warnings[0] || null;
   };
@@ -159,6 +181,7 @@ function setViewMode(mode) {
 
 function setTool(tool, opts) {
   editor.setTool(tool, opts);
+  if (tool === 'skylight' && ui.viewMode === 'plan') setViewMode('split');
   renderSteps();
 }
 
@@ -170,10 +193,16 @@ const STEPS = [
   { id: 'walls', title: 'Tracer les murs', tool: 'wall' },
   { id: 'openings', title: 'Poser portes et fenêtres', tool: 'opening' },
   { id: 'rooms', title: 'Nommer les pièces', tool: 'select' },
+  { id: 'bodies', title: 'Corps de bâtiment', tool: 'select' },
   { id: 'levels', title: 'Gérer les étages', tool: 'select' },
   { id: 'roof', title: 'Couvrir', tool: 'select' },
   { id: 'export', title: 'Exporter', tool: 'select' },
 ];
+
+const activeBody = () => M.bodyById(store.project, store.project.activeBodyId);
+const roofBody = () => M.bodyById(store.project, ui.roofBodyId || store.project.activeBodyId);
+const editBody = (id, label, fn) => store.commit(label, (pr) => { fn(M.bodyById(pr, id)); });
+const roomCountOf = (bodyId) => store.project.levels.reduce((n, l) => n + l.rooms.filter((r) => r.bodyId === bodyId).length, 0);
 
 function stepDone(id) {
   const p = store.project;
@@ -184,8 +213,9 @@ function stepDone(id) {
     case 'walls': return L.walls.length > 0;
     case 'openings': return L.walls.some((w) => w.openings.length);
     case 'rooms': return L.rooms.length > 0 && L.rooms.every((r) => !/^Pièce \d+$/.test(r.name));
+    case 'bodies': return p.bodies.length > 1;
     case 'levels': return p.levels.length > 1;
-    case 'roof': return p.roof.enabled && p.levels[p.levels.length - 1].walls.length > 0;
+    case 'roof': return p.bodies.some((b) => b.roof.enabled) && p.levels[p.levels.length - 1].walls.length > 0;
     case 'export': return ui.exported;
     default: return false;
   }
@@ -249,7 +279,9 @@ function stepBody(id) {
         ${pdf}
         ${below ? `<section style="margin-top:14px"><span class="field-label">Superposer à l'étage inférieur</span>
           <p>Cliquez un repère sur ce plan, puis le même point sur l'étage du dessous (affiché en gris).</p>
-          <div class="row"><button class="btn" data-act="tool-calage">Caler par un point</button><button class="btn ghost" data-act="tool-move-plan">Déplacer à la main</button></div></section>` : ''}
+          <div class="row"><button class="btn primary" data-act="tool-align2">Caler sur 2 points</button><button class="btn" data-act="tool-calage">Caler par un point</button></div>
+          <div class="row"><button class="btn ghost" data-act="tool-move-plan">Déplacer à la main</button><button class="btn ghost" data-act="tool-scale">Refaire l'échelle</button></div>
+          <p>Deux points suffisent : l'échelle, la rotation et la position du plan sont recalculées d'un coup.</p></section>` : ''}
         <div class="row" style="margin-top:6px"><button class="btn ghost" data-act="rotate-plan" data-deg="-90">Pivoter à gauche</button><button class="btn ghost" data-act="rotate-plan" data-deg="90">Pivoter à droite</button></div>`;
     }
     case 'walls': {
@@ -290,6 +322,32 @@ function stepBody(id) {
         <table class="table"><tbody>${list.map((r) => `<tr data-room="${r.room.id}" class="${sel === r.room.id ? 'sel' : ''}"><td>${esc(r.room.name)}</td><td>${fmt(r.area, 1)} m²</td></tr>`).join('')}</tbody>
         <tfoot><tr><td>Total ${esc(L.name)}</td><td>${fmt(total, 1)} m²</td></tr></tfoot></table>`;
     }
+    case 'bodies': {
+      const sel = editor.selection?.type === 'room' ? L.rooms.find((r) => r.id === editor.selection.id) : null;
+      const b = activeBody();
+      return `
+        <p>Un corps de bâtiment regroupe des pièces qui partagent une altitude de sol, une hauteur de murs et une toiture : la maison d'un côté, le garage accolé de l'autre. Le mur mitoyen monte au plus haut des deux.</p>
+        <table class="table"><tbody>${p.bodies.map((x) => `<tr data-body="${x.id}" class="${x.id === b.id ? 'sel' : ''}"><td>${esc(x.name)}</td><td>${roomCountOf(x.id)} pièce${roomCountOf(x.id) > 1 ? 's' : ''}</td></tr>`).join('')}</tbody></table>
+        <div class="row">
+          <button class="btn ${sel ? 'primary' : ''}" data-act="new-body" ${sel ? '' : 'disabled'}>Nouveau corps depuis « ${esc(sel ? sel.name : 'une pièce')} »</button>
+        </div>
+        ${sel ? `<label class="field"><span class="field-label">« ${esc(sel.name)} » appartient à</span>
+          <select data-prop="room-body">${p.bodies.map((x) => `<option value="${x.id}" ${x.id === (sel.bodyId || p.bodies[0].id) ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></label>`
+          : '<p>Sélectionnez une pièce sur le plan pour la rattacher à un corps.</p>'}
+        <section style="margin-top:14px">
+          <span class="field-label">Réglages de « ${esc(b.name)} »</span>
+          <label class="field"><span class="field-label">Nom</span><input type="text" value="${esc(b.name)}" data-field="body-name" /></label>
+          <div class="grid2">
+            <label><span class="field-label">Altitude du sol</span><span class="unit" data-unit="m"><input type="text" inputmode="decimal" value="${fmt(b.elevation)}" data-field="body-elevation" /></span></label>
+            <label><span class="field-label">Hauteur des murs</span><span class="unit" data-unit="m"><input type="text" inputmode="decimal" value="${b.height ? fmt(b.height) : ''}" placeholder="${fmt(L.height)}" data-field="body-height" /></span></label>
+          </div>
+          <p class="sub">Laissez la hauteur vide pour suivre celle du niveau. L'altitude est un décalage par rapport au plancher du niveau : -0,15 pour un garage plus bas.</p>
+          <label class="check"><input type="checkbox" data-field="body-draw" ${p.drawBodyId === b.id ? 'checked' : ''} /> Rattacher à ce corps les prochaines pièces tracées</label>
+          <p class="sub">Sinon, une pièce qui apparaît hérite du corps de ses voisines : sélectionner un corps ici ne déplace jamais vos pièces.</p>
+          <button class="btn block" data-act="assign-all">Rattacher toutes les pièces de ${esc(L.name)} à « ${esc(b.name)} »</button>
+          ${p.bodies.length > 1 && p.bodies[0].id !== b.id ? `<button class="btn ghost danger block" data-act="del-body">Supprimer « ${esc(b.name)} »</button>` : ''}
+        </section>`;
+    }
     case 'levels':
       return `
         <table class="table"><tbody>${p.levels.map((l, i) => `<tr data-level="${l.id}" class="${l.id === L.id ? 'sel' : ''}"><td>${esc(l.name)}</td><td>+${fmt(M.levelElevation(p, l.id))} m</td></tr>`).slice().reverse().join('')}</tbody></table>
@@ -301,13 +359,28 @@ function stepBody(id) {
         </div>
         ${p.levels.length > 1 ? `<button class="btn ghost danger" data-act="del-level">Supprimer « ${esc(L.name)} »</button>` : ''}`;
     case 'roof': {
-      const r = p.roof;
-      const top = p.levels[p.levels.length - 1];
+      const body = roofBody();
+      const r = body.roof;
+      const topIdx = M.bodyTopLevelIndex(p, body.id);
+      const top = p.levels[topIdx] || p.levels[p.levels.length - 1];
       return `
+        ${p.bodies.length > 1 ? `<label class="field"><span class="field-label">Toiture de</span><select data-field="roof-body">${p.bodies.map((x) => `<option value="${x.id}" ${x.id === body.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></label>` : ''}
         <label class="check"><input type="checkbox" data-field="roof-enabled" ${r.enabled ? 'checked' : ''} /> Générer une toiture</label>
-        <p>Elle se pose sur le contour du dernier niveau (${esc(top.name)}).</p>
+        <p>Elle se pose sur le contour de ${esc(body.name)}, au sommet de ${esc(top.name)}.</p>
         <div class="grid2">${Object.entries(ROOF_TYPES).map(([k, label]) => `<button class="tile ${r.type === k ? 'on' : ''}" data-roof="${k}">${roofIcon(k)}<span>${label}</span></button>`).join('')}</div>
-        ${r.type !== 'flat' ? `<label class="field"><span class="field-label">Pente : ${Math.round(r.pitch)}°</span><input type="range" min="5" max="60" step="1" value="${r.pitch}" data-live="roof-pitch" /></label>` : ''}
+        ${r.type !== 'flat' ? `<label class="field"><span class="field-label">Pente : ${Math.round(r.pitch)}°</span><input type="range" min="5" max="${r.type === 'shed' ? 30 : 60}" step="1" value="${r.pitch}" data-live="roof-pitch" /></label>` : ''}
+        ${r.type === 'gable' || r.type === 'hip' || r.type === 'shed' ? `<label class="check"><input type="checkbox" data-field="roof-flip" ${r.ridgeFlip ? 'checked' : ''} /> Tourner ${r.type === 'shed' ? 'la pente' : 'le faîtage'} d'un quart de tour</label>` : ''}
+        ${r.type !== 'flat' ? `<label class="check"><input type="checkbox" data-field="roof-follow" ${r.followSetbacks ? 'checked' : ''} /> Suivre les décrochés de façade</label>
+        <p class="sub">Décoché, une emprise presque rectangulaire reçoit une toiture simple. Coché, chaque avancée ou renfoncement reçoit son propre pan.</p>` : ''}
+        ${r.enabled ? `<p>Point le plus haut : ${ridgeInfo(body)}</p>` : ''}
+        ${r.enabled ? `<section style="margin-top:14px">
+          <span class="field-label">Ouvertures de toiture</span>
+          <div class="grid2">${Object.entries(ROOF_OPENINGS).map(([k, o]) => `
+            <button class="tile ${editor.roofOpeningType === k ? 'on' : ''}" data-roofopening="${k}">${roofOpeningIcon(k)}<span>${esc(o.label)}</span></button>`).join('')}</div>
+          <p>Cliquez sur un pan, dans le plan ou directement dans la vue 3D.</p>
+          <button class="btn ${editor.tool === 'skylight' ? 'primary' : ''}" data-act="tool-skylight">Poser : ${esc((ROOF_OPENINGS[editor.roofOpeningType] || ROOF_OPENINGS.skylight).label)}</button>
+          ${skylightList()}
+        </section>` : ''}
         <div class="grid2">
           <label><span class="field-label">Débord</span><span class="unit" data-unit="m"><input type="text" inputmode="decimal" value="${fmt(r.overhang)}" data-field="roof-overhang" /></span></label>
           <label><span class="field-label">Épaisseur</span><span class="unit" data-unit="m"><input type="text" inputmode="decimal" value="${fmt(r.thickness)}" data-field="roof-thickness" /></span></label>
@@ -331,6 +404,53 @@ function stepBody(id) {
         <p>Le travail est aussi sauvegardé automatiquement dans ce navigateur.</p>`;
     default: return '';
   }
+}
+
+// Hauteur du point le plus haut de la toiture, pour éviter les pentes déraisonnables
+// La fenêtre est-elle au-dessus du plafond du corps ?
+function aboveCeiling(s) {
+  const body = s.body;
+  if (!body?.ceiling || !s.info?.poly) return false;
+  const idx = M.bodyTopLevelIndex(store.project, body.id);
+  const level = store.project.levels[idx];
+  if (!level) return false;
+  const zPlafond = M.levelElevation(store.project, level.id) + (body.elevation || 0)
+    + M.bodyHeight(store.project, level, body) - (body.ceilingThickness || 0.15);
+  return s.info.sillZ >= zPlafond - 0.02;
+}
+
+function skylightList() {
+  const rows = [];
+  for (const b of store.project.bodies) {
+    for (const o of B.roofOpenings(store.project, editor.level, b)) {
+      rows.push(`<tr data-skylight="${o.item.id}" data-skylight-body="${b.id}"><td>${esc(b.name)}</td><td>${o.poly ? `${fmt(o.sillZ - o.floorZ)} m${o.clamped ? ' (recalée)' : ''}` : 'hors toiture'}</td></tr>`);
+    }
+  }
+  if (!rows.length) return '';
+  return `<table class="table" style="margin-top:8px"><tbody>${rows.join('')}</tbody></table>`;
+}
+
+function ridgeInfo(body) {
+  const p = store.project;
+  const idx = M.bodyTopLevelIndex(p, body.id);
+  const top = p.levels[idx];
+  if (!top) return 'à définir (aucune pièce fermée dans ce corps)';
+  const outlines = M.bodyOutlines(p, top, body.id, 1);
+  if (!outlines.length) return 'à définir (aucun contour fermé)';
+  const baseZ = M.levelElevation(p, top.id) + (body.elevation || 0) + M.bodyHeight(p, top, body);
+  let z = baseZ;
+  for (const o of outlines) z = Math.max(z, G.buildRoof(o, { ...body.roof, baseZ }).ridgeZ);
+  return `+${fmt(z)} m, soit ${fmt(z - baseZ)} m au-dessus des murs`;
+}
+
+function roofOpeningIcon(key) {
+  const icons = {
+    skylight: '<path d="M8 24 50 6 92 24" fill="none" stroke="#9b5a43" stroke-width="3"/><rect x="38" y="12" width="20" height="10" fill="#9cc3d6" stroke="#1f2a30" stroke-width="1.5" transform="rotate(-8 48 17)"/>',
+    dormerGable: '<path d="M8 26 50 6 92 26" fill="none" stroke="#9b5a43" stroke-width="3"/><path d="M36 26V16l12-8 12 8v10" fill="#efe9e1" stroke="#1f2a30" stroke-width="1.5"/><rect x="42" y="16" width="12" height="10" fill="#9cc3d6" stroke="#1f2a30" stroke-width="1"/>',
+    dormerHip: '<path d="M8 26 50 6 92 26" fill="none" stroke="#9b5a43" stroke-width="3"/><path d="M36 26V16h24v10" fill="#efe9e1" stroke="#1f2a30" stroke-width="1.5"/><path d="M36 16 48 9 60 16" fill="none" stroke="#1f2a30" stroke-width="1.5"/><rect x="42" y="18" width="12" height="8" fill="#9cc3d6" stroke="#1f2a30" stroke-width="1"/>',
+    dormerShed: '<path d="M8 26 50 6 92 26" fill="none" stroke="#9b5a43" stroke-width="3"/><path d="M32 26v-8l30-5v13" fill="#efe9e1" stroke="#1f2a30" stroke-width="1.5"/><rect x="38" y="17" width="16" height="9" fill="#9cc3d6" stroke="#1f2a30" stroke-width="1"/>',
+  };
+  return `<svg viewBox="0 0 100 30" aria-hidden="true">${icons[key] || ''}</svg>`;
 }
 
 function roofIcon(type) {
@@ -390,6 +510,13 @@ function findSelection() {
     return opening ? { ...sel, wall, opening } : null;
   }
   if (sel.type === 'node') return L.nodes[sel.id] ? { ...sel, point: L.nodes[sel.id] } : null;
+  if (sel.type === 'roofitem') {
+    const body = store.project.bodies.find((b) => b.id === sel.bodyId);
+    const item = body?.roofItems?.find((it) => it.id === sel.id);
+    if (!item) return null;
+    const info = B.roofOpenings(store.project, L, body).find((o) => o.item.id === item.id);
+    return { ...sel, body, item, info };
+  }
   if (sel.type === 'room') {
     const room = L.rooms.find((r) => r.id === sel.id);
     if (!room) return null;
@@ -401,6 +528,35 @@ function findSelection() {
 
 const numField = (label, field, value, unit = 'm') => `
   <label class="field"><span class="field-label">${label}</span><span class="unit" data-unit="${unit}"><input type="text" inputmode="decimal" value="${fmt(value)}" data-prop="${field}" /></span></label>`;
+
+const colorScopeBody = () => (ui.colorScope && ui.colorScope !== 'project' ? M.bodyById(store.project, ui.colorScope) : null);
+
+// Réglages du corps actif, disponibles depuis n'importe quelle étape
+function bodyPanel() {
+  const p = store.project;
+  const b = activeBody();
+  const L = editor.level;
+  const topIdx = M.bodyTopLevelIndex(p, b.id);
+  return `
+    <section>
+      <h2>Corps : ${esc(b.name)}</h2>
+      <p class="sub">${roomCountOf(b.id)} pièce${roomCountOf(b.id) > 1 ? 's' : ''}${topIdx >= 0 ? `, couvert au sommet de ${esc(p.levels[topIdx].name)}` : ', aucune pièce fermée'}</p>
+      ${p.bodies.length > 1 ? `<label class="field"><span class="field-label">Corps actif</span>
+        <select data-field="active-body">${p.bodies.map((x) => `<option value="${x.id}" ${x.id === b.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></label>` : ''}
+      <label class="field"><span class="field-label">Nom</span><input type="text" value="${esc(b.name)}" data-field="body-name" /></label>
+      <div class="grid2">
+        <label><span class="field-label">Altitude du sol</span><span class="unit" data-unit="m"><input type="text" inputmode="decimal" value="${fmt(b.elevation)}" data-field="body-elevation" /></span></label>
+        <label><span class="field-label">Hauteur des murs</span><span class="unit" data-unit="m"><input type="text" inputmode="decimal" value="${b.height ? fmt(b.height) : ''}" placeholder="${fmt(L.height)}" data-field="body-height" /></span></label>
+      </div>
+      <label class="check"><input type="checkbox" data-field="body-ceiling" ${b.ceiling ? 'checked' : ''} /> Plafond sous la toiture</label>
+      ${b.ceiling ? `<label class="field"><span class="field-label">Épaisseur du plafond</span><span class="unit" data-unit="m"><input type="text" inputmode="decimal" value="${fmt(b.ceilingThickness || 0.15)}" data-field="body-ceiling-thickness" /></span></label>` : ''}
+      <label class="field"><span class="field-label">Toiture</span>
+        <select data-field="body-roof-type">
+          <option value="none" ${b.roof.enabled ? '' : 'selected'}>Aucune</option>
+          ${Object.entries(ROOF_TYPES).map(([k, label]) => `<option value="${k}" ${b.roof.enabled && b.roof.type === k ? 'selected' : ''}>${esc(label)}</option>`).join('')}
+        </select></label>
+    </section>`;
+}
 
 function renderInspector() {
   const el = $('#inspector');
@@ -420,7 +576,19 @@ function renderInspector() {
       <div class="stat"><span>Ouvertures</span><b>${openings}</b></div>
       <div class="stat"><span>Pièces</span><b>${rooms.length}</b></div>
       <div class="stat"><span>Surface des pièces</span><b>${fmt(area, 1)} m²</b></div>
-      <section><p class="sub">Sélectionnez un mur, un angle, une ouverture ou une pièce sur le plan pour modifier ses valeurs.</p></section>`;
+      <section><p class="sub">Sélectionnez un mur, un angle, une ouverture ou une pièce sur le plan pour modifier ses valeurs.</p></section>
+      ${bodyPanel()}
+      <section>
+        <h2>Couleurs</h2>
+        <label class="field"><span class="field-label">Appliquer à</span>
+          <select data-field="color-scope">
+            <option value="project" ${ui.colorScope === 'project' ? 'selected' : ''}>Tout le projet</option>
+            ${p.bodies.map((b) => `<option value="${b.id}" ${ui.colorScope === b.id ? 'selected' : ''}>${esc(b.name)} seulement</option>`).join('')}
+          </select></label>
+        ${Object.entries(COLOR_LABELS).map(([k, label]) => `
+          <label class="colorline"><span>${esc(label)}</span><input type="color" value="${colorsOf(p, colorScopeBody())[k]}" data-color="${k}" /></label>`).join('')}
+        <button class="btn ghost block" data-color-reset="1">Rétablir ${ui.colorScope === 'project' ? "les couleurs d'origine" : 'les couleurs du projet'}</button>
+      </section>`;
     return;
   }
   if (s.type === 'wall') {
@@ -454,11 +622,44 @@ function renderInspector() {
       <h2>Angle</h2><p class="sub">Point de jonction des murs</p>
       <div class="grid2">${numField('X', 'node-x', s.point[0])}${numField('Y', 'node-y', -s.point[1])}</div>
       <section><button class="btn danger block" data-act="delete-selection">Supprimer l'angle et ses murs</button></section>`;
+  } else if (s.type === 'roofitem' && ROOF_OPENINGS[s.item.type]?.kind === 'dormer') {
+    const it = s.item;
+    const preset = ROOF_OPENINGS[it.type];
+    el.innerHTML = `
+      <h2>${esc(preset.label)}</h2><p class="sub">Sur la toiture de ${esc(s.body.name)}</p>
+      <div class="grid2">
+        ${numField('Largeur', 'sky-width', it.width ?? preset.width)}
+        ${numField('Hauteur de façade', 'sky-wallheight', it.wallHeight ?? preset.wallHeight)}
+      </div>
+      <div class="grid2">
+        ${preset.dormer === 'shed' ? numField('Profondeur', 'sky-depth', it.depth ?? preset.depth) : numField('Pente du toit', 'sky-pitch', it.pitch ?? preset.pitch, '°')}
+        ${numField('Retrait depuis l\'égout', 'sky-setback', it.setback ?? preset.setback)}
+      </div>
+      <div class="grid2">
+        ${numField('Hauteur de baie', 'sky-winheight', it.winHeight ?? preset.winHeight)}
+        ${numField('Allège de la baie', 'sky-winsill', it.winSill ?? preset.winSill)}
+      </div>
+      ${s.info?.poly ? '' : '<p class="note">Cette lucarne ne tient pas sur le pan : réduisez sa largeur, sa hauteur de façade, ou rapprochez-la de l\'égout.</p>'}
+      <section><button class="btn danger block" data-act="delete-selection">Supprimer <kbd>Suppr</kbd></button></section>`;
+  } else if (s.type === 'roofitem') {
+    const it = s.item;
+    const real = s.info?.poly ? fmt(s.info.sillZ - s.info.floorZ) : null;
+    el.innerHTML = `
+      <h2>Fenêtre de toit</h2><p class="sub">Sur la toiture de ${esc(s.body.name)}</p>
+      <div class="grid2">
+        ${numField('Largeur', 'sky-width', it.width)}
+        ${numField('Hauteur (sur la pente)', 'sky-height', it.height)}
+      </div>
+      ${numField("Allège au-dessus du plancher", 'sky-sill', it.sill)}
+      ${real ? `<p class="sub">Allège obtenue : ${real} m${s.info.clamped ? ". La valeur demandée sort du pan ; la fenêtre est placée au plus près." : ''}</p>${aboveCeiling(s) ? '<p class="note">Cette fenêtre donne au-dessus du plafond de ce corps : elle éclaire les combles, pas la pièce. Décochez « Plafond sous la toiture » ou baissez l\'allège.</p>' : ''}` : '<p class="note">Cette fenêtre n\'est sur aucun pan de toiture. Déplacez-la ou vérifiez la toiture du corps.</p>'}
+      <section><button class="btn danger block" data-act="delete-selection">Supprimer <kbd>Suppr</kbd></button></section>`;
   } else if (s.type === 'room') {
     el.innerHTML = `
       <h2>Pièce</h2><p class="sub">${fmt(s.area, 1)} m² habitables (hors murs)</p>
       <label class="field"><span class="field-label">Nom</span><input type="text" value="${esc(s.room.name)}" data-prop="room-name" /></label>
-      <div class="chips">${ROOM_NAMES.map((n) => `<button class="chip" data-room-name="${esc(n)}">${esc(n)}</button>`).join('')}</div>`;
+      <div class="chips">${ROOM_NAMES.map((n) => `<button class="chip" data-room-name="${esc(n)}">${esc(n)}</button>`).join('')}</div>
+      <label class="field"><span class="field-label">Corps de bâtiment</span>
+        <select data-prop="room-body">${p.bodies.map((x) => `<option value="${x.id}" ${x.id === (s.room.bodyId || p.bodies[0].id) ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></label>`;
   }
 }
 
@@ -469,7 +670,24 @@ function applyProp(prop, raw) {
   const value = parseNum(raw);
   const levelId = L.id;
   const lv = (pr) => pr.levels.find((l) => l.id === levelId);
-  const needNum = !['wall-type', 'room-name'].includes(prop);
+  const needNum = !['wall-type', 'room-name', 'room-body'].includes(prop);
+  if (prop.startsWith('sky-')) {
+    if (!(value >= 0) || (prop !== 'sky-setback' && prop !== 'sky-winsill' && !(value > 0))) { toast('Valeur invalide.', 'warn'); renderInspector(); return; }
+    store.commit('Modifier une fenêtre de toit', (pr) => {
+      const body = M.bodyById(pr, s.bodyId);
+      const it = body.roofItems.find((x) => x.id === s.id);
+      if (prop === 'sky-width') it.width = Math.max(0.3, value);
+      if (prop === 'sky-height') it.height = Math.max(0.3, value);
+      if (prop === 'sky-sill') it.sill = value;
+      if (prop === 'sky-wallheight') it.wallHeight = Math.max(0.6, value);
+      if (prop === 'sky-pitch') it.pitch = Math.min(70, Math.max(5, value));
+      if (prop === 'sky-depth') it.depth = Math.max(0.6, value);
+      if (prop === 'sky-setback') it.setback = Math.max(0, value);
+      if (prop === 'sky-winheight') it.winHeight = Math.max(0.3, value);
+      if (prop === 'sky-winsill') it.winSill = Math.max(0, value);
+    });
+    return;
+  }
   if (needNum && !(Number.isFinite(value))) { toast('Valeur invalide.', 'warn'); renderInspector(); return; }
   store.commit('Modifier une valeur', (pr) => {
     const level = lv(pr);
@@ -492,6 +710,11 @@ function applyProp(prop, raw) {
       case 'op-offset': op.offset = value + op.width / 2; M.clampOpenings(level); break;
       case 'node-x': level.nodes[s.id] = [value, level.nodes[s.id][1]]; M.clampOpenings(level); break;
       case 'node-y': level.nodes[s.id] = [level.nodes[s.id][0], -value]; M.clampOpenings(level); break;
+      case 'room-body': {
+        const room = level.rooms.find((r) => r.id === s.room.id);
+        room.bodyId = raw;
+        break;
+      }
       case 'room-name': {
         const room = level.rooms.find((r) => r.id === s.room.id);
         room.name = raw.trim() || room.name;
@@ -504,6 +727,15 @@ function applyProp(prop, raw) {
 }
 
 // ─── Niveaux ──────────────────────────────────────────────────────────────────
+
+function renderBodyBar() {
+  const p = store.project;
+  const el = $('#bodyBar');
+  if (!el) return;
+  el.innerHTML = `<span>Corps</span><select id="bodySelect" aria-label="Corps de bâtiment actif">
+    ${p.bodies.map((b) => `<option value="${b.id}" ${b.id === p.activeBodyId ? 'selected' : ''}>${esc(b.name)}</option>`).join('')}
+  </select>`;
+}
 
 function renderLevelTabs() {
   const p = store.project;
@@ -747,6 +979,7 @@ function renderAll() {
   const p = store.project;
   if (document.activeElement !== $('#projectName')) $('#projectName').value = p.name;
   renderLevelTabs();
+  renderBodyBar();
   renderSteps();
   renderInspector();
   const L = editor.level;
@@ -779,13 +1012,31 @@ document.addEventListener('click', (e) => {
   if (d.tool && t.closest('#toolbar')) { setTool(d.tool); return; }
   if (d.levelTab) { switchLevel(d.levelTab); return; }
   if (d.level) { switchLevel(d.level); return; }
+  if (d.body) { store.project.activeBodyId = d.body; ui.roofBodyId = d.body; renderAll(); return; }
+  if (d.skylight) { setTool('select'); editor.select({ type: 'roofitem', id: d.skylight, bodyId: d.skylightBody }); renderSteps(); return; }
   if (d.mode && t.closest('#viewMode')) { setViewMode(d.mode); return; }
   if (d.wallType) { editor.wallType = d.wallType; setTool('wall'); return; }
   if (d.trace) { editor.traceMode = d.trace; setTool('wall'); return; }
   if (d.opening) { editor.openingType = d.opening; setTool('opening'); return; }
   if (d.room) { setTool('select'); editor.select({ type: 'room', id: d.room }); renderSteps(); return; }
   if (d.roomName) { applyProp('room-name', d.roomName); return; }
-  if (d.roof) { store.commit('Type de toiture', (pr) => { pr.roof.type = d.roof; pr.roof.enabled = true; }); return; }
+  if (d.roofopening) { editor.roofOpeningType = d.roofopening; setTool('skylight'); return; }
+  if (d.roof) {
+    editBody(roofBody().id, 'Type de toiture', (b) => {
+      b.roof.type = d.roof;
+      b.roof.enabled = true;
+      if (d.roof === 'shed' && b.roof.pitch > 30) b.roof.pitch = 12;
+    });
+    return;
+  }
+  if (d.colorReset) {
+    const scope = ui.colorScope;
+    store.commit('Couleurs par défaut', (pr) => {
+      if (scope === 'project') pr.colors = {};
+      else M.bodyById(pr, scope).colors = {};
+    });
+    return;
+  }
   const act = d.act;
   if (!act) return;
   const L = editor.level;
@@ -795,6 +1046,8 @@ document.addEventListener('click', (e) => {
     'tool-scale': () => setTool('scale'),
     'tool-measure': () => setTool('measure'),
     'tool-calage': () => setTool('calage'),
+    'tool-align2': () => setTool('align2'),
+    'tool-skylight': () => setTool('skylight'),
     'tool-move-plan': () => setTool('movePlan'),
     'rotate-plan': () => {
       if (!L.plan) return;
@@ -817,6 +1070,47 @@ document.addEventListener('click', (e) => {
       editor.fit();
       setTool('measure');
       toast(`Échelle 1/${ratio} appliquée. Vérifiez une cote avec Mesurer : un PDF redimensionné à l'impression fausserait le résultat.`);
+    },
+    'new-body': async () => {
+      const sel = editor.selection?.type === 'room' ? L.rooms.find((r) => r.id === editor.selection.id) : null;
+      if (!sel) return;
+      const name = await modal({
+        title: 'Nouveau corps de bâtiment',
+        body: `<p>« ${esc(sel.name)} » et les pièces que vous y rattacherez formeront ce corps : altitude, hauteur de murs et toiture indépendantes.</p>
+          <label class="field"><span class="field-label">Nom</span><input type="text" id="bodyName" value="Garage" /></label>`,
+        actions: [{ label: 'Annuler', id: null }, { label: 'Créer', kind: 'primary', default: true, value: (root) => root.querySelector('#bodyName').value.trim() || 'Corps' }],
+      });
+      if (!name) return;
+      store.commit('Nouveau corps', (pr) => {
+        const source = M.bodyById(pr, pr.activeBodyId);
+        const body = M.newBody(name, { ...source.roof });
+        pr.bodies.push(body);
+        pr.activeBodyId = body.id;
+        pr.levels.find((l) => l.id === L.id).rooms.find((r) => r.id === sel.id).bodyId = body.id;
+      });
+      toast(`« ${name} » créé. Réglez son altitude, sa hauteur et sa toiture.`);
+    },
+    'assign-all': async () => {
+      const b = activeBody();
+      const ok = await modal({
+        title: `Rattacher toutes les pièces de ${esc(L.name)} ?`,
+        body: `<p>Les ${L.rooms.length} pièces de ce niveau rejoindront « ${esc(b.name)} ». Utile pour réparer un rattachement erroné. Annulable avec Ctrl+Z.</p>`,
+        actions: [{ label: 'Annuler', id: false }, { label: 'Rattacher', kind: 'primary', id: true, default: true }],
+      });
+      if (!ok) return;
+      store.commit('Rattacher les pièces', (pr) => {
+        for (const r of pr.levels.find((l) => l.id === L.id).rooms) r.bodyId = b.id;
+      });
+    },
+    'del-body': () => {
+      const id = store.project.activeBodyId;
+      if (store.project.bodies[0].id === id) return;
+      store.commit('Supprimer un corps', (pr) => {
+        const fallback = pr.bodies[0].id;
+        for (const l of pr.levels) for (const r of l.rooms) if (r.bodyId === id) r.bodyId = fallback;
+        pr.bodies = pr.bodies.filter((b) => b.id !== id);
+        pr.activeBodyId = fallback;
+      });
     },
     'add-level': addLevel,
     'dup-level': duplicateLevel,
@@ -842,6 +1136,18 @@ document.addEventListener('click', (e) => {
 document.addEventListener('change', (e) => {
   const t = e.target;
   const d = t.dataset;
+  if (t.id === 'bodySelect') {
+    store.project.activeBodyId = t.value;
+    ui.roofBodyId = t.value;
+    renderAll();
+    return;
+  }
+  if (d.color) {
+    const key = d.color, value = t.value, scope = ui.colorScope;
+    if (store.gesture) store.endGesture();
+    else store.commit('Changer une couleur', (pr) => applyColor(pr, scope, key, value));
+    return;
+  }
   if (d.prop) { applyProp(d.prop, t.value); return; }
   if (d.live === 'plan-opacity' || d.live === 'roof-pitch') {
     const levelId = editor.levelId;
@@ -850,7 +1156,7 @@ document.addEventListener('change', (e) => {
     if (store.gesture) store.endGesture();
     else store.commit('Modifier un réglage', (pr) => {
       if (d.live === 'plan-opacity') pr.levels.find((l) => l.id === levelId).plan.opacity = v;
-      else pr.roof.pitch = v;
+      else M.bodyById(pr, ui.roofBodyId || pr.activeBodyId).roof.pitch = v;
     });
     return;
   }
@@ -868,30 +1174,89 @@ document.addEventListener('change', (e) => {
       if (!(v >= 0.05 && v <= 1)) return bad();
       store.commit('Épaisseur des planchers', (pr) => { pr.settings.slabThickness = v; });
       break;
+    case 'roof-body':
+      ui.roofBodyId = t.value;
+      store.project.activeBodyId = t.value;
+      renderAll();
+      break;
     case 'roof-enabled':
-      store.commit('Toiture', (pr) => { pr.roof.enabled = t.checked; });
+      editBody(roofBody().id, 'Toiture', (b) => { b.roof.enabled = t.checked; });
       break;
     case 'roof-overhang':
       if (!(v >= 0 && v <= 2)) return bad();
-      store.commit('Débord de toiture', (pr) => { pr.roof.overhang = v; });
+      editBody(roofBody().id, 'Débord de toiture', (b) => { b.roof.overhang = v; });
+      break;
+    case 'roof-flip':
+      editBody(roofBody().id, 'Sens du faîtage', (b) => { b.roof.ridgeFlip = t.checked; });
+      break;
+    case 'body-ceiling':
+      editBody(activeBody().id, 'Plafond', (b) => { b.ceiling = t.checked; });
+      break;
+    case 'body-ceiling-thickness':
+      if (!(v >= 0.02 && v <= 0.6)) return bad();
+      editBody(activeBody().id, 'Épaisseur du plafond', (b) => { b.ceilingThickness = v; });
+      break;
+    case 'roof-follow':
+      editBody(roofBody().id, 'Découpage de la toiture', (b) => { b.roof.followSetbacks = t.checked; });
       break;
     case 'roof-thickness':
       if (!(v >= 0.05 && v <= 1)) return bad();
-      store.commit('Épaisseur de toiture', (pr) => { pr.roof.thickness = v; });
+      editBody(roofBody().id, 'Épaisseur de toiture', (b) => { b.roof.thickness = v; });
       break;
+    case 'body-name':
+      if (!t.value.trim()) return bad();
+      editBody(activeBody().id, 'Renommer le corps', (b) => { b.name = t.value.trim(); });
+      break;
+    case 'body-elevation':
+      if (!(v >= -3 && v <= 3)) return bad();
+      editBody(activeBody().id, 'Altitude du corps', (b) => { b.elevation = v; });
+      break;
+    case 'body-height':
+      if (!t.value.trim()) { editBody(activeBody().id, 'Hauteur des murs', (b) => { b.height = null; }); break; }
+      if (!(v >= 1.8 && v <= 10)) return bad();
+      editBody(activeBody().id, 'Hauteur des murs', (b) => { b.height = v; });
+      break;
+    case 'active-body':
+      store.project.activeBodyId = t.value;
+      ui.roofBodyId = t.value;
+      renderAll();
+      break;
+    case 'body-roof-type':
+      editBody(activeBody().id, 'Toiture du corps', (b) => {
+        if (t.value === 'none') { b.roof.enabled = false; return; }
+        b.roof.enabled = true;
+        b.roof.type = t.value;
+        if (t.value === 'shed' && b.roof.pitch > 30) b.roof.pitch = 12;
+      });
+      break;
+    case 'color-scope':
+      ui.colorScope = t.value;
+      renderInspector();
+      break;
+    case 'body-draw': {
+      const id = activeBody().id;
+      store.commit('Corps de tracé', (pr) => { pr.drawBodyId = t.checked ? id : null; });
+      break;
+    }
     default: break;
   }
 });
 
 document.addEventListener('input', (e) => {
   const d = e.target.dataset;
+  if (d.color) {
+    const key = d.color, value = e.target.value, scope = ui.colorScope;
+    if (!store.gesture) store.beginGesture('Changer une couleur');
+    store.live((pr) => applyColor(pr, scope, key, value));
+    return;
+  }
   if (d.live === 'plan-opacity' || d.live === 'roof-pitch') {
     const levelId = editor.levelId;
     const v = +e.target.value;
     if (!store.gesture) store.beginGesture('Modifier un réglage');
     store.live((pr) => {
       if (d.live === 'plan-opacity') pr.levels.find((l) => l.id === levelId).plan.opacity = v;
-      else pr.roof.pitch = v;
+      else M.bodyById(pr, ui.roofBodyId || pr.activeBodyId).roof.pitch = v;
     });
     if (d.live === 'roof-pitch') {
       const label = e.target.closest('label').querySelector('.field-label');
@@ -973,4 +1338,4 @@ window.addEventListener('keydown', (e) => {
 })();
 
 // Accès console pour le débogage
-window.smelt = { store, editor, exportIfc: () => exportIfc(store.project) };
+window.smelt = { store, editor, get view3d() { return view3d; }, exportIfc: () => exportIfc(store.project) };
