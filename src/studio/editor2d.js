@@ -3,6 +3,8 @@ import * as G from './geometry.js';
 import * as M from './model.js';
 import { WALL_TYPES, OPENING_TYPES, DEFAULTS } from './catalog.js';
 import { loadImage } from './io.js';
+import { roofOpenings } from './build.js';
+import { SKYLIGHT, ROOF_OPENINGS } from './catalog.js';
 
 const INK = '#1f2a30';
 const INK_SOFT = '#5b676e';
@@ -11,6 +13,13 @@ const ROOM_FILL = 'rgba(62, 142, 128, 0.10)';
 const ROOM_FILL_SEL = 'rgba(232, 103, 42, 0.14)';
 const ROOM_INK = '#2c5d55';
 const WALL_FILL = { exterior: '#26323a', interior: '#4a565d', partition: '#8a959b' };
+// teintes des corps de bâtiment (le premier garde le vert d'origine)
+const BODY_TINTS = [
+  { fill: 'rgba(62,142,128,0.10)', hover: 'rgba(62,142,128,0.17)', ink: '#2c5d55' },
+  { fill: 'rgba(86,118,178,0.12)', hover: 'rgba(86,118,178,0.19)', ink: '#3a5590' },
+  { fill: 'rgba(176,128,58,0.13)', hover: 'rgba(176,128,58,0.20)', ink: '#8a5f1d' },
+  { fill: 'rgba(140,96,160,0.13)', hover: 'rgba(140,96,160,0.20)', ink: '#6b4680' },
+];
 
 const fmtLen = (m) => `${m.toFixed(2).replace('.', ',')} m`;
 const fmtArea = (a) => `${a.toFixed(1).replace('.', ',')} m²`;
@@ -28,6 +37,7 @@ export class Editor2D {
     this.traceMode = 'axis'; // axis | edge
     this.edgeSide = 1;
     this.openingType = 'door';
+    this.roofOpeningType = 'skylight';
     this.selection = null;
     this.hover = null;
     this.mouse = null;
@@ -307,9 +317,16 @@ export class Editor2D {
       scale: () => this.scaleClick(w),
       measure: () => this.measureClick(w),
       calage: () => this.calageClick(w),
+      align2: () => this.align2Click(w),
+      skylight: () => this.skylightClick(w),
       movePlan: () => { if (this.level.plan) { this.store.beginGesture('Déplacer le plan'); this.drag = { kind: 'plan', start: w, x: this.level.plan.x, y: this.level.plan.y }; } },
     }[this.tool];
-    handler?.();
+    try {
+      handler?.();
+    } catch (err) {
+      console.error(err);
+      this.hooks.onToast(`L'outil a rencontré une erreur : ${err.message}`, 'warn');
+    }
   }
 
   onMove(e) {
@@ -326,6 +343,7 @@ export class Editor2D {
     if (this.drag) this.dragMove(w, s);
     else if (this.tool === 'select') this.hover = this.hitTest(w);
     else if (this.tool === 'opening') this.hover = this.openingPreview(w);
+    else if (this.tool === 'skylight') this.hover = this.skylightPreview(w);
     this.updateStatus();
     this.invalidate();
   }
@@ -402,6 +420,9 @@ export class Editor2D {
   hitTest(w) {
     const L = this.level;
     const tol = this.px(8);
+    for (const o of this.roofItems()) {
+      if (o.poly && G.pointInPolygon(w, o.poly)) return { type: 'roofitem', id: o.item.id, bodyId: o.body.id };
+    }
     // ouvertures
     for (const wall of L.walls) {
       const a = L.nodes[wall.a], b = L.nodes[wall.b];
@@ -511,7 +532,7 @@ export class Editor2D {
   deleteSelection() {
     const sel = this.selection;
     if (!sel) return;
-    const labels = { wall: 'Mur supprimé', node: 'Angle supprimé', opening: 'Ouverture supprimée', room: '' };
+    const labels = { wall: 'Mur supprimé', node: 'Angle supprimé', opening: 'Ouverture supprimée', roofitem: 'Fenêtre de toit supprimée', room: '' };
     if (sel.type === 'room') { this.hooks.onToast('Une pièce disparaît quand on supprime un de ses murs.'); return; }
     this.store.commit(labels[sel.type], () => {
       const L = this.level;
@@ -520,6 +541,10 @@ export class Editor2D {
       if (sel.type === 'opening') {
         const wall = L.walls.find((x) => x.id === sel.wallId);
         if (wall) wall.openings = wall.openings.filter((o) => o.id !== sel.id);
+      }
+      if (sel.type === 'roofitem') {
+        const body = this.project.bodies.find((b) => b.id === sel.bodyId);
+        if (body) body.roofItems = body.roofItems.filter((it) => it.id !== sel.id);
       }
     });
     this.hooks.onToast(labels[sel.type]);
@@ -714,6 +739,131 @@ export class Editor2D {
     this.invalidate();
   }
 
+  // Aimantation sur les points de repère (niveau courant et niveau inférieur)
+  anchorPoint(w) {
+    const cands = [...Object.values(this.level.nodes), ...(this.levelBelow ? Object.values(this.levelBelow.nodes) : [])];
+    let best = null;
+    for (const p of cands) {
+      const d = G.dist(w, p);
+      if (d < this.px(12) && (!best || d < best.d)) best = { d, p };
+    }
+    return best ? best.p.slice() : w;
+  }
+
+  // Calage complet d'un plan : deux couples de points donnent l'échelle, la rotation et la position.
+  align2Click(w) {
+    if (!this.level.plan) { this.hooks.onToast("Importez d'abord un plan.", 'warn'); return; }
+    const pts = this.state.points || (this.state.points = []);
+    const isTarget = pts.length % 2 === 1;
+    pts.push(isTarget ? this.anchorPoint(w) : w);
+    this.invalidate();
+    if (pts.length < 4) return;
+    const [p1, q1, p2, q2] = pts;
+    const base = G.dist(p1, p2);
+    if (base < 0.05 || G.dist(q1, q2) < 0.05) {
+      this.hooks.onToast('Choisissez deux repères nettement séparés.', 'warn');
+      this.state = {};
+      return;
+    }
+    const k = G.dist(q1, q2) / base;
+    const theta = Math.atan2(q2[1] - q1[1], q2[0] - q1[0]) - Math.atan2(p2[1] - p1[1], p2[0] - p1[0]);
+    const levelId = this.levelId;
+    this.store.commit('Caler le plan', (pr) => {
+      const plan = pr.levels.find((l) => l.id === levelId).plan;
+      const rel = G.sub([plan.x, plan.y], p1);
+      const c = Math.cos(theta), sn = Math.sin(theta);
+      plan.x = q1[0] + k * (rel[0] * c - rel[1] * sn);
+      plan.y = q1[1] + k * (rel[0] * sn + rel[1] * c);
+      plan.scale *= k;
+      plan.rotation = (((plan.rotation || 0) + (theta * 180) / Math.PI) % 360 + 360) % 360;
+      plan.calibrated = true;
+    });
+    this.state = {};
+    this.hooks.onToast(`Plan calé : échelle ajustée de ${((k - 1) * 100).toFixed(1).replace('.', ',')} % et pivoté de ${((theta * 180) / Math.PI).toFixed(1).replace('.', ',')}°.`);
+    this.invalidate();
+  }
+
+  // ─── Fenêtres de toit ──────────────────────────────────────────────────────
+  roofItems() {
+    const out = [];
+    for (const body of this.project.bodies) {
+      const idx = M.bodyTopLevelIndex(this.project, body.id);
+      if (idx < 0 || this.project.levels[idx].id !== this.levelId) continue;
+      for (const o of roofOpenings(this.project, this.level, body)) out.push(o);
+    }
+    return out;
+  }
+
+  // Corps couvert au-dessus d'un point : la toiture d'un corps est portée par le niveau
+  // le plus haut où il possède des pièces, qui n'est pas forcément le niveau affiché.
+  bodyAtRoof(p, quiet = false) {
+    let disabled = null;
+    for (const body of this.project.bodies) {
+      const idx = M.bodyTopLevelIndex(this.project, body.id);
+      if (idx < 0) continue;
+      const level = this.project.levels[idx];
+      for (const outline of M.bodyOutlines(this.project, level, body.id, 1)) {
+        const baseZ = M.levelElevation(this.project, level.id) + (body.elevation || 0) + M.bodyHeight(this.project, level, body);
+        const roof = G.buildRoof(outline, { ...body.roof, enabled: true, baseZ });
+        if (!roof.faces.some((f) => G.pointInPolygon(p, f.poly.map((q) => [q[0], q[1]])))) continue;
+        const face = roof.faces.find((f) => G.pointInPolygon(p, f.poly.map((q) => [q[0], q[1]])));
+        if (!body.roof?.enabled) { disabled = body; continue; }
+        return { body, level, face };
+      }
+    }
+    if (disabled && !quiet) this.hooks.onToast(`La toiture de « ${disabled.name} » est désactivée : activez-la pour y poser une fenêtre.`, 'warn');
+    return null;
+  }
+
+  // Aperçu au survol : on montre le pan détecté et l'emplacement de la future fenêtre.
+  skylightPreview(w) {
+    let hit = null;
+    try { hit = this.bodyAtRoof(w, true); } catch { hit = null; }
+    if (!hit) return { type: 'skylightPreview', ok: false };
+    const { body, level, face } = hit;
+    const probe = { ...this.newRoofItem('preview', level.id, w) };
+    const previous = body.roofItems || [];
+    body.roofItems = [...previous, probe];
+    let info = null;
+    try {
+      info = roofOpenings(this.project, level, body).find((o) => o.item.id === 'preview') || null;
+    } finally {
+      body.roofItems = previous;
+    }
+    return { type: 'skylightPreview', ok: true, body, level, face, info, enabled: !!body.roof?.enabled };
+  }
+
+  newRoofItem(id, levelId, w) {
+    const preset = ROOF_OPENINGS[this.roofOpeningType] || ROOF_OPENINGS.skylight;
+    const base = { id, type: this.roofOpeningType, kind: preset.kind, level: levelId, x: w[0], y: w[1] };
+    if (preset.kind === 'dormer') {
+      return { ...base, width: preset.width, wallHeight: preset.wallHeight, pitch: preset.pitch, depth: preset.depth, setback: preset.setback, winHeight: preset.winHeight, winSill: preset.winSill };
+    }
+    return { ...base, width: preset.width, height: preset.height, sill: preset.sill };
+  }
+
+  skylightClick(w) {
+    const hit = this.bodyAtRoof(w);
+    if (!hit) {
+      if (!this.project.bodies.some((b) => b.roof?.enabled === false)) {
+        this.hooks.onToast("Aucun pan de toiture à cet endroit : cliquez à l'intérieur du bâtiment.", 'warn');
+      }
+      return;
+    }
+    const { body, level } = hit;
+    const id = M.uid('sk');
+    this.store.commit('Poser une fenêtre de toit', (pr) => {
+      const b = M.bodyById(pr, body.id);
+      b.roofItems = [...(b.roofItems || []), this.newRoofItem(id, level.id, w)];
+    });
+    if (level.id !== this.levelId) this.hooks.requestLevel?.(level.id);
+    const info = roofOpenings(this.project, level, M.bodyById(this.project, body.id)).find((o) => o.item.id === id);
+    const label = (ROOF_OPENINGS[this.roofOpeningType] || ROOF_OPENINGS.skylight).label;
+    const allege = info?.poly && info.preset?.kind !== 'dormer' ? ` Allège ${(info.sillZ - info.floorZ).toFixed(2).replace('.', ',')} m.` : '';
+    this.hooks.onToast(`${label} posée sur « ${body.name} ».${allege}`);
+    this.select({ type: 'roofitem', id, bodyId: body.id });
+  }
+
   // ─── Statut ────────────────────────────────────────────────────────────────
   updateStatus() {
     const hints = {
@@ -725,7 +875,11 @@ export class Editor2D {
       scale: this.state.points?.length ? 'Cliquez la fin de la cote connue.' : 'Cliquez le début d’une cote dont vous connaissez la longueur (idéalement la plus longue).',
       measure: 'Cliquez deux points pour mesurer une distance.',
       calage: this.state.points?.length ? 'Cliquez maintenant le même point sur l’étage inférieur (en gris).' : 'Cliquez un repère sur le plan (un angle de façade par exemple).',
+      align2: ['Repère 1 : cliquez un angle sur le plan.', 'Cliquez le même angle sur l’étage inférieur (en gris).', 'Repère 2 : cliquez un second angle sur le plan, éloigné du premier.', 'Cliquez ce second angle sur l’étage inférieur.'][(this.state.points?.length || 0) % 4],
       movePlan: 'Glissez le plan pour le positionner.',
+      skylight: this.hover?.type === 'skylightPreview' && this.hover.ok
+        ? `Pan de « ${this.hover.body.name} » sous le curseur : cliquez pour poser la fenêtre.`
+        : 'Aucun pan de toiture sous le curseur. Visez l’intérieur d’un bâtiment couvert.',
     };
     const w = this.mouse?.w;
     this.hooks.onStatus?.({
@@ -755,6 +909,7 @@ export class Editor2D {
     for (const wall of L.walls) this.drawWall(L, wall, polys.get(wall.id));
     this.drawNodes(L);
     for (const r of rooms) this.drawRoomLabel(r);
+    this.drawRoofItems();
     this.drawSelection(L, polys);
     this.drawTool(L);
   }
@@ -828,7 +983,7 @@ export class Editor2D {
     ctx.lineWidth = 1;
     for (const poly of polys.values()) { this.pathPoly(poly); ctx.fill(); ctx.stroke(); }
     ctx.restore();
-    if (this.tool === 'calage' || this.tool === 'wall') {
+    if (this.tool === 'calage' || this.tool === 'align2' || this.tool === 'wall') {
       ctx.fillStyle = 'rgba(31,42,48,0.45)';
       for (const p of Object.values(level.nodes)) {
         const s = this.toScreen(p);
@@ -837,12 +992,19 @@ export class Editor2D {
     }
   }
 
+  bodyTint(room) {
+    const bodies = this.project.bodies || [];
+    const i = Math.max(0, bodies.findIndex((b) => b.id === room?.bodyId));
+    return BODY_TINTS[i % BODY_TINTS.length];
+  }
+
   drawRoomFill(r) {
     if (!r.room) return;
     const sel = this.selection?.type === 'room' && this.selection.id === r.room.id;
     const hov = this.hover?.type === 'room' && this.hover.id === r.room.id;
+    const tint = this.bodyTint(r.room);
     this.pathPoly(r.net);
-    this.ctx.fillStyle = sel ? ROOM_FILL_SEL : hov ? 'rgba(62,142,128,0.17)' : ROOM_FILL;
+    this.ctx.fillStyle = sel ? ROOM_FILL_SEL : hov ? tint.hover : tint.fill;
     this.ctx.fill();
   }
 
@@ -855,12 +1017,22 @@ export class Editor2D {
     const size = Math.max(10, Math.min(15, z * 0.28));
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
+    const tint = this.bodyTint(r.room);
+    const bodies = this.project.bodies || [];
+    const body = bodies.find((b) => b.id === r.room.bodyId);
+    const showBody = bodies.length > 1 && body;
+    const dy = showBody ? size * 0.95 : size * 0.55;
     ctx.font = `500 ${size}px "Instrument Sans", system-ui, sans-serif`;
-    ctx.fillStyle = ROOM_INK;
-    ctx.fillText(r.room.name, p[0], p[1] - size * 0.55);
+    ctx.fillStyle = tint.ink;
+    ctx.fillText(r.room.name, p[0], p[1] - dy);
     ctx.font = `400 ${size * 0.9}px "Instrument Sans", system-ui, sans-serif`;
-    ctx.fillStyle = 'rgba(44,93,85,0.8)';
-    ctx.fillText(fmtArea(r.area), p[0], p[1] + size * 0.65);
+    ctx.fillStyle = tint.ink + 'cc';
+    ctx.fillText(fmtArea(r.area), p[0], p[1] + (showBody ? 0 : size * 0.65));
+    if (showBody) {
+      ctx.font = `500 ${size * 0.75}px "Instrument Sans", system-ui, sans-serif`;
+      ctx.fillStyle = tint.ink + '99';
+      ctx.fillText(body.name.toUpperCase(), p[0], p[1] + size * 1.05);
+    }
   }
 
   drawWall(L, wall, poly) {
@@ -989,6 +1161,61 @@ export class Editor2D {
     ctx.textBaseline = 'middle';
     ctx.fillText(text, 0, 0);
     ctx.restore();
+  }
+
+  drawRoofItems() {
+    const ctx = this.ctx;
+    for (const o of this.roofItems()) {
+      if (!o.poly) continue;
+      const sel = this.selection?.type === 'roofitem' && this.selection.id === o.item.id;
+      if (o.preset?.kind === 'dormer') {
+        this.pathPoly(o.poly);
+        ctx.fillStyle = sel ? 'rgba(232,103,42,0.22)' : 'rgba(155,90,67,0.20)';
+        ctx.fill();
+        ctx.strokeStyle = sel ? ACCENT : '#9b5a43';
+        ctx.lineWidth = sel ? 2 : 1.3;
+        ctx.stroke();
+        // façade de la lucarne, trait plein
+        const a = o.poly[0], b = o.poly[o.poly.length - 1];
+        const s1 = this.toScreen(a), s2 = this.toScreen(b);
+        ctx.lineWidth = sel ? 3 : 2.2;
+        ctx.beginPath(); ctx.moveTo(s1[0], s1[1]); ctx.lineTo(s2[0], s2[1]); ctx.stroke();
+        continue;
+      }
+      // au-delà d'un certain dézoom, le symbole devient illisible : on pose un repère
+      if (o.item.width * this.view.zoom < 10) {
+        const c = this.toScreen(G.polygonCentroid(o.poly));
+        ctx.beginPath();
+        ctx.moveTo(c[0], c[1] - 7); ctx.lineTo(c[0] + 7, c[1]); ctx.lineTo(c[0], c[1] + 7); ctx.lineTo(c[0] - 7, c[1]);
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(63,127,160,0.35)';
+        ctx.fill();
+        ctx.strokeStyle = sel ? ACCENT : '#3f7fa0';
+        ctx.lineWidth = sel ? 2 : 1.2;
+        ctx.stroke();
+        continue;
+      }
+      this.pathPoly(o.poly);
+      ctx.fillStyle = 'rgba(63,127,160,0.16)';
+      ctx.fill();
+      ctx.strokeStyle = sel ? ACCENT : '#3f7fa0';
+      ctx.lineWidth = sel ? 2 : 1.2;
+      ctx.stroke();
+      const s0 = this.toScreen(o.poly[0]), s1 = this.toScreen(o.poly[1]), s2 = this.toScreen(o.poly[2]), s3 = this.toScreen(o.poly[3]);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(s0[0], s0[1]); ctx.lineTo(s2[0], s2[1]);
+      ctx.moveTo(s1[0], s1[1]); ctx.lineTo(s3[0], s3[1]);
+      ctx.stroke();
+      if (this.view.zoom > 25) {
+        const c = this.toScreen(G.polygonCentroid(o.poly));
+        ctx.font = '500 11px "Instrument Sans", system-ui, sans-serif';
+        ctx.fillStyle = o.clamped ? ACCENT : '#3f7fa0';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        ctx.fillText(`allège ${(o.sillZ - o.floorZ).toFixed(2).replace('.', ',')} m`, c[0], c[1] + 10);
+      }
+    }
   }
 
   drawSelection(L, polys) {
@@ -1152,6 +1379,40 @@ export class Editor2D {
         const poly = G.computeWallPolygons(L).get(wall.id);
         if (poly) { this.pathPoly(poly); ctx.strokeStyle = '#c83c28'; ctx.lineWidth = 2; ctx.stroke(); }
       }
+    } else if (this.tool === 'skylight') {
+      const pv = this.hover;
+      const m2 = this.mouse;
+      if (pv?.ok && pv.face) {
+        ctx.save();
+        ctx.setLineDash([6, 4]);
+        ctx.strokeStyle = 'rgba(63,127,160,0.9)';
+        ctx.lineWidth = 1.5;
+        this.pathPoly(pv.face.poly.map((p) => [p[0], p[1]]));
+        ctx.stroke();
+        ctx.restore();
+        if (pv.info?.poly) {
+          this.pathPoly(pv.info.poly);
+          ctx.fillStyle = 'rgba(232,103,42,0.30)';
+          ctx.fill();
+          ctx.strokeStyle = ACCENT;
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+          const c = this.toScreen(G.polygonCentroid(pv.info.poly));
+          ctx.font = '500 11px "Instrument Sans", system-ui, sans-serif';
+          ctx.fillStyle = ACCENT;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'top';
+          ctx.fillText(`allège ${(pv.info.sillZ - pv.info.floorZ).toFixed(2).replace('.', ',')} m`, c[0], c[1] + 10);
+        }
+      } else if (m2) {
+        const s = m2.s;
+        ctx.strokeStyle = '#c83c28';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(s[0], s[1], 9, 0, Math.PI * 2);
+        ctx.moveTo(s[0] - 6, s[1] + 6); ctx.lineTo(s[0] + 6, s[1] - 6);
+        ctx.stroke();
+      }
     } else if (this.tool === 'scale' || this.tool === 'measure') {
       const pts = this.state.points || [];
       const color = this.tool === 'scale' ? ACCENT : '#2c5d55';
@@ -1175,6 +1436,30 @@ export class Editor2D {
         const text = this.tool === 'scale' && !L.plan?.calibrated ? 'à renseigner' : fmtLen(G.dist(chain[0], chain[1]));
         this.drawDimension(chain[0], chain[1], -14, text, color);
       }
+    } else if (this.tool === 'align2') {
+      const pts = this.state.points || [];
+      const chain = [...pts];
+      if (m) chain.push(chain.length % 2 === 1 ? this.anchorPoint(m.w) : m.w);
+      chain.forEach((p, i) => {
+        const s = this.toScreen(p);
+        ctx.strokeStyle = i % 2 ? ACCENT : INK;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        if (i % 2) ctx.rect(s[0] - 5, s[1] - 5, 10, 10);
+        else { ctx.moveTo(s[0] - 7, s[1]); ctx.lineTo(s[0] + 7, s[1]); ctx.moveTo(s[0], s[1] - 7); ctx.lineTo(s[0], s[1] + 7); }
+        ctx.stroke();
+        ctx.font = '500 11px "Instrument Sans", system-ui, sans-serif';
+        ctx.fillStyle = i % 2 ? ACCENT : INK;
+        ctx.textAlign = 'left';
+        ctx.fillText(i % 2 ? `cible ${Math.floor(i / 2) + 1}` : `repère ${Math.floor(i / 2) + 1}`, s[0] + 9, s[1] - 9);
+      });
+      ctx.setLineDash([5, 4]);
+      ctx.strokeStyle = 'rgba(232,103,42,0.8)';
+      for (let i = 0; i + 1 < chain.length; i += 2) {
+        const a = this.toScreen(chain[i]), b = this.toScreen(chain[i + 1]);
+        ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+      }
+      ctx.setLineDash([]);
     } else if (this.tool === 'calage') {
       const pts = this.state.points || [];
       if (pts.length && m) {

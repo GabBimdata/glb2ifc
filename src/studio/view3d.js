@@ -3,16 +3,17 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { buildElements } from './build.js';
-import { COLORS } from './catalog.js';
+import { colorsOf } from './catalog.js';
 
-const IFC_HINT = { wall: 'IfcWall', slab: 'IfcSlab', roof: 'IfcRoof', gable: 'IfcWall', door: 'IfcDoor', window: 'IfcWindow' };
+const IFC_HINT = { wall: 'IfcWall', slab: 'IfcSlab', roof: 'IfcRoof', gable: 'IfcWall', door: 'IfcDoor', window: 'IfcWindow', skylight: 'IfcWindow', dormer: 'IfcRoof', ceiling: 'IfcCovering' };
 
 const materialCache = new Map();
 function material(key, opts = {}) {
-  const id = `${key}-${opts.opacity ?? 1}-${opts.highlight ? 1 : 0}`;
+  const color = opts.highlight ? '#f08a4b' : (opts.color || '#cccccc');
+  const id = `${key}-${color}-${opts.opacity ?? 1}`;
   if (materialCache.has(id)) return materialCache.get(id);
   const m = new THREE.MeshStandardMaterial({
-    color: opts.highlight ? '#f08a4b' : (COLORS[key] || '#cccccc'),
+    color,
     roughness: key === 'window' ? 0.1 : 0.85,
     metalness: 0,
     transparent: (opts.opacity ?? 1) < 1,
@@ -41,6 +42,12 @@ function toGeometry(mesh) {
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
   g.computeVertexNormals();
+  // Un index explicite est requis par les lecteurs glTF stricts (dont le convertisseur
+  // GLB → IFC de Smelt, qui ignore les primitives non indexées).
+  const count = pos.length / 3;
+  const index = count > 65535 ? new Uint32Array(count) : new Uint16Array(count);
+  for (let i = 0; i < count; i++) index[i] = i;
+  g.setIndex(new THREE.BufferAttribute(index, 1));
   return g;
 }
 
@@ -52,18 +59,25 @@ export function buildObject3D(project, options = {}) {
   for (const el of elements) {
     const parts = [];
     if (el.kind === 'space') continue;
-    const highlight = options.selectedKey && el.key === options.selectedKey;
+    const highlight = (options.selectedKey && el.key === options.selectedKey)
+      || (options.selectedWallId && el.wallIds?.includes(options.selectedWallId));
     if (el.mesh) parts.push({ mesh: el.mesh, key: el.kind === 'wall' ? (el.wallType.category || 'interior') : el.kind });
+    if (el.walls) parts.push({ mesh: el.walls, key: 'exterior' });
+    if (el.roofMesh) parts.push({ mesh: el.roofMesh, key: 'roof' });
     if (el.frame) parts.push({ mesh: el.frame, key: 'frame' });
-    if (el.panel) parts.push({ mesh: el.panel, key: el.kind, opacity: el.kind === 'window' ? 0.45 : 1 });
+    const panelKey = el.kind === 'skylight' ? 'window' : el.kind;
+    if (el.panel) parts.push({ mesh: el.panel, key: panelKey, opacity: panelKey === 'window' ? 0.45 : 1 });
     const group = new THREE.Group();
     group.name = el.name;
     group.userData = { ifcType: IFC_HINT[el.kind] || 'IfcBuildingElementProxy', smeltKey: el.key, level: el.level?.name };
     for (const part of parts) {
       if (!part.mesh.triangles.length) continue;
       const geom = toGeometry(part.mesh);
-      const m = new THREE.Mesh(geom, material(part.key, { opacity: part.opacity, highlight }));
+      const m = new THREE.Mesh(geom, material(part.key, { opacity: part.opacity, highlight, color: colorsOf(project, el.body)[part.key] }));
       m.name = el.name;
+      // les métadonnées doivent être portées par le nœud du maillage : c'est là que les
+      // lecteurs glTF vont chercher les extras
+      m.userData = { smeltIfcType: IFC_HINT[el.kind] || 'IfcBuildingElementProxy', ifcType: IFC_HINT[el.kind] || 'IfcBuildingElementProxy', smeltSource: 'Smelt Studio', level: el.level?.name || '', body: el.body?.name || '' };
       m.castShadow = true;
       m.receiveShadow = true;
       group.add(m);
@@ -117,6 +131,17 @@ export class View3D {
 
     this.model = null;
     this.hasFramed = false;
+    this.raycaster = new THREE.Raycaster();
+    this.pointer = new THREE.Vector2();
+    this.onPick = null;
+    let downAt = null;
+    this.renderer.domElement.addEventListener('pointerdown', (e) => { downAt = [e.clientX, e.clientY]; });
+    this.renderer.domElement.addEventListener('pointerup', (e) => {
+      if (!this.onPick || !downAt) return;
+      if (Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 4) return; // rotation, pas un clic
+      const hit = this.pick(e);
+      if (hit) this.onPick(hit);
+    });
     this.pending = false;
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(container);
@@ -132,6 +157,21 @@ export class View3D {
   }
 
   requestRender() { this.pending = true; }
+
+  // Point cliqué sur un élément : renvoie { point (plan x,y), key, name }
+  pick(event) {
+    if (!this.model) return null;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    this.pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    const hits = this.raycaster.intersectObject(this.model, true).filter((h) => h.object.isMesh);
+    if (!hits.length) return null;
+    const h = hits[0];
+    let group = h.object;
+    while (group && !group.userData?.smeltKey) group = group.parent;
+    return { point: [h.point.x, h.point.z], key: group?.userData?.smeltKey || null, name: h.object.name };
+  }
 
   resize() {
     const w = this.container.clientWidth, h = this.container.clientHeight;

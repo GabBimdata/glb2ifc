@@ -2,7 +2,7 @@
 // Murs, planchers, espaces : solides extrudés. Portes et fenêtres : IfcOpeningElement + remplissage.
 import { buildElements } from './build.js';
 import { levelElevation, wallHeight } from './model.js';
-import { COLORS } from './catalog.js';
+import { colorsOf } from './catalog.js';
 
 const B64 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_$';
 
@@ -108,17 +108,18 @@ export function exportIfc(project) {
 
   // Styles de surface
   const styles = {};
-  const styleFor = (key, transparency = 0) => {
-    if (styles[key]) return styles[key];
-    const [r, g, b] = hexToRgb(COLORS[key] || '#cccccc');
+  const styleFor = (key, colour, transparency = 0) => {
+    const id = `${key}-${colour}-${transparency}`;
+    if (styles[id]) return styles[id];
+    const [r, g, b] = hexToRgb(colour || '#cccccc');
     const col = w.add(`IFCCOLOURRGB($,${num(r)},${num(g)},${num(b)})`);
     const shading = w.add(`IFCSURFACESTYLESHADING(${col},${num(transparency)})`);
     const style = w.add(`IFCSURFACESTYLE(${stepString(key)},.BOTH.,(${shading}))`);
-    styles[key] = style;
+    styles[id] = style;
     return style;
   };
-  const styled = (item, key, transparency) => {
-    w.add(`IFCSTYLEDITEM(${item},(${styleFor(key, transparency)}),$)`);
+  const styled = (item, key, body, transparency) => {
+    w.add(`IFCSTYLEDITEM(${item},(${styleFor(key, colorsOf(project, body)[key], transparency)}),$)`);
     return item;
   };
 
@@ -177,6 +178,9 @@ export function exportIfc(project) {
   };
 
   const { elements } = buildElements(project);
+  const multiBody = project.bodies.length > 1;
+  const zoneSpaces = {};   // corps → espaces
+  const bodyElements = {}; // corps → éléments construits
   const storeys = {};
   const contained = {};
   const spacesByStorey = {};
@@ -192,16 +196,23 @@ export function exportIfc(project) {
   });
 
   const roofParts = [];
+  const roofEntities = {};
+
+  const noteBody = (el, entity) => {
+    if (!multiBody || !el.body) return entity;
+    (bodyElements[el.body.id] ||= { body: el.body, items: [] }).items.push(entity);
+    return entity;
+  };
 
   for (const el of elements) {
     const st = storeys[el.level.id];
     const key = el.key;
     if (el.kind === 'wall') {
       const pl = placement(st.placement);
-      const solid = styled(extrusion(profilePolyline(el.profile), el.depth), el.wallType.category || 'interior');
+      const solid = styled(extrusion(profilePolyline(el.profile), el.depth), el.wallType.category || 'interior', el.body);
       const predefined = el.wallType.category === 'partition' ? '.PARTITIONING.' : '.STANDARD.';
       const ent = w.add(`IFCWALL(${guid(key)},${oh},${stepString(el.name)},$,$,${pl},${shape([solid])},$,${predefined})`);
-      contained[el.level.id].push(ent);
+      contained[el.level.id].push(noteBody(el, ent));
       el._ifc = { entity: ent, placement: pl };
       const L = Math.hypot(el.level.nodes[el.wall.b][0] - el.level.nodes[el.wall.a][0], el.level.nodes[el.wall.b][1] - el.level.nodes[el.wall.a][1]);
       props(key, ent, 'Pset_WallCommon', [
@@ -216,16 +227,24 @@ export function exportIfc(project) {
       if (el.wallType.material) linkMaterial(el.wallType.material, ent);
     } else if (el.kind === 'slab') {
       const pl = placement(st.placement);
-      const solid = styled(extrusion(profilePolyline(el.profile), el.depth, -el.depth), 'slab');
+      const solid = styled(extrusion(profilePolyline(el.profile), el.depth, -el.depth), 'slab', el.body);
       const ent = w.add(`IFCSLAB(${guid(key)},${oh},${stepString(el.name)},$,$,${pl},${shape([solid])},$,.FLOOR.)`);
-      contained[el.level.id].push(ent);
+      contained[el.level.id].push(noteBody(el, ent));
       props(key, ent, 'Pset_SlabCommon', [['IsExternal', 'bool', false], ['LoadBearing', 'bool', true]]);
       linkMaterial('Béton', ent);
+    } else if (el.kind === 'ceiling') {
+      const pl = placement(st.placement);
+      const solid = styled(extrusion(profilePolyline(el.profile), el.depth, el.z0 - st.z), 'ceiling', el.body);
+      const ent = w.add(`IFCCOVERING(${guid(key)},${oh},${stepString(el.name)},$,$,${pl},${shape([solid])},$,.CEILING.)`);
+      contained[el.level.id].push(noteBody(el, ent));
+      props(key, ent, 'Pset_CoveringCommon', [['IsExternal', 'bool', false]]);
+      linkMaterial('Plaque de plâtre', ent);
     } else if (el.kind === 'space') {
       const pl = placement(st.placement);
       const solid = extrusion(profilePolyline(el.profile), el.depth);
       const ent = w.add(`IFCSPACE(${guid(key)},${oh},${stepString(String(spacesByStorey[el.level.id].length + 1))},$,$,${pl},${shape([solid])},${stepString(el.name)},.ELEMENT.,.INTERNAL.,$)`);
       spacesByStorey[el.level.id].push(ent);
+      if (multiBody && el.body) (zoneSpaces[el.body.id] ||= { body: el.body, items: [] }).items.push(ent);
       quantities(key, ent, 'Qto_SpaceBaseQuantities', [
         ['NetFloorArea', 'area', el.area], ['Height', 'length', el.depth], ['NetVolume', 'volume', el.area * el.depth],
       ]);
@@ -243,44 +262,96 @@ export function exportIfc(project) {
       w.add(`IFCRELVOIDSELEMENT(${guid(`relvoid-${key}`)},${oh},$,$,${host._ifc.entity},${opening})`);
       // Menuiserie
       const pl = placement(st.placement);
-      const frame = styled(faceSet(el.frame, st.z), 'frame');
-      const panel = styled(faceSet(el.panel, st.z), el.kind, el.kind === 'window' ? 0.6 : 0);
+      const frame = styled(faceSet(el.frame, st.z), 'frame', el.body);
+      const panel = styled(faceSet(el.panel, st.z), el.kind, el.body, el.kind === 'window' ? 0.6 : 0);
       const rep = shape([frame, panel], 'Tessellation');
       const o = el.opening;
       const ent = el.kind === 'door'
         ? w.add(`IFCDOOR(${guid(key)},${oh},${stepString(el.name)},$,$,${pl},${rep},$,${num(o.height)},${num(o.width)},.DOOR.,.SINGLE_SWING_LEFT.,$)`)
         : w.add(`IFCWINDOW(${guid(key)},${oh},${stepString(el.name)},$,$,${pl},${rep},$,${num(o.height)},${num(o.width)},.WINDOW.,.SINGLE_PANEL.,$)`);
       w.add(`IFCRELFILLSELEMENT(${guid(`relfill-${key}`)},${oh},$,$,${opening},${ent})`);
-      contained[el.level.id].push(ent);
+      contained[el.level.id].push(noteBody(el, ent));
       const exterior = el.wall && (el.wall.type || '').startsWith('ext');
       props(key, ent, el.kind === 'door' ? 'Pset_DoorCommon' : 'Pset_WindowCommon', [['IsExternal', 'bool', !!exterior]]);
       linkMaterial(el.kind === 'door' ? 'Bois' : 'Vitrage', ent);
     } else if (el.kind === 'roof') {
       const pl = placement(st.placement);
       let item;
-      if (el.profile) item = styled(extrusion(profilePolyline(el.profile), el.depth, el.z0 - st.z), 'roof');
-      else item = styled(faceSet(el.mesh, st.z), 'roof');
+      if (el.profile) item = styled(extrusion(profilePolyline(el.profile), el.depth, el.z0 - st.z), 'roof', el.body);
+      else item = styled(faceSet(el.mesh, st.z), 'roof', el.body);
       const ent = w.add(`IFCSLAB(${guid(key)},${oh},${stepString(el.name)},$,$,${pl},${shape([item], el.profile ? 'SweptSolid' : 'Tessellation')},$,.ROOF.)`);
-      roofParts.push({ ent, level: el.level });
+      noteBody(el, ent);
+      roofEntities[el.key] = ent;
+      roofParts.push({ ent, level: el.level, body: el.body });
+    } else if (el.kind === 'skylight') {
+      const host = roofEntities[el.hostKey];
+      const pl = placement(st.placement);
+      const voidSolid = extrusion(profilePolyline(el.voidPoly), el.voidZ1 - el.voidZ0, el.voidZ0 - st.z);
+      const opening = w.add(`IFCOPENINGELEMENT(${guid(`void-${key}`)},${oh},'Ouverture de toiture',$,$,${pl},${shape([voidSolid])},$,.OPENING.)`);
+      if (host) w.add(`IFCRELVOIDSELEMENT(${guid(`relvoid-${key}`)},${oh},$,$,${host},${opening})`);
+      const frame = styled(faceSet(el.frame, st.z), 'frame', el.body);
+      const panel = styled(faceSet(el.panel, st.z), 'window', el.body, 0.6);
+      const it = el.roofOpening.item;
+      const ent = w.add(`IFCWINDOW(${guid(key)},${oh},${stepString(el.name)},$,$,${pl},${shape([frame, panel], 'Tessellation')},$,${num(it.height)},${num(it.width)},.SKYLIGHT.,.SINGLE_PANEL.,$)`);
+      w.add(`IFCRELFILLSELEMENT(${guid(`relfill-${key}`)},${oh},$,$,${opening},${ent})`);
+      contained[el.level.id].push(noteBody(el, ent));
+      props(key, ent, 'Pset_WindowCommon', [['IsExternal', 'bool', true], ['Reference', 'label', 'Fenêtre de toit']]);
+      linkMaterial('Vitrage', ent);
+    } else if (el.kind === 'dormer') {
+      const host = roofEntities[el.hostKey];
+      const pl = placement(st.placement);
+      const voidSolid = extrusion(profilePolyline(el.voidPoly), el.voidZ1 - el.voidZ0, el.voidZ0 - st.z);
+      const opening = w.add(`IFCOPENINGELEMENT(${guid(`void-${key}`)},${oh},'Percement de lucarne',$,$,${pl},${shape([voidSolid])},$,.OPENING.)`);
+      if (host) w.add(`IFCRELVOIDSELEMENT(${guid(`relvoid-${key}`)},${oh},$,$,${host},${opening})`);
+      const walls = w.add(`IFCWALL(${guid(`walls-${key}`)},${oh},${stepString(`${el.name} — joues et façade`)},$,$,${pl},${shape([styled(faceSet(el.walls, st.z), 'exterior', el.body)], 'Tessellation')},$,.STANDARD.)`);
+      const cover = w.add(`IFCSLAB(${guid(`roof-${key}`)},${oh},${stepString(`${el.name} — couverture`)},$,$,${pl},${shape([styled(faceSet(el.roofMesh, st.z), 'roof', el.body)], 'Tessellation')},$,.ROOF.)`);
+      const frame = styled(faceSet(el.frame, st.z), 'frame', el.body);
+      const panel = styled(faceSet(el.panel, st.z), 'window', el.body, 0.6);
+      const win = w.add(`IFCWINDOW(${guid(key)},${oh},${stepString(`${el.name} — baie`)},$,$,${pl},${shape([frame, panel], 'Tessellation')},$,${num(el.window.height)},${num(el.window.width)},.WINDOW.,.SINGLE_PANEL.,$)`);
+      for (const ent of [walls, cover, win]) contained[el.level.id].push(noteBody(el, ent));
+      linkMaterial('Maçonnerie', walls);
+      linkMaterial('Couverture', cover);
+      linkMaterial('Vitrage', win);
+      props(key, win, 'Pset_WindowCommon', [['IsExternal', 'bool', true], ['Reference', 'label', el.name]]);
     } else if (el.kind === 'gable') {
       const pl = placement(st.placement);
-      const item = styled(faceSet(el.mesh, st.z), 'gable');
+      const item = styled(faceSet(el.mesh, st.z), 'gable', el.body);
       const ent = w.add(`IFCWALL(${guid(key)},${oh},${stepString(el.name)},$,$,${pl},${shape([item], 'Tessellation')},$,.STANDARD.)`);
-      contained[el.level.id].push(ent);
+      contained[el.level.id].push(noteBody(el, ent));
       props(key, ent, 'Pset_WallCommon', [['IsExternal', 'bool', true], ['LoadBearing', 'bool', true]]);
       linkMaterial('Maçonnerie', ent);
     }
   }
 
-  if (roofParts.length) {
-    const level = roofParts[0].level;
-    const st = storeys[level.id];
+  const roofGroups = new Map();
+  for (const r of roofParts) {
+    const id = r.body?.id || 'main';
+    if (!roofGroups.has(id)) roofGroups.set(id, { body: r.body, level: r.level, parts: [] });
+    roofGroups.get(id).parts.push(r.ent);
+  }
+  for (const [id, group] of roofGroups) {
+    const st = storeys[group.level.id];
     const pl = placement(st.placement);
-    const typeEnum = { gable: '.GABLE_ROOF.', hip: '.HIP_ROOF.', shed: '.SHED_ROOF.', flat: '.FLAT_ROOF.' }[project.roof.type] || '.NOTDEFINED.';
-    const roof = w.add(`IFCROOF(${guid('roof')},${oh},'Toiture',$,$,${pl},$,$,${typeEnum})`);
-    w.add(`IFCRELAGGREGATES(${guid('rel-roof')},${oh},$,$,${roof},(${roofParts.map((r) => r.ent).join(',')}))`);
-    contained[level.id].push(roof);
+    const type = group.body?.roof?.type;
+    const typeEnum = { gable: '.GABLE_ROOF.', hip: '.HIP_ROOF.', shed: '.SHED_ROOF.', flat: '.FLAT_ROOF.' }[type] || '.NOTDEFINED.';
+    const name = multiBody && group.body ? `Toiture ${group.body.name}` : 'Toiture';
+    const roof = w.add(`IFCROOF(${guid(`roof-${id}`)},${oh},${stepString(name)},$,$,${pl},$,$,${typeEnum})`);
+    w.add(`IFCRELAGGREGATES(${guid(`rel-roof-${id}`)},${oh},$,$,${roof},(${group.parts.join(',')}))`);
+    contained[group.level.id].push(roof);
     linkMaterial('Couverture', roof);
+  }
+
+  // Corps de bâtiment : une IfcZone par corps (espaces) et un groupe pour les ouvrages
+  if (multiBody) {
+    for (const [id, z] of Object.entries(zoneSpaces)) {
+      const zone = w.add(`IFCZONE(${guid(`zone-${id}`)},${oh},${stepString(z.body.name)},'Corps de bâtiment',$,$)`);
+      w.add(`IFCRELASSIGNSTOGROUP(${guid(`relzone-${id}`)},${oh},$,$,(${z.items.join(',')}),$,${zone})`);
+    }
+    for (const [id, g] of Object.entries(bodyElements)) {
+      const prop = w.add(`IFCPROPERTYSINGLEVALUE('Corps',$,IFCLABEL(${stepString(g.body.name)}),$)`);
+      const pset = w.add(`IFCPROPERTYSET(${guid(`pset-body-${id}`)},${oh},'Smelt_Corps',$,(${prop}))`);
+      w.add(`IFCRELDEFINESBYPROPERTIES(${guid(`relbody-${id}`)},${oh},$,$,(${g.items.join(',')}),${pset})`);
+    }
   }
 
   for (const level of project.levels) {
