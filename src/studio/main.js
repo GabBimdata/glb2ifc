@@ -1,7 +1,7 @@
 // Smelt Studio — point d'entrée de l'interface.
 import * as M from './model.js';
 import * as G from './geometry.js';
-import { WALL_TYPES, OPENING_TYPES, ROOM_NAMES, ROOF_TYPES, ROOF_OPENINGS, COLOR_LABELS, colorsOf } from './catalog.js';
+import { WALL_TYPES, OPENING_TYPES, ROOM_NAMES, ROOF_TYPES, ROOF_OPENINGS, COLOR_LABELS, colorsOf, BALCONY, RAILING_TYPES } from './catalog.js';
 import { Editor2D } from './editor2d.js';
 import { View3D, exportGlb } from './view3d.js';
 import { exportIfc } from './ifc-export.js';
@@ -331,7 +331,15 @@ function stepBody(id) {
         <div class="grid2">${Object.entries(OPENING_TYPES).map(([k, o]) => `
           <button class="tile ${editor.openingType === k ? 'on' : ''}" data-opening="${k}">${openingIcon(k)}<span>${esc(o.label)}</span><small>${fmt(o.width)} × ${fmt(o.height)} m</small></button>`).join('')}
         </div>
-        <p>Survolez un mur : les distances aux angles s'affichent. Cliquez pour poser. Dimensions modifiables ensuite à droite.</p>`;
+        <p>Survolez un mur : les distances aux angles s'affichent. Cliquez pour poser. Dimensions modifiables ensuite à droite.</p>
+        <span class="field-label">Balcons</span>
+        <div class="grid2">
+          <button class="tile ${editor.tool === 'balcony' ? 'on' : ''}" data-act="tool-balcony">
+            <svg viewBox="0 0 100 30" aria-hidden="true"><path d="M0 8H100" stroke="#26323a" stroke-width="6"/><rect x="28" y="11" width="44" height="15" fill="#e9dfd2" stroke="#1f2a30" stroke-width="1"/><path d="M28 11V26H72V11" fill="none" stroke="#1f2a30" stroke-width="2.4"/></svg>
+            <span>${esc(BALCONY.label)}</span><small>${fmt(BALCONY.width)} × ${fmt(BALCONY.depth)} m</small>
+          </button>
+        </div>
+        ${editor.levelIndex > 0 ? '<p>Les terrasses se créent seules : toute partie de l\'étage du dessous que ce niveau ne couvre pas devient une terrasse. Cliquez-la pour la régler.</p>' : ''}`;
     case 'rooms': {
       const { rooms } = M.levelFaces(L);
       const list = rooms.filter((r) => r.room);
@@ -389,6 +397,12 @@ function stepBody(id) {
     case 'levels':
       return `
         <table class="table"><tbody>${p.levels.map((l, i) => `<tr data-level="${l.id}" class="${l.id === L.id ? 'sel' : ''}"><td>${esc(l.name)}</td><td>+${fmt(M.levelElevation(p, l.id))} m</td></tr>`).slice().reverse().join('')}</tbody></table>
+        <label class="field"><span class="field-label">Type d'étage</span>
+          <select data-field="level-attic">
+            <option value="standard" ${M.isAttic(L) ? '' : 'selected'}>Standard</option>
+            <option value="attic" ${M.isAttic(L) ? 'selected' : ''}>Sous toiture (combles aménagés)</option>
+          </select></label>
+        ${M.isAttic(L) ? atticPanel(L) : ''}
         <label class="field"><span class="field-label">Hauteur d'étage de « ${esc(L.name)} » (sol à sol)</span><span class="unit" data-unit="m"><input type="text" inputmode="decimal" value="${fmt(L.height)}" data-field="level-height" /></span></label>
         <label class="field"><span class="field-label">Épaisseur des planchers</span><span class="unit" data-unit="m"><input type="text" inputmode="decimal" value="${fmt(p.settings.slabThickness)}" data-field="slab" /></span></label>
         <div class="row">
@@ -453,8 +467,29 @@ function aboveCeiling(s) {
   const level = store.project.levels[idx];
   if (!level) return false;
   const zPlafond = M.levelElevation(store.project, level.id) + (body.elevation || 0)
-    + M.bodyHeight(store.project, level, body) - (body.ceilingThickness || 0.15);
+    + (M.isAttic(level) ? (level.attic.ceilingHeight ?? 2.5) : M.bodyHeight(store.project, level, body) - (body.ceilingThickness || 0.15));
   return s.info.sillZ >= zPlafond - 0.02;
+}
+
+// Réglages et bilan d'un étage sous toiture
+function atticPanel(L) {
+  const p = store.project;
+  const idx = editor.levelIndex;
+  const covered = [...new Set(L.rooms.map((r) => r.bodyId || p.bodies[0].id))]
+    .some((id) => M.bodyTopLevelIndex(p, id) === idx);
+  const els = B.buildElements(p).elements.filter((e) => e.kind === 'space' && e.levelIndex === idx && e.areaHabitable !== undefined);
+  const floor = els.reduce((a, e) => a + e.area, 0), habitable = els.reduce((a, e) => a + e.areaHabitable, 0);
+  const warns = B.buildElements(p).warnings.filter((w) => w.startsWith(`${L.name} :`));
+  return `
+    <div class="grid2">
+      <label><span class="field-label">Jambettes (murs de façade)</span><span class="unit" data-unit="m"><input type="text" inputmode="decimal" value="${fmt(L.attic.kneeWall ?? 0.9)}" data-field="attic-knee" /></span></label>
+      <label><span class="field-label">Faux plafond</span><span class="unit" data-unit="m"><input type="text" inputmode="decimal" value="${fmt(L.attic.ceilingHeight ?? 2.5)}" data-field="attic-ceiling" /></span></label>
+    </div>
+    <p class="sub">La toiture repose sur les jambettes ; cloisons et pièces s'arrêtent sous les rampants. Le faux plafond suit l'option « Plafond sous la toiture » du corps : décochée, les rampants montent jusqu'au faîtage.</p>
+    ${covered ? '' : '<p class="note">Aucune toiture ne repose sur ce niveau : il faut que ce soit le dernier niveau de son corps de bâtiment.</p>'}
+    ${els.length ? `<div class="stat"><span>Surface au sol</span><b>${fmt(floor, 1)} m²</b></div>
+      <div class="stat"><span>Surface habitable (≥ 1,80 m)</span><b>${fmt(habitable, 1)} m²</b></div>` : ''}
+    ${warns.map((w) => `<p class="note">${esc(w.replace(`${L.name} : `, ''))}</p>`).join('')}`;
 }
 
 function skylightList() {
@@ -475,7 +510,7 @@ function ridgeInfo(body) {
   if (!top) return 'à définir (aucune pièce fermée dans ce corps)';
   const outlines = M.bodyOutlines(p, top, body.id, 1);
   if (!outlines.length) return 'à définir (aucun contour fermé)';
-  const baseZ = M.levelElevation(p, top.id) + (body.elevation || 0) + M.bodyHeight(p, top, body);
+  const baseZ = M.levelElevation(p, top.id) + (body.elevation || 0) + M.roofBaseHeight(p, top, body);
   let z = baseZ;
   for (const o of outlines) z = Math.max(z, G.buildRoof(o, { ...body.roof, baseZ }).ridgeZ);
   return `+${fmt(z)} m, soit ${fmt(z - baseZ)} m au-dessus des murs`;
@@ -534,6 +569,14 @@ function renderCartouche() {
 
 // ─── Inspecteur (colonne de droite) ───────────────────────────────────────────
 
+function atticRoomLine(s) {
+  const L = editor.level;
+  if (!M.isAttic(L)) return `${fmt(s.area, 1)} m² habitables (hors murs)`;
+  const el = B.buildElements(store.project).elements.find((e) => e.kind === 'space' && e.room?.id === s.room.id);
+  if (el?.areaHabitable === undefined) return `${fmt(s.area, 1)} m² au sol`;
+  return `${fmt(el.area, 1)} m² au sol, dont ${fmt(el.areaHabitable, 1)} m² habitables (hauteur ≥ 1,80 m)`;
+}
+
 function findSelection() {
   const sel = editor.selection;
   if (!sel) return null;
@@ -551,6 +594,14 @@ function findSelection() {
   if (sel.type === 'equipment') {
     const item = (L.equipment || []).find((x) => x.id === sel.id);
     return item ? { ...sel, item } : null;
+  }
+  if (sel.type === 'balcony') {
+    const item = (L.balconies || []).find((x) => x.id === sel.id);
+    return item ? { ...sel, item } : null;
+  }
+  if (sel.type === 'terrace') {
+    const tr = B.levelTerraces(store.project, editor.levelIndex).find((x) => x.key === sel.id);
+    return tr ? { ...sel, terrace: tr } : null;
   }
   if (sel.type === 'roofitem') {
     const body = store.project.bodies.find((b) => b.id === sel.bodyId);
@@ -665,6 +716,41 @@ function renderInspector() {
       <h2>Angle</h2><p class="sub">Point de jonction des murs</p>
       <div class="grid2">${numField('X', 'node-x', s.point[0])}${numField('Y', 'node-y', -s.point[1])}</div>
       <section><button class="btn danger block" data-act="delete-selection">Supprimer l'angle et ses murs</button></section>`;
+  } else if (s.type === 'balcony') {
+    const b = s.item;
+    const wall = L.walls.find((w2) => w2.id === b.wallId);
+    const g = B.balconyGeometry(b);
+    const facing = wall && wall.openings.some((o) => {
+      const a = L.nodes[wall.a], bb = L.nodes[wall.b];
+      const t = G.projectOnSegment([b.x, b.y], a, bb).t * G.dist(a, bb);
+      return (o.type === 'frenchWindow' || o.type === 'bay' || o.kind === 'door') && Math.abs(o.offset - t) < (b.width + o.width) / 2;
+    });
+    el.innerHTML = `
+      <h2>Balcon en saillie</h2><p class="sub">${fmt(b.width * b.depth, 1)} m², dessus au niveau du plancher</p>
+      <div class="grid2">${numField('Largeur', 'bal-width', b.width)}${numField('Avancée', 'bal-depth', b.depth)}</div>
+      <div class="grid2">${numField('Épaisseur', 'bal-thickness', b.thickness)}${numField('Hauteur garde-corps', 'bal-railingHeight', b.railingHeight)}</div>
+      <label class="field"><span class="field-label">Garde-corps</span>
+        <select data-prop="bal-railing">${Object.entries(RAILING_TYPES).map(([k, v]) => `<option value="${k}" ${k === b.railing ? 'selected' : ''}>${esc(v)}</option>`).join('')}</select></label>
+      ${facing ? '' : `<p class="note">Aucune porte ne donne sur ce balcon.</p><button class="btn block" data-act="balcony-window">Ajouter une porte-fenêtre en face</button>`}
+      <p class="sub">Glissez le balcon pour le déplacer le long de sa façade.</p>
+      <section><button class="btn danger block" data-act="delete-selection">Supprimer <kbd>Suppr</kbd></button></section>`;
+    void g;
+  } else if (s.type === 'terrace') {
+    const t = L.terrace || { mode: 'terrace', railing: 'glass', railingHeight: 1 };
+    const lower = store.project.levels[editor.levelIndex - 1];
+    el.innerHTML = `
+      <h2>${t.mode === 'roof' ? 'Toiture-terrasse' : 'Terrasse'}</h2>
+      <p class="sub">${fmt(s.terrace.area, 1)} m² : dessus de ${esc(lower?.name || "l'étage inférieur")} non couvert par ${esc(L.name)}</p>
+      <label class="field"><span class="field-label">Usage</span>
+        <select data-prop="ter-mode">
+          <option value="terrace" ${t.mode !== 'roof' ? 'selected' : ''}>Terrasse accessible (garde-corps)</option>
+          <option value="roof" ${t.mode === 'roof' ? 'selected' : ''}>Toiture-terrasse (non accessible)</option>
+        </select></label>
+      ${t.mode !== 'roof' ? `
+      <label class="field"><span class="field-label">Garde-corps</span>
+        <select data-prop="ter-railing">${Object.entries(RAILING_TYPES).map(([k, v]) => `<option value="${k}" ${k === t.railing ? 'selected' : ''}>${esc(v)}</option>`).join('')}</select></label>
+      ${numField('Hauteur du garde-corps', 'ter-railingHeight', t.railingHeight || 1)}` : ''}
+      <p class="sub">La terrasse suit les murs : déplacez les façades de ${esc(L.name)} pour la modifier.</p>`;
   } else if (s.type === 'equipment') {
     const it = s.item;
     const cat = EQUIPMENT_TYPES[it.type] || { label: 'Équipement' };
@@ -709,7 +795,7 @@ function renderInspector() {
       <section><button class="btn danger block" data-act="delete-selection">Supprimer <kbd>Suppr</kbd></button></section>`;
   } else if (s.type === 'room') {
     el.innerHTML = `
-      <h2>Pièce</h2><p class="sub">${fmt(s.area, 1)} m² habitables (hors murs)</p>
+      <h2>Pièce</h2><p class="sub">${atticRoomLine(s)}</p>
       <label class="field"><span class="field-label">Nom</span><input type="text" value="${esc(s.room.name)}" data-prop="room-name" /></label>
       <div class="chips">${ROOM_NAMES.map((n) => `<button class="chip" data-room-name="${esc(n)}">${esc(n)}</button>`).join('')}</div>
       <label class="field"><span class="field-label">Corps de bâtiment</span>
@@ -724,7 +810,29 @@ function applyProp(prop, raw) {
   const value = parseNum(raw);
   const levelId = L.id;
   const lv = (pr) => pr.levels.find((l) => l.id === levelId);
-  const needNum = !['wall-type', 'room-name', 'room-body'].includes(prop);
+  const needNum = !['wall-type', 'room-name', 'room-body', 'bal-railing', 'ter-mode', 'ter-railing'].includes(prop);
+  if (prop.startsWith('bal-')) {
+    const key = prop.slice(4);
+    const text = ['railing'].includes(key);
+    if (!text && !(value > 0)) { toast('Valeur invalide.', 'warn'); renderInspector(); return; }
+    store.commit('Modifier un balcon', (pr) => {
+      const b = (pr.levels.find((l) => l.id === L.id).balconies || []).find((x) => x.id === s.id);
+      if (!b) return false;
+      b[key] = text ? raw : value;
+      return true;
+    });
+    return;
+  }
+  if (prop.startsWith('ter-')) {
+    const key = prop.slice(4);
+    const text = ['mode', 'railing'].includes(key);
+    if (!text && !(value > 0)) { toast('Valeur invalide.', 'warn'); renderInspector(); return; }
+    store.commit('Régler la terrasse', (pr) => {
+      const lv = pr.levels.find((l) => l.id === L.id);
+      lv.terrace = { ...(lv.terrace || {}), [key]: text ? raw : value };
+    });
+    return;
+  }
   if (prop.startsWith('eq-')) {
     const key = prop.slice(3);
     if (!Number.isFinite(value) || (['width', 'depth', 'height'].includes(key) && value < 0.05) || (key === 'zOffset' && value < 0)) {
@@ -1185,6 +1293,25 @@ document.addEventListener('click', (e) => {
     'tool-calage': () => setTool('calage'),
     'tool-align2': () => setTool('align2'),
     'tool-skylight': () => setTool('skylight'),
+    'tool-balcony': () => setTool('balcony'),
+    'balcony-window': () => {
+      const sel = findSelection();
+      if (!sel?.item) return;
+      const b = sel.item;
+      const wall = L.walls.find((w2) => w2.id === b.wallId) || L.walls
+        .map((w2) => ({ w2, d: G.projectOnSegment([b.x, b.y], L.nodes[w2.a], L.nodes[w2.b]).d }))
+        .sort((m, n) => m.d - n.d)[0]?.w2;
+      if (!wall) { toast('Aucune façade trouvée derrière ce balcon.', 'warn'); return; }
+      const a = L.nodes[wall.a], bb = L.nodes[wall.b];
+      const offset = G.projectOnSegment([b.x, b.y], a, bb).t * G.dist(a, bb);
+      const cat = OPENING_TYPES.frenchWindow;
+      store.commit('Porte-fenêtre sur le balcon', (pr) => {
+        const w2 = pr.levels.find((l) => l.id === L.id).walls.find((x) => x.id === wall.id);
+        w2.openings.push({ id: M.uid('o'), type: 'frenchWindow', kind: cat.kind, offset, width: cat.width, height: cat.height, sill: cat.sill, side: 1, hinge: 'start' });
+        M.clampOpenings(pr.levels.find((l) => l.id === L.id));
+      });
+      toast('Porte-fenêtre ajoutée face au balcon.');
+    },
     'align-auto': () => runAutoAlign(),
     'align-adjust': () => { ui.alignBanner = ui.alignBanner || { levelId: editor.levelId, confidence: 1, label: 'le plan' }; setTool('planAdjust'); renderAlignBanner(); },
     'align-ok': () => { ui.alignBanner = null; setTool('select'); renderAlignBanner(); toast('Plan en place. Vous pouvez tracer ou modifier les murs de cet étage.'); goStep('walls'); },
@@ -1308,6 +1435,21 @@ document.addEventListener('change', (e) => {
   const v = parseNum(t.value);
   const bad = () => { toast('Valeur invalide.', 'warn'); renderSteps(); };
   switch (field) {
+    case 'level-attic':
+      store.commit("Type d'étage", (pr) => {
+        const lv = pr.levels.find((l) => l.id === L.id);
+        lv.attic = { kneeWall: 0.9, ceilingHeight: 2.5, ...(lv.attic || {}), enabled: t.value === 'attic' };
+      });
+      if (t.value === 'attic') toast('Étage sous toiture : la toiture repose maintenant sur des jambettes de 0,90 m.');
+      break;
+    case 'attic-knee':
+      if (!(v >= 0 && v <= 2.5)) return bad();
+      store.commit('Hauteur des jambettes', (pr) => { pr.levels.find((l) => l.id === L.id).attic.kneeWall = v; });
+      break;
+    case 'attic-ceiling':
+      if (!(v >= 1.8 && v <= 6)) return bad();
+      store.commit('Hauteur du faux plafond', (pr) => { pr.levels.find((l) => l.id === L.id).attic.ceilingHeight = v; });
+      break;
     case 'level-height':
       if (!(v >= 1.8 && v <= 10)) return bad();
       store.commit("Hauteur d'étage", (pr) => { pr.levels.find((l) => l.id === L.id).height = v; });

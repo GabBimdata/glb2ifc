@@ -36,7 +36,13 @@ export function newProject(name = 'Nouveau projet') {
 }
 
 export function newLevel(name, height = DEFAULTS.levelHeight) {
-  return { id: uid('L'), name, height, nodes: {}, walls: [], rooms: [], equipment: [], plan: null };
+  return {
+    id: uid('L'), name, height, nodes: {}, walls: [], rooms: [], equipment: [], balconies: [], plan: null,
+    // zone de l'étage inférieur non couverte par celui-ci : terrasse accessible ou toiture-terrasse
+    terrace: { mode: 'terrace', railing: 'glass', railingHeight: 1.0 },
+    // étage sous toiture : jambettes et faux plafond
+    attic: { enabled: false, kneeWall: 0.9, ceilingHeight: 2.5 },
+  };
 }
 
 export function levelElevation(project, levelId) {
@@ -105,6 +111,16 @@ export function bodyOutlines(project, level, bodyId, sign = 1) {
   const sub = { nodes: level.nodes, walls: border, rooms: [] };
   const subFaces = G.detectFaces(sub);
   return subFaces.outers.map((f) => (sign > 0 ? G.outerGrossPolygon(f) : G.outerNetPolygon(f)));
+}
+
+// Étage sous toiture : la toiture repose sur les jambettes, murs de façade bas.
+export function isAttic(level) {
+  return !!level?.attic?.enabled;
+}
+
+// Hauteur, au-dessus du sol du corps, à laquelle repose sa toiture sur ce niveau
+export function roofBaseHeight(project, level, body) {
+  return isAttic(level) ? (level.attic.kneeWall ?? 0.9) : bodyHeight(project, level, body);
 }
 
 export function wallHeight(project, level, category = 'interior') {
@@ -208,13 +224,15 @@ export function recomputeAll(project) {
   const fallback = project.bodies?.[0]?.id || null;
   // drawBodyId : corps auquel rattacher les pièces nouvellement tracées (null = héritage du voisinage).
   const draw = project.bodies?.some((b) => b.id === project.drawBodyId) ? project.drawBodyId : fallback;
-  for (const level of project.levels) {
-    recomputeRooms(level, draw);
+  project.levels.forEach((level, i) => {
+    level.__drawBodyForced = !!project.drawBodyId;
+    recomputeRooms(level, draw, i > 0 ? project.levels[i - 1] : null);
+    delete level.__drawBodyForced;
     for (const r of level.rooms) if (!r.bodyId || !project.bodies?.some((b) => b.id === r.bodyId)) r.bodyId = fallback;
-  }
+  });
 }
 
-export function recomputeRooms(level, defaultBodyId = null) {
+export function recomputeRooms(level, defaultBodyId = null, below = null) {
   const { rooms } = G.detectFaces(level);
   const previous = level.rooms || [];
   const used = new Set();
@@ -229,6 +247,13 @@ export function recomputeRooms(level, defaultBodyId = null) {
   // Une pièce qui apparaît hérite du corps de ses voisines (une cloison posée dans le séjour
   // crée deux pièces du même corps), et seulement à défaut du corps choisi pour le tracé.
   const bodyOfFace = (face) => matched.get(face)?.bodyId || null;
+  // pièce de l'étage du dessous située sous un point : on empile les corps de bâtiment
+  const belowFaces = below ? G.detectFaces(below).rooms : [];
+  const bodyBelow = (p) => {
+    const f = belowFaces.find((g) => G.pointInPolygon(p, g.poly));
+    if (!f) return null;
+    return (below.rooms || []).find((r) => G.pointInPolygon([r.x, r.y], f.poly))?.bodyId || null;
+  };
   for (const face of fresh) {
     const votes = new Map();
     for (const h of face.halfEdges) {
@@ -236,10 +261,13 @@ export function recomputeRooms(level, defaultBodyId = null) {
       const id = neighbour ? bodyOfFace(neighbour) : null;
       if (id) votes.set(id, (votes.get(id) || 0) + 1);
     }
+    const p = G.interiorPoint(face.poly);
     let best = defaultBodyId;
     let bestCount = 0;
     for (const [id, n] of votes) if (n > bestCount) { best = id; bestCount = n; }
-    const p = G.interiorPoint(face.poly);
+    // priorité au corps de la pièce du dessous, sauf corps de tracé choisi explicitement
+    const vertical = bodyBelow(p);
+    if (vertical && !level.__drawBodyForced) best = vertical;
     counter += 1;
     matched.set(face, { id: uid('R'), name: `Pièce ${counter}`, x: p[0], y: p[1], bodyId: best });
   }
@@ -442,8 +470,13 @@ export function duplicateLevelData(source, what) {
       openings: what.openings ? (w.openings || []).map((o) => ({ ...o, id: uid('o') })) : [],
     });
   }
-  if (what.rooms) lvl.rooms = source.rooms.map((r) => ({ ...r, id: uid('R') }));
+  // Le corps de bâtiment d'une pièce suit toujours la copie (sinon l'étage entier retomberait
+  // dans le corps principal et sa toiture recouvrirait le garage) ; le nom seulement si demandé.
+  lvl.rooms = source.rooms.map((r, i) => ({ ...r, id: uid('R'), name: what.rooms ? r.name : `Pièce ${i + 1}` }));
   if (what.equipment) lvl.equipment = (source.equipment || []).map((it) => ({ ...it, id: uid('eq'), roomId: null }));
+  if (what.openings) lvl.balconies = (source.balconies || []).map((b) => ({ ...b, id: uid('bal') }));
+  lvl.terrace = { ...(source.terrace || lvl.terrace) };
+  lvl.attic = { ...(lvl.attic), enabled: false }; // une copie d'étage n'est pas d'office sous toiture
   // fusion des murs devenus alignés (si on n'a pas copié les cloisons)
   for (const id of Object.keys(lvl.nodes)) if (lvl.nodes[id]) mergeCollinearAt(lvl, id);
   return lvl;
@@ -517,6 +550,9 @@ export function validateProject(data) {
     l.rooms = l.rooms || [];
     for (const w of l.walls) w.openings = w.openings || [];
     l.equipment = Array.isArray(l.equipment) ? l.equipment : [];
+    l.balconies = Array.isArray(l.balconies) ? l.balconies : [];
+    l.terrace = { mode: 'terrace', railing: 'glass', railingHeight: 1.0, ...(l.terrace || {}) };
+    l.attic = { enabled: false, kneeWall: 0.9, ceilingHeight: 2.5, ...(l.attic || {}) };
     for (const it of l.equipment) {
       // dimensions héritées des anciens GLB (boîte englobante incluant le robinet, receveur seul…)
       if (it.type === 'sink' && Math.abs(it.height - 1.123) < 0.02) it.height = 0.90;

@@ -3,8 +3,8 @@ import * as G from './geometry.js';
 import * as M from './model.js';
 import { WALL_TYPES, OPENING_TYPES, DEFAULTS } from './catalog.js';
 import { loadImage } from './io.js';
-import { roofOpenings } from './build.js';
-import { SKYLIGHT, ROOF_OPENINGS } from './catalog.js';
+import { roofOpenings, levelTerraces, balconyGeometry, atticContext } from './build.js';
+import { SKYLIGHT, ROOF_OPENINGS, BALCONY } from './catalog.js';
 import { EQUIPMENT_TYPES } from './equipment-catalog.js';
 import { drawEquipmentSymbol } from './equipment-plan.js';
 
@@ -326,6 +326,7 @@ export class Editor2D {
       align2: () => this.align2Click(w),
       skylight: () => this.skylightClick(w),
       equipment: () => this.equipmentClick(w),
+      balcony: () => this.balconyClick(w),
       movePlan: () => { if (this.level.plan) { this.store.beginGesture('Déplacer le plan'); this.drag = { kind: 'plan', start: w, x: this.level.plan.x, y: this.level.plan.y }; } },
       planAdjust: () => this.planAdjustDown(w, s),
     }[this.tool];
@@ -352,6 +353,7 @@ export class Editor2D {
     else if (this.tool === 'select') this.hover = this.hitTest(w);
     else if (this.tool === 'opening') this.hover = this.openingPreview(w);
     else if (this.tool === 'skylight') this.hover = this.skylightPreview(w);
+    else if (this.tool === 'balcony') this.hover = this.balconyPreview(w);
     this.updateStatus();
     this.invalidate();
   }
@@ -463,6 +465,12 @@ export class Editor2D {
     }
     const eq = this.equipmentAt(w);
     if (eq) return eq;
+    for (const b of L.balconies || []) {
+      if (G.pointInPolygon(w, balconyGeometry(b).poly)) return { type: 'balcony', id: b.id };
+    }
+    for (const tr of this.terraces()) {
+      if (tr.gross.some((pc) => G.pointInPolygon(w, pc.outer) && !pc.holes.some((h) => G.pointInPolygon(w, h)))) return { type: 'terrace', id: tr.key };
+    }
     const { rooms } = M.levelFaces(L);
     for (const r of rooms) {
       if (r.room && G.pointInPolygon(w, r.face.poly)) return { type: 'room', id: r.room.id };
@@ -543,6 +551,121 @@ export class Editor2D {
     ctx.restore();
   }
 
+  // ─── Terrasses et balcons ──────────────────────────────────────────────────
+  terraces() {
+    return levelTerraces(this.project, this.levelIndex);
+  }
+
+  // Façade la plus proche : point sur le nu extérieur et normale vers l'extérieur
+  balconyPreview(w) {
+    const L = this.level;
+    const { rooms } = M.levelFaces(L);
+    const inside = (p) => rooms.some((r) => r.room && G.pointInPolygon(p, r.face.poly));
+    let best = null;
+    for (const wall of L.walls) {
+      const a = L.nodes[wall.a], b = L.nodes[wall.b];
+      const pr = G.projectOnSegment(w, a, b);
+      if (pr.d > wall.thickness / 2 + this.px(40)) continue;
+      if (!best || pr.d < best.pr.d) best = { wall, pr, a, b };
+    }
+    if (!best) return { type: 'balconyPreview', ok: false };
+    const { wall, a, b } = best;
+    const u = G.norm(G.sub(b, a));
+    let n = G.perp(u);
+    const Lw = G.dist(a, b);
+    const probe = (dir) => G.add(G.add(a, G.mul(u, Lw / 2)), G.mul(dir, wall.thickness / 2 + 0.2));
+    const outA = !inside(probe(n)), outB = !inside(probe(G.mul(n, -1)));
+    if (outA === outB) {
+      // mur libre ou intérieur : on suit le côté de la souris
+      if (G.dot(G.sub(w, a), n) < 0) n = G.mul(n, -1);
+      if (!outA) return { type: 'balconyPreview', ok: false, reason: 'Un balcon se pose sur une façade.' };
+    } else if (!outA) n = G.mul(n, -1);
+    const grid = DEFAULTS.gridStep;
+    const along = Math.round((best.pr.t * Lw) / grid) * grid;
+    const base = G.add(G.add(a, G.mul(u, along)), G.mul(n, wall.thickness / 2));
+    return { type: 'balconyPreview', ok: true, wallId: wall.id, x: base[0], y: base[1], dir: n };
+  }
+
+  balconyClick(w) {
+    const pv = this.balconyPreview(w);
+    if (!pv.ok) { this.hooks.onToast(pv.reason || 'Survolez une façade pour poser le balcon.', 'warn'); return; }
+    const id = M.uid('bal');
+    const levelId = this.levelId;
+    this.store.commit('Poser un balcon', (pr) => {
+      const L = pr.levels.find((l) => l.id === levelId);
+      L.balconies = L.balconies || [];
+      L.balconies.push({ id, x: pv.x, y: pv.y, dir: pv.dir, width: BALCONY.width, depth: BALCONY.depth, thickness: BALCONY.thickness, railing: BALCONY.railing, railingHeight: BALCONY.railingHeight, wallId: pv.wallId });
+    });
+    this.select({ type: 'balcony', id });
+    if (this.levelIndex === 0) this.hooks.onToast('Balcon posé au rez-de-chaussée : sa dalle est au niveau du plancher.');
+  }
+
+  drawTerraces() {
+    const ctx = this.ctx;
+    for (const tr of this.terraces()) {
+      const roof = (this.level.terrace?.mode || 'terrace') === 'roof';
+      const sel = this.selection?.type === 'terrace' && this.selection.id === tr.key;
+      ctx.save();
+      ctx.beginPath();
+      for (const pc of tr.gross) {
+        for (const loop of [pc.outer, ...pc.holes]) {
+          loop.forEach((p, i) => { const q = this.toScreen(p); if (i === 0) ctx.moveTo(q[0], q[1]); else ctx.lineTo(q[0], q[1]); });
+          ctx.closePath();
+        }
+      }
+      ctx.fillStyle = sel ? 'rgba(232,103,42,0.14)' : roof ? 'rgba(120,128,134,0.10)' : 'rgba(176,138,98,0.13)';
+      ctx.fill('evenodd');
+      ctx.clip('evenodd');
+      // hachures : repère visuel d'une surface extérieure
+      ctx.strokeStyle = roof ? 'rgba(90,98,104,0.25)' : 'rgba(150,110,70,0.3)';
+      ctx.lineWidth = 1;
+      const step = Math.max(8, 0.5 * this.view.zoom);
+      ctx.beginPath();
+      for (let x = -this.h; x < this.w + this.h; x += step) { ctx.moveTo(x, 0); ctx.lineTo(x + this.h, this.h); }
+      ctx.stroke();
+      ctx.restore();
+      if (!roof) {
+        ctx.strokeStyle = INK;
+        ctx.lineWidth = 2.2;
+        ctx.beginPath();
+        for (const [p, q] of tr.free) { const a = this.toScreen(p), b = this.toScreen(q); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); }
+        ctx.stroke();
+      }
+      const big = tr.gross.slice().sort((m, n) => Math.abs(G.polygonArea(n.outer)) - Math.abs(G.polygonArea(m.outer)))[0];
+      if (big && this.view.zoom > 12) {
+        const c = this.toScreen(G.interiorPoint(big.outer));
+        ctx.font = '500 12px "Instrument Sans", system-ui, sans-serif';
+        ctx.fillStyle = roof ? '#4a5358' : '#7a5530';
+        ctx.textAlign = 'center';
+        ctx.fillText(`${roof ? 'Toiture-terrasse' : 'Terrasse'} ${tr.area.toFixed(1).replace('.', ',')} m²`, c[0], c[1]);
+      }
+    }
+  }
+
+  drawBalconies() {
+    const ctx = this.ctx;
+    const draw = (b, style) => {
+      const g = balconyGeometry(b);
+      this.pathPoly(g.poly);
+      ctx.fillStyle = style.fill;
+      ctx.fill();
+      ctx.strokeStyle = style.stroke;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.lineWidth = style.rail;
+      ctx.beginPath();
+      [g.poly[1], g.poly[2], g.poly[3], g.poly[0]].forEach((p, i) => { const q = this.toScreen(p); if (i === 0) ctx.moveTo(q[0], q[1]); else ctx.lineTo(q[0], q[1]); });
+      ctx.stroke();
+    };
+    for (const b of this.level.balconies || []) {
+      const sel = this.selection?.type === 'balcony' && this.selection.id === b.id;
+      draw(b, { fill: sel ? 'rgba(232,103,42,0.16)' : 'rgba(176,138,98,0.16)', stroke: sel ? ACCENT : INK, rail: sel ? 2.6 : 2.2 });
+    }
+    if (this.tool === 'balcony' && this.hover?.type === 'balconyPreview' && this.hover.ok) {
+      draw({ ...this.hover, width: BALCONY.width, depth: BALCONY.depth }, { fill: 'rgba(232,103,42,0.25)', stroke: ACCENT, rail: 2 });
+    }
+  }
+
   // ─── Équipements ───────────────────────────────────────────────────────────
   equipmentAt(w) {
     const items = this.level.equipment || [];
@@ -606,6 +729,10 @@ export class Editor2D {
       const wall = L.walls.find((x) => x.id === hit.id);
       this.store.beginGesture('Déplacer un mur');
       this.drag = { kind: 'wall', id: hit.id, start: w, a: L.nodes[wall.a].slice(), b: L.nodes[wall.b].slice(), wa: wall.a, wb: wall.b };
+    } else if (hit.type === 'balcony') {
+      const b = (L.balconies || []).find((x) => x.id === hit.id);
+      this.store.beginGesture('Déplacer un balcon');
+      this.drag = { kind: 'balcony', id: hit.id, start: w, x: b.x, y: b.y, t: G.perp(G.norm(b.dir)) };
     } else if (hit.type === 'equipment') {
       const it = (L.equipment || []).find((x) => x.id === hit.id);
       this.store.beginGesture('Déplacer un équipement');
@@ -657,6 +784,13 @@ export class Editor2D {
         lv.nodes[d.wb] = G.add(d.b, G.mul(n, off));
         M.clampOpenings(lv);
       });
+    } else if (d.kind === 'balcony') {
+      const grid = DEFAULTS.gridStep;
+      const along = Math.round(G.dot(G.sub(w, d.start), d.t) / grid) * grid; // reste sur sa façade
+      this.store.live(() => {
+        const b = (this.level.balconies || []).find((x) => x.id === d.id);
+        if (b) { b.x = d.x + d.t[0] * along; b.y = d.y + d.t[1] * along; }
+      });
     } else if (d.kind === 'planRotate') {
       d.moved = true;
       const a1 = Math.atan2(w[1] - d.center[1], w[0] - d.center[0]);
@@ -706,8 +840,9 @@ export class Editor2D {
   deleteSelection() {
     const sel = this.selection;
     if (!sel) return;
-    const labels = { wall: 'Mur supprimé', node: 'Angle supprimé', opening: 'Ouverture supprimée', roofitem: 'Ouverture de toiture supprimée', equipment: 'Équipement supprimé', room: '' };
+    const labels = { wall: 'Mur supprimé', node: 'Angle supprimé', opening: 'Ouverture supprimée', roofitem: 'Ouverture de toiture supprimée', equipment: 'Équipement supprimé', balcony: 'Balcon supprimé', terrace: '', room: '' };
     if (sel.type === 'room') { this.hooks.onToast('Une pièce disparaît quand on supprime un de ses murs.'); return; }
+    if (sel.type === 'terrace') { this.hooks.onToast('La terrasse suit les murs : elle disparaît si l’étage recouvre toute la surface du dessous.'); return; }
     this.store.commit(labels[sel.type], () => {
       const L = this.level;
       if (sel.type === 'wall') M.deleteWall(L, sel.id);
@@ -717,6 +852,7 @@ export class Editor2D {
         if (wall) wall.openings = wall.openings.filter((o) => o.id !== sel.id);
       }
       if (sel.type === 'equipment') L.equipment = (L.equipment || []).filter((x) => x.id !== sel.id);
+      if (sel.type === 'balcony') L.balconies = (L.balconies || []).filter((x) => x.id !== sel.id);
       if (sel.type === 'roofitem') {
         const body = this.project.bodies.find((b) => b.id === sel.bodyId);
         if (body) body.roofItems = body.roofItems.filter((it) => it.id !== sel.id);
@@ -978,7 +1114,7 @@ export class Editor2D {
       if (idx < 0) continue;
       const level = this.project.levels[idx];
       for (const outline of M.bodyOutlines(this.project, level, body.id, 1)) {
-        const baseZ = M.levelElevation(this.project, level.id) + (body.elevation || 0) + M.bodyHeight(this.project, level, body);
+        const baseZ = M.levelElevation(this.project, level.id) + (body.elevation || 0) + M.roofBaseHeight(this.project, level, body);
         const roof = G.buildRoof(outline, { ...body.roof, enabled: true, baseZ });
         if (!roof.faces.some((f) => G.pointInPolygon(p, f.poly.map((q) => [q[0], q[1]])))) continue;
         const face = roof.faces.find((f) => G.pointInPolygon(p, f.poly.map((q) => [q[0], q[1]])));
@@ -1052,6 +1188,7 @@ export class Editor2D {
       calage: this.state.points?.length ? 'Cliquez maintenant le même point sur l’étage inférieur (en gris).' : 'Cliquez un repère sur le plan (un angle de façade par exemple).',
       align2: ['Repère 1 : cliquez un angle sur le plan.', 'Cliquez le même angle sur l’étage inférieur (en gris).', 'Repère 2 : cliquez un second angle sur le plan, éloigné du premier.', 'Cliquez ce second angle sur l’étage inférieur.'][(this.state.points?.length || 0) % 4],
       movePlan: 'Glissez le plan pour le positionner.',
+      balcony: 'Survolez une façade puis cliquez : le balcon se pose côté extérieur.',
       planAdjust: "Glissez l'image pour la déplacer, la poignée ronde pour la tourner. Flèches : 1 cm, Maj + flèches : 10 cm.",
       equipment: `Cliquez dans une pièce pour poser : ${EQUIPMENT_TYPES[this.equipmentType]?.label || 'équipement'}. R : pivoter.`,
       skylight: this.hover?.type === 'skylightPreview' && this.hover.ok
@@ -1082,7 +1219,11 @@ export class Editor2D {
 
     const { rooms } = M.levelFaces(L);
     const polys = G.computeWallPolygons(L);
+    this.drawTerraces();
     for (const r of rooms) this.drawRoomFill(r);
+    this.atticInfo = M.isAttic(L) ? atticContext(this.project, this.levelIndex) : null;
+    if (this.atticInfo?.size) this.drawLowZones(rooms);
+    this.drawBalconies();
     for (const it of L.equipment || []) {
       const selected = this.selection?.type === 'equipment' && this.selection.id === it.id;
       drawEquipmentSymbol(this, it, { selected });
@@ -1205,6 +1346,36 @@ export class Editor2D {
     this.ctx.fill();
   }
 
+  // Étage sous toiture : zones de moins de 1,80 m, qui ne comptent pas en surface habitable
+  drawLowZones(rooms) {
+    const ctx = this.ctx;
+    for (const r of rooms) {
+      if (!r.room) continue;
+      const info = this.atticInfo.get(r.room.bodyId || this.project.bodies[0].id);
+      if (!info) continue;
+      for (const zone of G.zonesBelow(r.net, info.faces, info.floorZ + 1.8)) {
+        ctx.save();
+        this.pathPoly(zone);
+        ctx.fillStyle = 'rgba(90,98,104,0.10)';
+        ctx.fill();
+        ctx.clip();
+        ctx.strokeStyle = 'rgba(90,98,104,0.28)';
+        ctx.lineWidth = 1;
+        const step = Math.max(6, 0.25 * this.view.zoom);
+        ctx.beginPath();
+        for (let x = -this.h; x < this.w + this.h; x += step) { ctx.moveTo(x, this.h); ctx.lineTo(x + this.h, 0); }
+        ctx.stroke();
+        ctx.restore();
+        ctx.save();
+        ctx.setLineDash([6, 4]);
+        ctx.strokeStyle = 'rgba(60,68,74,0.7)';
+        this.pathPoly(zone);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+  }
+
   drawRoomLabel(r) {
     if (!r.room || r.area < 0.5) return;
     const ctx = this.ctx;
@@ -1224,7 +1395,11 @@ export class Editor2D {
     ctx.fillText(r.room.name, p[0], p[1] - dy);
     ctx.font = `400 ${size * 0.9}px "Instrument Sans", system-ui, sans-serif`;
     ctx.fillStyle = tint.ink + 'cc';
-    ctx.fillText(fmtArea(r.area), p[0], p[1] + (showBody ? 0 : size * 0.65));
+    const info = this.atticInfo?.get?.(r.room.bodyId || this.project.bodies[0].id);
+    const areaText = info
+      ? `${fmtArea(r.area)} · ${fmtArea(G.areaAtLeast(r.net, info.faces, info.floorZ + 1.8))} ≥ 1,80 m`
+      : fmtArea(r.area);
+    ctx.fillText(areaText, p[0], p[1] + (showBody ? 0 : size * 0.65));
     if (showBody) {
       ctx.font = `500 ${size * 0.75}px "Instrument Sans", system-ui, sans-serif`;
       ctx.fillStyle = tint.ink + '99';
