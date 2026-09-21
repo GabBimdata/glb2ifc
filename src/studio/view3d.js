@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { buildElements } from './build.js';
-import { colorsOf } from './catalog.js';
+import { colorsOf, GLASS_OPACITY } from './catalog.js';
 
 const IFC_HINT = { wall: 'IfcWall', slab: 'IfcSlab', roof: 'IfcRoof', gable: 'IfcWall', door: 'IfcDoor', window: 'IfcWindow', skylight: 'IfcWindow', dormer: 'IfcRoof', ceiling: 'IfcCovering' };
 
@@ -12,12 +12,17 @@ function material(key, opts = {}) {
   const color = opts.highlight ? '#f08a4b' : (opts.color || '#cccccc');
   const id = `${key}-${color}-${opts.opacity ?? 1}`;
   if (materialCache.has(id)) return materialCache.get(id);
+  const opacity = opts.opacity ?? 1;
+  const transparent = opacity < 1;
   const m = new THREE.MeshStandardMaterial({
     color,
     roughness: key === 'window' ? 0.1 : 0.85,
     metalness: 0,
-    transparent: (opts.opacity ?? 1) < 1,
-    opacity: opts.opacity ?? 1,
+    transparent,
+    opacity,
+    // Le vitrage ne doit pas écrire dans le depth buffer, sinon des faces transparentes
+    // peuvent masquer les objets situés derrière selon l'angle de vue.
+    depthWrite: key === 'window' ? false : true,
     side: THREE.DoubleSide,
     polygonOffset: true,
     polygonOffsetFactor: 1,
@@ -66,7 +71,7 @@ export function buildObject3D(project, options = {}) {
     if (el.roofMesh) parts.push({ mesh: el.roofMesh, key: 'roof' });
     if (el.frame) parts.push({ mesh: el.frame, key: 'frame' });
     const panelKey = el.kind === 'skylight' ? 'window' : el.kind;
-    if (el.panel) parts.push({ mesh: el.panel, key: panelKey, opacity: panelKey === 'window' ? 0.45 : 1 });
+    if (el.panel) parts.push({ mesh: el.panel, key: panelKey, opacity: panelKey === 'window' ? GLASS_OPACITY : 1 });
     const group = new THREE.Group();
     group.name = el.name;
     group.userData = { ifcType: IFC_HINT[el.kind] || 'IfcBuildingElementProxy', smeltKey: el.key, level: el.level?.name };
