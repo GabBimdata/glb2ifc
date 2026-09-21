@@ -6,6 +6,12 @@ export const DEFAULTS = {
   gridStep: 0.05,       // pas d'aimantation (m)
 };
 
+// Réglage unique du vitrage.
+// Three.js / GLB utilisent une opacité (0 = invisible, 1 = opaque).
+// IFC utilise une transparence (0 = opaque, 1 = totalement transparent).
+export const GLASS_OPACITY = 0.45;
+export const IFC_GLASS_TRANSPARENCY = 1 - GLASS_OPACITY;
+
 export const WALL_TYPES = {
   ext30: { label: 'Mur extérieur 30 cm', thickness: 0.30, category: 'exterior', ifc: 'IfcWall', material: 'Maçonnerie' },
   ext20: { label: 'Mur extérieur 20 cm', thickness: 0.20, category: 'exterior', ifc: 'IfcWall', material: 'Maçonnerie' },

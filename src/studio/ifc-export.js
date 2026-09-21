@@ -2,7 +2,8 @@
 // Murs, planchers, espaces : solides extrudés. Portes et fenêtres : IfcOpeningElement + remplissage.
 import { buildElements } from './build.js';
 import { levelElevation, wallHeight } from './model.js';
-import { colorsOf } from './catalog.js';
+import { colorsOf, IFC_GLASS_TRANSPARENCY } from './catalog.js';
+import { equipmentIfcSpec } from './equipment-catalog.js';
 
 const B64 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_$';
 
@@ -59,6 +60,11 @@ class StepWriter {
 function hexToRgb(hex) {
   const v = parseInt(hex.slice(1), 16);
   return [((v >> 16) & 255) / 255, ((v >> 8) & 255) / 255, (v & 255) / 255];
+}
+
+function positiveDimension(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
 export function exportIfc(project) {
@@ -155,6 +161,83 @@ export function exportIfc(project) {
     return w.add(`IFCTRIANGULATEDFACESET(${list},$,.T.,(${idx}),$)`);
   };
 
+  // Géométrie exacte d'un équipement GLB déjà chargé par equipment-plugin.js.
+  // Le GLB est en repère Three.js : X largeur, Y hauteur, Z profondeur.
+  // L'IFC local reçoit : X, -Z, Y.
+  const equipmentAssetFaceSets = (asset, item) => {
+    if (!asset?.scene || !asset?.box || !asset?.size || !asset?.center) return [];
+
+    asset.scene.updateMatrixWorld(true);
+
+    const width = positiveDimension(item.width, asset.size.x);
+    const depth = positiveDimension(item.depth, asset.size.z);
+    const height = positiveDimension(item.height, asset.size.y);
+
+    const sx = width / asset.size.x;
+    const sy = height / asset.size.y;
+    const sz = depth / asset.size.z;
+
+    const items = [];
+
+    asset.scene.traverse((obj) => {
+      if (!obj?.isMesh || !obj.geometry?.attributes?.position) return;
+
+      const geometry = obj.geometry;
+      const position = geometry.getAttribute('position');
+      const index = geometry.index;
+      const e = obj.matrixWorld.elements;
+
+      const coords = [];
+      for (let i = 0; i < position.count; i++) {
+        const x = position.getX(i);
+        const y = position.getY(i);
+        const z = position.getZ(i);
+
+        // Object local -> GLB scene coordinates.
+        const wx = e[0] * x + e[4] * y + e[8] * z + e[12];
+        const wy = e[1] * x + e[5] * y + e[9] * z + e[13];
+        const wz = e[2] * x + e[6] * y + e[10] * z + e[14];
+
+        // Same normalization as the 3D plugin:
+        // centered footprint and lowest point on Z=0.
+        const lx = (wx - asset.center.x) * sx;
+        const ly = (wy - asset.box.min.y) * sy;
+        const lz = (wz - asset.center.z) * sz;
+
+        coords.push(`(${num(lx)},${num(-lz)},${num(ly)})`);
+      }
+
+      if (!coords.length) return;
+
+      const list = w.add(`IFCCARTESIANPOINTLIST3D((${coords.join(',')}),$)`);
+
+      // Detect mirrored object transforms so triangle winding stays coherent.
+      const det =
+        e[0] * (e[5] * e[10] - e[6] * e[9]) -
+        e[4] * (e[1] * e[10] - e[2] * e[9]) +
+        e[8] * (e[1] * e[6] - e[2] * e[5]);
+      const mirrored = det < 0;
+
+      const triangles = [];
+      const count = index ? index.count : position.count;
+
+      for (let i = 0; i + 2 < count; i += 3) {
+        const a = (index ? index.getX(i) : i) + 1;
+        const b = (index ? index.getX(i + 1) : i + 1) + 1;
+        const c = (index ? index.getX(i + 2) : i + 2) + 1;
+        triangles.push(mirrored ? `(${a},${c},${b})` : `(${a},${b},${c})`);
+      }
+
+      if (!triangles.length) return;
+
+      // Closed is left unset: it is safer for arbitrary user GLBs, which may contain
+      // open surfaces even when the visual object appears closed.
+      items.push(w.add(`IFCTRIANGULATEDFACESET(${list},$,$,(${triangles.join(',')}),$)`));
+    });
+
+    return items;
+  };
+
   // Propriétés
   const props = (key, target, psetName, values) => {
     const items = values.map(([name, type, value]) => {
@@ -192,6 +275,8 @@ export function exportIfc(project) {
   const storeys = {};
   const contained = {};
   const spacesByStorey = {};
+  const spaceByRoom = {};
+  const equipmentByRoom = {};
 
   project.levels.forEach((level, i) => {
     const z = levelElevation(project, level.id);
@@ -200,6 +285,8 @@ export function exportIfc(project) {
     storeys[level.id] = { entity: st, placement: pl, z };
     contained[level.id] = [];
     spacesByStorey[level.id] = [];
+    spaceByRoom[level.id] = {};
+    equipmentByRoom[level.id] = {};
     props(`storey-${level.id}`, st, 'Pset_BuildingStoreyCommon', [['EntranceLevel', 'bool', i === 0], ['AboveGround', 'bool', true]]);
   });
 
@@ -252,6 +339,7 @@ export function exportIfc(project) {
       const solid = extrusion(profilePolyline(el.profile), el.depth);
       const ent = w.add(`IFCSPACE(${guid(key)},${oh},${stepString(String(spacesByStorey[el.level.id].length + 1))},$,$,${pl},${shape([solid])},${stepString(el.name)},.ELEMENT.,.INTERNAL.,$)`);
       spacesByStorey[el.level.id].push(ent);
+      if (el.room?.id) spaceByRoom[el.level.id][el.room.id] = ent;
       if (multiBody && el.body) (zoneSpaces[el.body.id] ||= { body: el.body, items: [] }).items.push(ent);
       quantities(key, ent, 'Qto_SpaceBaseQuantities', [
         ['NetFloorArea', 'area', el.area], ['Height', 'length', el.depth], ['NetVolume', 'volume', el.area * el.depth],
@@ -271,7 +359,7 @@ export function exportIfc(project) {
       // Menuiserie
       const pl = placement(st.placement);
       const frame = styled(faceSet(el.frame, st.z), 'frame', el.body);
-      const panel = styled(faceSet(el.panel, st.z), el.kind, el.body, el.kind === 'window' ? 0.55 : 0);
+      const panel = styled(faceSet(el.panel, st.z), el.kind, el.body, el.kind === 'window' ? IFC_GLASS_TRANSPARENCY : 0);
       const rep = shape([frame, panel], 'Tessellation');
       const o = el.opening;
       const ent = el.kind === 'door'
@@ -298,7 +386,7 @@ export function exportIfc(project) {
       const opening = w.add(`IFCOPENINGELEMENT(${guid(`void-${key}`)},${oh},'Ouverture de toiture',$,$,${pl},${shape([voidSolid])},$,.OPENING.)`);
       if (host) w.add(`IFCRELVOIDSELEMENT(${guid(`relvoid-${key}`)},${oh},$,$,${host},${opening})`);
       const frame = styled(faceSet(el.frame, st.z), 'frame', el.body);
-      const panel = styled(faceSet(el.panel, st.z), 'window', el.body, 0.55);
+      const panel = styled(faceSet(el.panel, st.z), 'window', el.body, IFC_GLASS_TRANSPARENCY);
       const it = el.roofOpening.item;
       const ent = w.add(`IFCWINDOW(${guid(key)},${oh},${stepString(el.name)},$,$,${pl},${shape([frame, panel], 'Tessellation')},$,${num(it.height)},${num(it.width)},.SKYLIGHT.,.SINGLE_PANEL.,$)`);
       w.add(`IFCRELFILLSELEMENT(${guid(`relfill-${key}`)},${oh},$,$,${opening},${ent})`);
@@ -314,7 +402,7 @@ export function exportIfc(project) {
       const walls = w.add(`IFCWALL(${guid(`walls-${key}`)},${oh},${stepString(`${el.name} — joues et façade`)},$,$,${pl},${shape([styled(faceSet(el.walls, st.z), 'exterior', el.body)], 'Tessellation')},$,.STANDARD.)`);
       const cover = w.add(`IFCSLAB(${guid(`roof-${key}`)},${oh},${stepString(`${el.name} — couverture`)},$,$,${pl},${shape([styled(faceSet(el.roofMesh, st.z), 'roof', el.body)], 'Tessellation')},$,.ROOF.)`);
       const frame = styled(faceSet(el.frame, st.z), 'frame', el.body);
-      const panel = styled(faceSet(el.panel, st.z), 'window', el.body, 0.55);
+      const panel = styled(faceSet(el.panel, st.z), 'window', el.body, IFC_GLASS_TRANSPARENCY);
       const win = w.add(`IFCWINDOW(${guid(key)},${oh},${stepString(`${el.name} — baie`)},$,$,${pl},${shape([frame, panel], 'Tessellation')},$,${num(el.window.height)},${num(el.window.width)},.WINDOW.,.SINGLE_PANEL.,$)`);
       for (const ent of [walls, cover, win]) contained[el.level.id].push(noteBody(el, ent));
       linkMaterial('Maçonnerie', walls);
@@ -328,6 +416,87 @@ export function exportIfc(project) {
       contained[el.level.id].push(noteBody(el, ent));
       props(key, ent, 'Pset_WallCommon', [['IsExternal', 'bool', true], ['LoadBearing', 'bool', true]]);
       linkMaterial('Maçonnerie', ent);
+    }
+  }
+
+
+  // Équipements de pièces.
+  // L'IFC utilise une enveloppe simple aux dimensions Smelt.
+  // Le GLB conserve la géométrie détaillée des assets.
+  for (const level of project.levels) {
+    const st = storeys[level.id];
+
+    for (const item of level.equipment || []) {
+      const spec = equipmentIfcSpec(item);
+      const width = positiveDimension(item.width, spec.width);
+      const depth = positiveDimension(item.depth, spec.depth);
+      const height = positiveDimension(item.height, spec.height);
+      const zOffset = Number.isFinite(Number(item.zOffset)) ? Number(item.zOffset) : 0;
+      const rotation = Number.isFinite(Number(item.rotation)) ? Number(item.rotation) : 0;
+      const x = Number.isFinite(Number(item.x)) ? Number(item.x) : 0;
+      const y = Number.isFinite(Number(item.y)) ? Number(item.y) : 0;
+
+      const angle = rotation * Math.PI / 180;
+      const dir = [Math.cos(angle), Math.sin(angle)];
+
+      const room = (level.rooms || []).find((r) => r.id === item.roomId) || null;
+      const equipBody = room?.bodyId ? project.bodies.find((b) => b.id === room.bodyId) : null;
+      const key = `equipment-${item.id}`;
+
+      const pl = placement(st.placement, x, y, zOffset, dir);
+
+      const assetMap = globalThis?.smelt?.equipment?.assets;
+      const asset = assetMap?.get?.(item.type) || null;
+
+      let geometryItems = [];
+
+      if (asset) {
+        geometryItems = equipmentAssetFaceSets(asset, item)
+          .map((face) => styled(face, 'frame', equipBody));
+      } else if (spec.exactAsset) {
+        throw new Error(`Le GLB de l'équipement « ${spec.label} » n'est pas chargé. Réessayez l'export dans un instant.`);
+      } else {
+        // Compatibilité temporaire pour les équipements du catalogue qui n'ont
+        // pas encore de GLB fourni. Les types dotés d'un GLB ne passent JAMAIS ici.
+        const c2 = w.add(`IFCCARTESIANPOINT((0.,0.))`);
+        const ax2 = w.add(`IFCAXIS2PLACEMENT2D(${c2},$)`);
+        const rect = w.add(`IFCRECTANGLEPROFILEDEF(.AREA.,$,${ax2},${num(width)},${num(depth)})`);
+        geometryItems = [styled(extrusion(rect, height), 'frame', equipBody)];
+      }
+
+      if (!geometryItems.length) {
+        throw new Error(`Le GLB de l'équipement « ${spec.label} » ne contient aucune géométrie triangulée exportable.`);
+      }
+
+      const rep = shape(geometryItems, asset ? 'Tessellation' : 'SweptSolid');
+
+      const name = stepString(spec.label);
+      const tag = stepString(item.id);
+      const predefined = `.${spec.predefined}.`;
+      const ent = spec.entity === 'IFCSANITARYTERMINAL'
+        ? w.add(`IFCSANITARYTERMINAL(${guid(key)},${oh},${name},$,$,${pl},${rep},${tag},${predefined})`)
+        : w.add(`IFCFURNITURE(${guid(key)},${oh},${name},$,$,${pl},${rep},${tag},${predefined})`);
+
+      noteBody({ body: equipBody }, ent);
+
+      props(key, ent, 'Smelt_Equipment', [
+        ['SmeltType', 'label', item.type || 'unknown'],
+        ['SmeltId', 'label', item.id || ''],
+        ['RoomId', 'label', item.roomId || ''],
+        ['Room', 'label', room?.name || ''],
+        ['Width', 'length', width],
+        ['Depth', 'length', depth],
+        ['Height', 'length', height],
+        ['Elevation', 'length', zOffset],
+        ['Rotation', 'label', `${rotation} deg`],
+      ]);
+
+      const roomSpace = item.roomId ? spaceByRoom[level.id][item.roomId] : null;
+      if (roomSpace) {
+        (equipmentByRoom[level.id][item.roomId] ||= []).push(ent);
+      } else {
+        contained[level.id].push(ent);
+      }
     }
   }
 
@@ -359,6 +528,15 @@ export function exportIfc(project) {
       const prop = w.add(`IFCPROPERTYSINGLEVALUE('Corps',$,IFCLABEL(${stepString(g.body.name)}),$)`);
       const pset = w.add(`IFCPROPERTYSET(${guid(`pset-body-${id}`)},${oh},'Smelt_Corps',$,(${prop}))`);
       w.add(`IFCRELDEFINESBYPROPERTIES(${guid(`relbody-${id}`)},${oh},$,$,(${g.items.join(',')}),${pset})`);
+    }
+  }
+
+  for (const level of project.levels) {
+    for (const [roomId, items] of Object.entries(equipmentByRoom[level.id] || {})) {
+      const space = spaceByRoom[level.id]?.[roomId];
+      if (space && items.length) {
+        w.add(`IFCRELCONTAINEDINSPATIALSTRUCTURE(${guid(`contain-equipment-${level.id}-${roomId}`)},${oh},$,$,(${items.join(',')}),${space})`);
+      }
     }
   }
 

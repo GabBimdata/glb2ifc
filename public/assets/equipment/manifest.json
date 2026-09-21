@@ -1,0 +1,61 @@
+{
+  "convention": {
+    "x": "width",
+    "y": "height",
+    "z": "depth",
+    "front": "-Z in GLB/Three.js after Blender glTF conversion as used by Smelt placement",
+    "origin_handling": "Smelt recenters X/Z and puts the lowest Y point on the floor automatically"
+  },
+  "assets": [
+    {
+      "type": "wc",
+      "file": "wc.glb",
+      "status": "real"
+    },
+    {
+      "type": "basin",
+      "file": "lavabo.glb",
+      "status": "real"
+    },
+    {
+      "type": "shower",
+      "file": "douche.glb",
+      "status": "real"
+    },
+    {
+      "type": "sink",
+      "file": "evier.glb",
+      "status": "real"
+    },
+    {
+      "type": "bath",
+      "file": "baignoire.glb",
+      "status": "placeholder"
+    },
+    {
+      "type": "baseCabinet",
+      "file": "meuble_bas_60.glb",
+      "status": "placeholder"
+    },
+    {
+      "type": "wallCabinet",
+      "file": "meuble_haut_60.glb",
+      "status": "placeholder"
+    },
+    {
+      "type": "fridge",
+      "file": "frigo_60.glb",
+      "status": "placeholder"
+    },
+    {
+      "type": "cooktop",
+      "file": "plaque_60.glb",
+      "status": "placeholder"
+    },
+    {
+      "type": "worktop",
+      "file": "plan_travail_120.glb",
+      "status": "placeholder"
+    }
+  ]
+}

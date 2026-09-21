@@ -41,7 +41,6 @@
       grid-template-areas: "top top top" "rail stage inspector" "status status status";
     }
 
-    /* ── Barre haute ───────────────────────────── */
     .top { grid-area: top; display: flex; align-items: center; gap: 14px; padding: 0 14px; background: var(--paper); border-bottom: 1px solid var(--rule); }
     .brand { display: flex; align-items: baseline; gap: 6px; font-weight: 600; font-size: 16px; letter-spacing: -0.01em; white-space: nowrap; }
     .brand i { width: 10px; height: 10px; background: var(--molten); display: inline-block; transform: rotate(45deg); margin-right: 4px; }
@@ -74,7 +73,6 @@
     .btn.block { width: 100%; }
     .btn:disabled { opacity: .45; cursor: default; }
 
-    /* ── Parcours ──────────────────────────────── */
     .rail { grid-area: rail; background: var(--paper); border-right: 1px solid var(--rule); display: flex; flex-direction: column; min-height: 0; }
     .steps { flex: 1; overflow-y: auto; padding: 10px 0; }
     .step { border-bottom: 1px solid var(--paper-2); }
@@ -131,7 +129,6 @@
     .cartouche b { font-weight: 500; }
     .cartouche .wide { grid-column: 1 / -1; border-right: 0 !important; }
 
-    /* ── Scène ─────────────────────────────────── */
     .stage { grid-area: stage; display: grid; grid-template-columns: 1fr 0fr; min-width: 0; min-height: 0; position: relative; }
     .stage[data-mode="split"] { grid-template-columns: 1fr 1fr; }
     .stage[data-mode="3d"] { grid-template-columns: 0fr 1fr; }
@@ -157,7 +154,6 @@
     .empty-hint h3 { margin: 0 0 6px; font-size: 16px; font-weight: 500; }
     .empty-hint p { margin: 0 0 12px; color: var(--ink-2); }
 
-    /* ── Inspecteur ────────────────────────────── */
     .inspector { grid-area: inspector; background: var(--paper); border-left: 1px solid var(--rule); overflow-y: auto; padding: 16px; }
     .inspector h2 { font-size: 15px; font-weight: 500; margin: 0 0 2px; }
     .inspector .sub { color: var(--ink-3); font-size: 12px; margin: 0 0 14px; }
@@ -170,12 +166,10 @@
     .colorline { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 3px 0; font-size: 13px; }
     .colorline input[type=color] { width: 40px; height: 24px; padding: 0; border: 1px solid var(--rule-2); border-radius: 4px; background: #fff; cursor: pointer; }
 
-    /* ── Statut ────────────────────────────────── */
     .status { grid-area: status; display: flex; align-items: center; gap: 18px; padding: 0 14px; background: var(--paper); border-top: 1px solid var(--rule); font-size: 12px; color: var(--ink-2); white-space: nowrap; overflow: hidden; }
     .status .hint { flex: 1; overflow: hidden; text-overflow: ellipsis; color: var(--ink); }
     .status .snap { color: var(--molten-ink); min-width: 90px; }
 
-    /* ── Fenêtres et notifications ─────────────── */
     .modal-back { position: fixed; inset: 0; background: rgba(31,42,48,.35); display: grid; place-items: center; z-index: 20; }
     .modal { background: var(--paper); border-radius: 10px; width: min(460px, calc(100vw - 32px)); max-height: calc(100vh - 60px); overflow: auto; box-shadow: 0 20px 50px rgba(31,42,48,.25); }
     .modal.wide { width: min(760px, calc(100vw - 32px)); }
@@ -274,5 +268,6 @@
   <input type="file" id="planFile" accept="image/*,application/pdf" hidden />
   <input type="file" id="projectFile" accept=".json,application/json" hidden />
   <script type="module" src="/src/studio/main.js"></script>
+  <script type="module" src="/src/studio/equipment-plugin.js"></script>
 </body>
 </html>
