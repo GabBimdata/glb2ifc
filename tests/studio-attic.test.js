@@ -42,7 +42,9 @@ test('an attic level: roof on knee walls, partitions under the slope, warnings',
   const top = (e) => Math.max(...e.mesh.positions.map((p) => p[2]));
   const z = M.levelElevation(pr, pr.levels[1].id);
   const knee = elements.filter((e) => e.kind === 'wall' && e.levelIndex === 1 && e.wallType.category === 'exterior');
-  assert.ok(knee.every((e) => Math.abs(top(e) - (z + 0.9)) < 1e-6), 'jambettes à 0,90 m');
+  assert.equal(knee.filter((e) => top(e) < z + 1.21).length, 2, 'deux jambettes suivant la pente sur leur épaisseur');
+  assert.equal(knee.filter((e) => top(e) > z + 4).length, 2, 'deux pignons jusqu’au faîtage');
+  assert.equal(elements.filter((e) => e.kind === 'gable' && e.levelIndex === 1).length, 0, 'pas de pignons pleins superposés');
   const partition = elements.find((e) => e.kind === 'wall' && e.levelIndex === 1 && e.wallType.category === 'partition');
   assert.ok(partition.tessellated && top(partition) <= z + 2.5 + 1e-6, 'cloison sous le faux plafond');
   const spaces = elements.filter((e) => e.kind === 'space' && e.levelIndex === 1);

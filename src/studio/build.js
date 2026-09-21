@@ -324,7 +324,7 @@ export function mergeWallChains(level, polys) {
  */
 export function roofOpenings(project, level, body) {
   const items = (body.roofItems || []).filter((it) => it.level === level.id || !it.level);
-  if (!items.length || !body.roof?.enabled) return [];
+  if (!items.length || !body.roof?.enabled || bodyTopLevelIndex(project, body.id) !== project.levels.findIndex((l) => l.id === level.id)) return [];
   const z = levelElevation(project, level.id);
   const floorZ = z + (body.elevation || 0);
   const baseZ = floorZ + roofBaseHeight(project, level, body);
@@ -344,11 +344,25 @@ export function roofOpenings(project, level, body) {
       const slope = G.len(g);
       const u = slope > 1e-4 ? G.norm(g) : [1, 0];
       const v = G.perp(u);
-      const horiz = item.height / Math.sqrt(1 + slope * slope);
+
       const facePoly = face.poly.map((p) => [p[0], p[1]]);
       const preset = ROOF_OPENINGS[item.type] || ROOF_OPENINGS.skylight;
+      const width = item.width ?? preset.width;
+      const height = item.height ?? preset.height;
+      const sill = item.sill ?? preset.sill;
+      const invalid = (reason) => out.push({ item, preset, poly: null, ok: false, reason, body, floorZ });
+      if (!Number.isFinite(width) || width <= 0.12) { invalid('largeur invalide'); continue; }
+      const horiz = height / Math.sqrt(1 + slope * slope);
 
       if (preset.kind === 'dormer') {
+        if (slope < 0.01) { invalid('une lucarne nécessite un pan incliné'); continue; }
+        const h = item.wallHeight ?? preset.wallHeight;
+        const ws = item.winSill ?? preset.winSill;
+        if (![h, ws, item.winHeight ?? preset.winHeight, item.pitch ?? preset.pitch, item.setback ?? preset.setback].every(Number.isFinite)
+          || width <= 0.54 || ws < 0 || h - ws <= 0.27 || (item.winHeight ?? preset.winHeight) <= 0.12
+          || (item.pitch ?? preset.pitch) < 0 || (item.pitch ?? preset.pitch) >= 85
+          || (item.setback ?? preset.setback) < 0
+          || (preset.dormer === 'shed' && (!Number.isFinite(item.depth ?? preset.depth) || (item.depth ?? preset.depth) <= 0))) { invalid('dimensions de lucarne invalides'); continue; }
         // repère du pan : U vers le haut de la pente, V le long de l'égout
         const U = u, V = v;
         const us = facePoly.map((p) => G.dot(G.sub(p, anchor), U));
@@ -363,11 +377,11 @@ export function roofOpenings(project, level, body) {
           wallHeight: item.wallHeight ?? preset.wallHeight,
           pitch: item.pitch ?? preset.pitch,
           depth: item.depth ?? preset.depth,
-          slope,
+          slope, baseDrop: tv,
           window: { height: item.winHeight ?? preset.winHeight, sill: item.winSill ?? preset.winSill },
         });
         const holeWorld = d.hole.map(toWorld);
-        const ok2 = holeWorld.every((p) => G.pointInPolygon(p, facePoly));
+        const ok2 = G.fitTranslation(holeWorld, facePoly, [0, 0], 0) !== null;
         const map = (mesh) => ({
           positions: mesh.positions.map((q) => { const w2 = toWorld([q[0], q[1]]); return [w2[0], w2[1], zOrigin + q[2]]; }),
           triangles: mesh.triangles,
@@ -380,43 +394,32 @@ export function roofOpenings(project, level, body) {
           item, preset, dormer: d, poly: holeWorld, u: U, v: V, zAt, tv, ok: ok2, clamped: false,
           outlineIndex: k, partIndex: face.part,
           groups, origin, zOrigin,
+          reason: ok2 ? null : 'la lucarne dépasse le pan (rive ou faîtage)',
+          ceilingFaces: d.ceilingFaces.map((f) => ({ poly: f.poly.map(toWorld), zAt: (p) => zOrigin + f.zAt([G.dot(G.sub(p, origin), U), G.dot(G.sub(p, origin), V)]) })),
           sillZ: zOrigin + (item.winSill ?? preset.winSill), floorZ, body,
           hostKey: `roof-${body.id}-${k}-${face.part}`,
         });
         continue;
       }
 
+      if (![height, sill].every(Number.isFinite) || height <= 0.12 || sill < 0) { invalid('dimensions de fenêtre invalides'); continue; }
       const rectAt = (t) => {
         const c = G.add(anchor, G.mul(u, t));
         return [
-          G.add(G.add(c, G.mul(u, -horiz / 2)), G.mul(v, -item.width / 2)),
-          G.add(G.add(c, G.mul(u, horiz / 2)), G.mul(v, -item.width / 2)),
-          G.add(G.add(c, G.mul(u, horiz / 2)), G.mul(v, item.width / 2)),
-          G.add(G.add(c, G.mul(u, -horiz / 2)), G.mul(v, item.width / 2)),
+          G.add(G.add(c, G.mul(u, -horiz / 2)), G.mul(v, -width / 2)),
+          G.add(G.add(c, G.mul(u, horiz / 2)), G.mul(v, -width / 2)),
+          G.add(G.add(c, G.mul(u, horiz / 2)), G.mul(v, width / 2)),
+          G.add(G.add(c, G.mul(u, -horiz / 2)), G.mul(v, width / 2)),
         ];
       };
-      const fits = (t) => rectAt(t).every((p) => G.pointInPolygon(p, facePoly));
-      let want = 0;
-      if (slope > 1e-4) want = (floorZ + item.sill + tv + (slope * horiz) / 2 - zAt(anchor)) / slope;
-      let t = want;
-      let ok = fits(t);
-      if (!ok) {
-        // l'allège demandée sort du pan (sous l'égout ou au-dessus du faîtage) :
-        // on place la fenêtre au plus près possible et on annonce la hauteur réellement obtenue.
-        const ts = face.poly.map((p) => G.dot(G.sub([p[0], p[1]], anchor), u));
-        const lo = Math.min(...ts), hi = Math.max(...ts);
-        let best = null;
-        for (let i = 0; i <= 120; i++) {
-          const cand = lo + ((hi - lo) * i) / 120;
-          if (!fits(cand)) continue;
-          if (best === null || Math.abs(cand - want) < Math.abs(best - want)) best = cand;
-        }
-        if (best !== null) { t = best; ok = true; }
-      }
+      const want = slope > 1e-4 ? (floorZ + sill + tv + (slope * horiz) / 2 - zAt(anchor)) / slope : 0;
+      const fitted = G.fitTranslation(rectAt(0), facePoly, u, want);
+      const ok = fitted !== null;
+      const t = fitted ?? want;
       const poly = rectAt(t);
       const clamped = ok && Math.abs(t - want) > 1e-3;
       out.push({
-        item, poly, u, v, zAt, tv, ok, clamped, outlineIndex: k, partIndex: face.part,
+        item, preset, poly, u, v, zAt, tv, ok, clamped, reason: ok ? null : 'la fenêtre ne tient pas dans ce pan', outlineIndex: k, partIndex: face.part,
         sillZ: Math.min(...poly.map((p) => zAt(p))) - tv,
         floorZ, body,
         hostKey: `roof-${body.id}-${k}-${face.part}`,
@@ -424,9 +427,22 @@ export function roofOpenings(project, level, body) {
     }
   });
   for (const item of items) {
-    if (!out.some((o) => o.item === item)) out.push({ item, poly: null, ok: false, body, floorZ });
+    if (!out.some((o) => o.item === item)) out.push({ item, poly: null, ok: false, reason: 'hors toiture', body, floorZ });
   }
-  return out;
+  // Keep one result per item, and reject overlapping openings explicitly.
+  const result = items.map((item) => out.find((o) => o.item === item && o.ok) || out.find((o) => o.item === item));
+  const accepted = [];
+  for (const o of result) {
+    if (!o.ok) continue;
+    if (accepted.some((a) => {
+      const overlap = G.convexClip(o.poly, a.poly);
+      return overlap && Math.abs(G.polygonArea(overlap)) > 1e-8;
+    })) {
+      o.ok = false;
+      o.reason = 'chevauche une autre ouverture de toiture';
+    } else accepted.push(o);
+  }
+  return result;
 }
 
 /**
@@ -457,13 +473,17 @@ export function atticContext(project, levelIndex) {
         for (const q of f.poly) maxZ = Math.max(maxZ, q[2] - tv);
       }
     }
-    const zUnder = (q) => {
-      let zz = Infinity;
-      for (const f of faces) if (G.pointInPolygon(q, f.poly)) zz = Math.min(zz, f.zAt(q));
-      return zz;
-    };
+    faces.splice(0, faces.length, ...G.roofEnvelope(faces));
+    const wallFaces = faces.slice();
+    const openings = roofOpenings(project, level, body);
+    for (const o of openings.filter((o) => o.ok && o.preset.kind === 'dormer')) {
+      const remaining = faces.flatMap((f) => G.subtractConvexHoles(f.poly, [o.poly]).map((poly) => ({ poly, zAt: f.zAt })));
+      faces.splice(0, faces.length, ...remaining, ...o.ceilingFaces);
+      for (const f of o.ceilingFaces) for (const p of f.poly) maxZ = Math.max(maxZ, f.zAt(p));
+    }
+    const zUnder = (q) => G.roofHeightAt(faces, q);
     map.set(body.id, {
-      body, faces, floorZ, maxZ, zUnder,
+      body, faces, wallFaces, openings, floorZ, maxZ, zUnder,
       knee: level.attic.kneeWall ?? 0.9,
       ceilingZ: body.ceiling ? floorZ + (level.attic.ceilingHeight ?? 2.5) : null,
     });
@@ -496,7 +516,7 @@ export function buildElements(project, options = {}) {
     const attic = atticContext(project, li);
     const topOf = (body, category) => {
       const ctx = attic.get(body.id);
-      if (ctx) return category === 'exterior' ? ctx.floorZ + ctx.knee : Math.min(ctx.ceilingZ ?? Infinity, ctx.maxZ);
+      if (ctx) return category === 'exterior' ? ctx.maxZ : Math.min(ctx.ceilingZ ?? Infinity, ctx.maxZ);
       const h = bodyHeight(project, level, body);
       const cut = category === 'exterior' || isTopLevel ? 0 : slabT;
       return floorOf(body) + h - cut;
@@ -547,7 +567,7 @@ export function buildElements(project, options = {}) {
         const top = ctx.ceilingZ ?? ctx.maxZ;
         elements.push({
           kind: 'space', level, levelIndex: li, name: room.name, room, area, body,
-          areaHabitable: G.areaAtLeast(net, ctx.faces, zf + 1.8),
+          areaHabitable: top < zf + 1.8 ? 0 : G.areaAtLeast(net, ctx.faces, zf + 1.8),
           profile: net, z0: zf, depth: top - zf,
           mesh: G.prismUnderRoof(net, zf, top, ctx.faces), tessellated: true,
           key: `space-${room.id}`,
@@ -579,9 +599,16 @@ export function buildElements(project, options = {}) {
       const hw = top - base;
       if (hw <= 0.05) continue;
       const pieces = G.wallPieces(level, wall, poly, hw);
-      const actx = type.category !== 'exterior' ? attic.get(bodies[0].id) : null;
+      const actx = bodies.some((bd) => attic.has(bd.id));
+      // A party wall follows the higher adjacent envelope, regardless of room order.
+      const wallFaces = actx ? G.roofEnvelope(bodies.flatMap((bd) => {
+        const ctx = attic.get(bd.id);
+        if (!ctx) return [{ poly, zAt: () => topOf(bd, type.category) }];
+        const faces = type.category === 'exterior' ? ctx.wallFaces : ctx.faces;
+        return G.cellsUnderRoof(poly, base, topOf(bd, type.category), faces).map((c) => ({ poly: c.poly, zAt: c.top }));
+      })) : null;
       const wallMesh = actx
-        ? mergeMeshes(pieces.map((p) => G.prismUnderRoof(p.poly, base + p.z0, base + p.z1, actx.faces)))
+        ? mergeMeshes(pieces.map((p) => G.prismUnderRoof(p.poly, base + p.z0, base + p.z1, wallFaces)))
         : mergeMeshes(pieces.map((p) => extrude(p.poly, base + p.z0, base + p.z1)));
       if (actx) {
         // une ouverture qui dépasse sous la pente est signalée
@@ -589,12 +616,11 @@ export function buildElements(project, options = {}) {
         const u0 = G.norm(G.sub(b0, a0));
         for (const op of wall.openings || []) {
           const top = base + op.sill + op.height;
-          const lim = Math.min(...[-op.width / 2, op.width / 2].map((d) => actx.zUnder(G.add(a0, G.mul(u0, op.offset + d)))), actx.ceilingZ ?? Infinity);
+          const lim = Math.min(
+            ...[-op.width / 2, op.width / 2].map((d) => G.roofHeightAt(wallFaces, G.add(a0, G.mul(u0, op.offset + d)))),
+
+          );
           if (top > lim + 0.01) warnings.push(`${level.name} : ${OPENING_TYPES[op.type]?.label || 'Ouverture'} trop haute sous la pente (${Math.round((top - lim) * 100)} cm de trop).`);
-        }
-      } else if (attic.get(bodies[0].id) && type.category === 'exterior') {
-        for (const op of wall.openings || []) {
-          if (base + op.sill + op.height > base + hw + 0.01) warnings.push(`${level.name} : ${OPENING_TYPES[op.type]?.label || 'Ouverture'} plus haute que la jambette (${Math.round((op.sill + op.height - hw) * 100)} cm de trop) : préférez une fenêtre de toit ou une lucarne.`);
         }
       }
       elements.push({
@@ -613,7 +639,7 @@ export function buildElements(project, options = {}) {
           name: `${cat?.label || (op.kind === 'door' ? 'Porte' : 'Fenêtre')} ${op.id.slice(-4)}`,
           center, u, z0: base + op.sill,
           frame, panel,
-          voidProfile: { center, u, width: op.width, depth: wall.thickness + 0.02, z0: base + op.sill, height: Math.min(op.height, hw - op.sill) },
+          voidProfile: { center, u, width: op.width, depth: wall.thickness + 0.02, z0: base + op.sill, height: op.height },
           key: `op-${op.id}`,
         });
       }
@@ -695,7 +721,8 @@ export function buildElements(project, options = {}) {
       if (cctx) {
         // faux plafond horizontal, limité à la zone où les rampants sont plus hauts
         bodyOutlines(project, level, body.id, -1).forEach((outline, k) => {
-          const cells = G.cellsUnderRoof(outline, cctx.ceilingZ, cctx.ceilingZ + ep, cctx.faces);
+          const holes = cctx.openings.filter((o) => o.ok && o.preset.kind === 'skylight').map((o) => o.poly);
+          const cells = G.subtractConvexHoles(outline, holes).flatMap((p) => G.cellsUnderRoof(p, cctx.ceilingZ, cctx.ceilingZ + ep, cctx.faces));
           if (!cells.length) return;
           elements.push({
             kind: 'ceiling', level, levelIndex: li, body,
@@ -741,6 +768,10 @@ export function buildElements(project, options = {}) {
         .filter((w) => (WALL_TYPES[w.type]?.category) === 'exterior')
         .map((w) => w.thickness));
       const openings = roofOpenings(project, level, body);
+      for (const o of openings) {
+        if (!o.ok) warnings.push(`${level.name} : ${o.preset?.label || 'Ouverture de toiture'} ${o.item.id} : ${o.reason}.`);
+        else if (o.clamped) warnings.push(`${level.name} : fenêtre de toit ${o.item.id} recalée à ${(o.sillZ - o.floorZ).toFixed(2)} m d'allège.`);
+      }
       outlines.forEach((outline, k) => {
         const holes = openings.filter((o) => o.ok && o.outlineIndex === k).map((o) => o.poly);
         const roof = G.buildRoof(outline, { ...body.roof, baseZ, wallThickness: thickness, thicknessAt, holes });
@@ -798,7 +829,7 @@ export function buildElements(project, options = {}) {
             key: `sky-${o.item.id}`,
           });
         }
-        roof.panels.forEach((panel, i) => {
+        (attic.has(body.id) ? [] : roof.panels).forEach((panel, i) => {
           elements.push({
             kind: 'gable', level, levelIndex: li, body,
             name: `${panel.name || 'Pignon'} ${body.name}`,

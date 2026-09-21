@@ -74,7 +74,7 @@ export function buildObject3D(project, options = {}) {
     for (const rp of el.railParts || []) parts.push({ mesh: rp.mesh, key: rp.key, opacity: rp.key === 'window' ? GLASS_OPACITY : 1 });
     if (el.roofMesh) parts.push({ mesh: el.roofMesh, key: 'roof' });
     if (el.frame) parts.push({ mesh: el.frame, key: 'frame' });
-    const panelKey = el.kind === 'skylight' ? 'window' : el.kind;
+    const panelKey = el.kind === 'skylight' || el.kind === 'dormer' ? 'window' : el.kind;
     if (el.panel) parts.push({ mesh: el.panel, key: panelKey, opacity: panelKey === 'window' ? GLASS_OPACITY : 1 });
     const group = new THREE.Group();
     group.name = el.name;

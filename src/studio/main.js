@@ -465,7 +465,7 @@ function aboveCeiling(s) {
   if (!body?.ceiling || !s.info?.poly) return false;
   const idx = M.bodyTopLevelIndex(store.project, body.id);
   const level = store.project.levels[idx];
-  if (!level) return false;
+  if (!level || M.isAttic(level)) return false; // attic ceilings are pierced below skylights
   const zPlafond = M.levelElevation(store.project, level.id) + (body.elevation || 0)
     + (M.isAttic(level) ? (level.attic.ceilingHeight ?? 2.5) : M.bodyHeight(store.project, level, body) - (body.ceilingThickness || 0.15));
   return s.info.sillZ >= zPlafond - 0.02;
@@ -779,11 +779,11 @@ function renderInspector() {
         ${numField('Hauteur de baie', 'sky-winheight', it.winHeight ?? preset.winHeight)}
         ${numField('Allège de la baie', 'sky-winsill', it.winSill ?? preset.winSill)}
       </div>
-      ${s.info?.poly ? '' : '<p class="note">Cette lucarne ne tient pas sur le pan : réduisez sa largeur, sa hauteur de façade, ou rapprochez-la de l\'égout.</p>'}
+      ${s.info?.ok ? '' : `<p class="note">Lucarne non construite : ${esc(s.info?.reason || 'hors toiture')}. Ajustez ses dimensions ou sa position.</p>`}
       <section><button class="btn danger block" data-act="delete-selection">Supprimer <kbd>Suppr</kbd></button></section>`;
   } else if (s.type === 'roofitem') {
     const it = s.item;
-    const real = s.info?.poly ? fmt(s.info.sillZ - s.info.floorZ) : null;
+    const real = s.info?.ok ? fmt(s.info.sillZ - s.info.floorZ) : null;
     el.innerHTML = `
       <h2>Fenêtre de toit</h2><p class="sub">Sur la toiture de ${esc(s.body.name)}</p>
       <div class="grid2">
@@ -791,7 +791,7 @@ function renderInspector() {
         ${numField('Hauteur (sur la pente)', 'sky-height', it.height)}
       </div>
       ${numField("Allège au-dessus du plancher", 'sky-sill', it.sill)}
-      ${real ? `<p class="sub">Allège obtenue : ${real} m${s.info.clamped ? ". La valeur demandée sort du pan ; la fenêtre est placée au plus près." : ''}</p>${aboveCeiling(s) ? '<p class="note">Cette fenêtre donne au-dessus du plafond de ce corps : elle éclaire les combles, pas la pièce. Décochez « Plafond sous la toiture » ou baissez l\'allège.</p>' : ''}` : '<p class="note">Cette fenêtre n\'est sur aucun pan de toiture. Déplacez-la ou vérifiez la toiture du corps.</p>'}
+      ${real ? `<p class="sub">Allège obtenue : ${real} m${s.info.clamped ? ". La valeur demandée sort du pan ; la fenêtre est placée au plus près." : ''}</p>${aboveCeiling(s) ? '<p class="note">Cette fenêtre donne au-dessus du plafond de ce corps : elle éclaire les combles, pas la pièce. Décochez « Plafond sous la toiture » ou baissez l\'allège.</p>' : ''}` : `<p class="note">Fenêtre non construite : ${esc(s.info?.reason || 'hors toiture')}. Ajustez ses dimensions ou sa position.</p>`}
       <section><button class="btn danger block" data-act="delete-selection">Supprimer <kbd>Suppr</kbd></button></section>`;
   } else if (s.type === 'room') {
     el.innerHTML = `

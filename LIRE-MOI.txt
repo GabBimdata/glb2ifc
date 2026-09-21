@@ -1,0 +1,22 @@
+FICHIERS CORRIGÉS PRÊTS À COPIER
+
+1. Décompresse ce ZIP.
+2. Duplique ton dossier de projet pour garder une sauvegarde.
+3. Dans le ZIP décompressé, ouvre src puis studio.
+   Copie les 6 fichiers qui s’y trouvent dans src/studio de ton projet.
+   Accepte le remplacement des fichiers existants.
+4. Copie les 3 fichiers du dossier tests dans le dossier tests de ton projet.
+5. Copie package.json à la racine de ton projet, à côté de server.js.
+6. Recharge l’application dans ton navigateur. Si nécessaire, redémarre-la
+   comme tu le fais habituellement.
+
+Copie les FICHIERS contenus dans les dossiers. Ne remplace pas le dossier src
+ou le dossier studio entier, car ils contiennent d’autres fichiers nécessaires.
+
+Le correctif correspond à la version GitHub main 6f20bef examinée dans notre
+échange. Si Claude a depuis modifié les mêmes fichiers, garde la sauvegarde :
+les fichiers fournis ici remplacent intégralement les fichiers de même nom.
+
+Ton projet ma-maison.smelt.json reste inchangé et peut être rouvert normalement.
+Les correctifs sont ceux déjà vérifiés : 89 tests passent. Le contrôle visuel
+reste à effectuer. Détails dans tests/ROOF_TESTS.md.

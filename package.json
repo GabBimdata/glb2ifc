@@ -18,7 +18,7 @@
     "qwen:setup:windows:find": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-qwen-windows.ps1 -FindOnly -SkipBuild",
     "qwen:prereqs:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-qwen-windows.ps1 -PrereqsOnly",
     "check": "node scripts/check-syntax.mjs",
-    "test": "node --test tests/modeler-core.test.js"
+    "test": "node --test tests/*.test.js"
   },
   "dependencies": {
     "@gltf-transform/core": "^4.1.1",

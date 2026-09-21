@@ -460,12 +460,17 @@ export function bridgeHoles(outer, holes) {
 
 // Plan passant par trois points non alignés : renvoie z(x, y)
 export function planeOf(face) {
-  const [a, b, c] = [face[0], face[1], face[face.length - 1]];
-  const u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-  const v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-  const n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
-  if (Math.abs(n[2]) < 1e-9) return null;
-  return (p) => a[2] - ((p[0] - a[0]) * n[0] + (p[1] - a[1]) * n[1]) / n[2];
+  if (face.length < 3) return null;
+  const a = face[0];
+  // Hip roofs on square footprints can repeat a ridge vertex.
+  for (let i = 1; i + 1 < face.length; i++) {
+    const b = face[i], c = face[i + 1];
+    const u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    const v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+    const n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+    if (Math.abs(n[2]) >= 1e-9) return (p) => a[2] - ((p[0] - a[0]) * n[0] + (p[1] - a[1]) * n[1]) / n[2];
+  }
+  return null;
 }
 
 // Prisme suivant un plan incliné : polygone en plan, décalages verticaux bas et haut.
@@ -507,15 +512,12 @@ function shellFromTopFaces(topFaces, outline, zOfTop, thicknessV, holes = []) {
     }
     // pan percé : triangulation avec trous, puis tableaux verticaux autour de chaque trou
     const zAt = planeOf(f) || ((p) => zOfTop(p));
-    const merged = bridgeHoles(xy, mine);
-    const tris = triangulate(merged);
-    const base = positions.length;
-    for (const p of merged) positions.push([p[0], p[1], zAt(p)]);
-    const baseLow = positions.length;
-    for (const p of merged) positions.push([p[0], p[1], zAt(p) - thicknessV]);
-    for (const [a, b, c] of tris) {
-      triangles.push([base + a, base + b, base + c]);
-      triangles.push([baseLow + a, baseLow + c, baseLow + b]);
+    // Split into convex cells instead of bridging holes by nearest vertices:
+    // those bridges can cross another opening and fill part of the roof back in.
+    for (const cell of subtractConvexHoles(xy, mine)) {
+      const ccw = polygonArea(cell) > 0 ? cell : cell.slice().reverse();
+      pushPoly3(ccw.map((p) => [p[0], p[1], zAt(p)]), false);
+      pushPoly3(ccw.map((p) => [p[0], p[1], zAt(p) - thicknessV]), true);
     }
     for (const h of mine) {
       for (let i = 0; i < h.length; i++) {
@@ -978,7 +980,7 @@ export function buildDormer(opts) {
     const profile = [];
     const N = 8;
     for (let i = 0; i <= N; i++) { const u = (uMax * i) / N; profile.push([u, eaveZ([u])]); }
-    for (let i = N; i >= 0; i--) { const u = (uMax * i) / N; profile.push([u, s * u]); }
+    for (let i = N; i >= 0; i--) { const u = (uMax * i) / N; profile.push([u, s * u - (opts.baseDrop || 0)]); }
     const poly = cleanPolygon(profile);
     parts.push({ kind: 'cheek', mesh: prismFrom(poly, side * w2, side * (w2 - t), (p, v) => [p[0], v, p[1]]) });
   }
@@ -992,7 +994,7 @@ export function buildDormer(opts) {
   const ww = Math.max(0.3, w - 2 * t - 0.3);
   const z0 = win.sill, z1 = win.sill + wh;
   const pieces = [
-    [[-w2, 0], [w2, 0], [w2, z0], [-w2, z0]],
+    [[-w2, -(opts.baseDrop || 0)], [w2, -(opts.baseDrop || 0)], [w2, z0], [-w2, z0]],
     [[-w2, z0], [-ww / 2, z0], [-ww / 2, z1], [-w2, z1]],
     [[ww / 2, z0], [w2, z0], [w2, z1], [ww / 2, z1]],
     [[-w2, z1], [w2, z1], ...top.slice().reverse()],
@@ -1011,7 +1013,7 @@ export function buildDormer(opts) {
       t / 2 - 0.01, t / 2 + 0.01, (p, u) => [u, p[0], p[1]]),
   });
 
-  return { hole, parts, ridgeZ: type === 'shed' ? hW + 1 : hR, window: { width: ww, height: wh, sill: win.sill } };
+  return { hole, parts, ceilingFaces: clipped.map((c) => ({ poly: c.poly, zAt: (p) => c.zf(p) - tr })), ridgeZ: type === 'shed' ? hW + 1 : hR, window: { width: ww, height: wh, sill: win.sill } };
 }
 
 // Enveloppe convexe (les emprises de lucarnes sont convexes : rectangle ou pentagone)
@@ -1141,7 +1143,7 @@ export function polygonDifference(A, Bs) {
 // ─── Découpe sous les rampants (étage sous toiture) ───────────────────────────
 // faces : [{ poly: [[x,y]...] convexe, zAt: (p) => z du dessous du pan }]
 
-function convexClip(poly, clipPoly) {
+export function convexClip(poly, clipPoly) {
   const c = polygonCentroid(clipPoly);
   let out = poly;
   for (let i = 0; i < clipPoly.length && out.length >= 3; i++) {
@@ -1151,6 +1153,59 @@ function convexClip(poly, clipPoly) {
     out = clipHalfPlane(out, a, n, 0, true);
   }
   return out.length >= 3 ? out : null;
+}
+
+function convexCells(poly) {
+  const P = cleanPolygon(poly);
+  const sign = polygonArea(P) > 0 ? 1 : -1;
+  const convex = P.every((p, i) => sign * cross(sub(P[(i + 1) % P.length], p), sub(P[(i + 2) % P.length], P[(i + 1) % P.length])) >= -1e-10);
+  return convex ? [P] : triangulate(P).map((t) => t.map((i) => P[i]));
+}
+
+// Convex cells covering a polygon minus convex holes. No bridges, sampled grid,
+// or overlapping output cells. Triangulating the input also supports concave rooms.
+export function subtractConvexHoles(poly, holes) {
+  let cells = convexCells(poly);
+  const valid = (p) => p.length >= 3 && Math.abs(polygonArea(p)) > 1e-10;
+  for (const raw of holes) {
+    const hole = cleanPolygon(raw);
+    if (!valid(hole)) continue;
+    const sign = polygonArea(hole) > 0 ? 1 : -1;
+    cells = cells.flatMap((cell) => {
+      const outside = [];
+      let inside = cell;
+      for (let i = 0; i < hole.length && valid(inside); i++) {
+        const a = hole[i], b = hole[(i + 1) % hole.length];
+        const n = mul(perp(norm(sub(b, a))), sign);
+        const cut = cleanPolygon(clipHalfPlane(inside, a, n, 0, false));
+        if (valid(cut)) outside.push(cut);
+        inside = cleanPolygon(clipHalfPlane(inside, a, n, 0, true));
+      }
+      return outside;
+    });
+  }
+  return cells.filter(valid);
+}
+
+// Exact admissible translation of a convex footprint along a direction inside
+// a convex roof face. A tiny margin keeps holes clear of ridge/eave shell edges.
+export function fitTranslation(poly, face, direction, wanted, margin = 1e-5) {
+  const P = cleanPolygon(face);
+  const sign = polygonArea(P) > 0 ? 1 : -1;
+  let lo = -Infinity, hi = Infinity;
+  for (let i = 0; i < P.length; i++) {
+    const a = P[i], b = P[(i + 1) % P.length];
+    const n = mul(perp(norm(sub(b, a))), sign);
+    const speed = dot(direction, n);
+    for (const p of poly) {
+      const gap = dot(sub(p, a), n) - margin;
+      if (Math.abs(speed) < 1e-10) {
+        if (gap < -1e-9) return null;
+      } else if (speed > 0) lo = Math.max(lo, -gap / speed);
+      else hi = Math.min(hi, -gap / speed);
+    }
+  }
+  return lo <= hi + 1e-9 ? Math.max(lo, Math.min(hi, wanted)) : null;
 }
 
 function gradientOf(zAt, p0) {
@@ -1166,6 +1221,33 @@ function splitAtHeight(cell, zAt, h, keepAbove) {
   if (gl < 1e-9) return (z0 >= h) === keepAbove ? cell : null;
   const out = clipHalfPlane(cell, p0, mul(g, 1 / gl), (h - z0) / gl, keepAbove);
   return out.length >= 3 ? out : null;
+}
+
+// Disjoint upper envelope: intersecting roof rectangles must not double-count
+// room areas or cut a partition at the lower of two overlapping roofs.
+export function roofEnvelope(faces) {
+  return faces.flatMap((f, i) => {
+    const holes = [];
+    for (let j = 0; j < faces.length; j++) {
+      if (i === j) continue;
+      const other = faces[j];
+      const overlap = convexClip(f.poly, other.poly);
+      if (!overlap || Math.abs(polygonArea(overlap)) < 1e-10) continue;
+      const diff = (p) => other.zAt(p) - f.zAt(p);
+      if (overlap.every((p) => Math.abs(diff(p)) < 1e-8)) {
+        if (j < i) holes.push(overlap);
+      } else {
+        const higher = splitAtHeight(overlap, diff, 0, true);
+        if (higher) holes.push(higher);
+      }
+    }
+    return subtractConvexHoles(f.poly, holes).map((poly) => ({ ...f, poly }));
+  });
+}
+
+export function roofHeightAt(faces, p) {
+  const heights = faces.filter((f) => pointInPolygon(p, f.poly) || distToBoundary(p, f.poly) < 1e-7).map((f) => f.zAt(p));
+  return heights.length ? Math.max(...heights) : Infinity;
 }
 
 // Prisme à fond plat et dessus défini point par point (plan par morceau)
@@ -1192,14 +1274,15 @@ export function prismVarTop(poly, z0, topFn) {
  */
 export function cellsUnderRoof(poly, z0, zTop, faces) {
   const cells = [];
-  for (const f of faces) {
-    const cell = convexClip(poly, f.poly);
+  if (zTop <= z0 + 1e-9) return cells;
+  for (const f of faces) for (const part of convexCells(poly)) {
+    const cell = convexClip(part, f.poly);
     if (!cell) continue;
     const high = splitAtHeight(cell, f.zAt, zTop, true);
-    if (high) cells.push({ poly: high, top: () => zTop });
+    if (high && Math.abs(polygonArea(high)) > 1e-10) cells.push({ poly: high, top: () => zTop });
     let low = splitAtHeight(cell, f.zAt, zTop, false);
-    if (low) low = splitAtHeight(low, f.zAt, z0 + 0.02, true); // rien sous le plancher
-    if (low) cells.push({ poly: low, top: (p) => f.zAt(p) });
+    if (low) low = splitAtHeight(low, f.zAt, z0, true); // rien sous le plancher
+    if (low && Math.abs(polygonArea(low)) > 1e-10) cells.push({ poly: low, top: (p) => f.zAt(p) });
   }
   return cells;
 }
@@ -1218,8 +1301,8 @@ export function prismUnderRoof(poly, z0, zTop, faces) {
 // Surface d'un polygone où le dessous des rampants est à au moins h (réglementaire : 1,80 m)
 export function areaAtLeast(poly, faces, h) {
   let total = 0;
-  for (const f of faces) {
-    const cell = convexClip(poly, f.poly);
+  for (const f of faces) for (const part of convexCells(poly)) {
+    const cell = convexClip(part, f.poly);
     const high = cell && splitAtHeight(cell, f.zAt, h, true);
     if (high) total += Math.abs(polygonArea(high));
   }
@@ -1229,8 +1312,8 @@ export function areaAtLeast(poly, faces, h) {
 // Zones d'un polygone sous une hauteur donnée (pour les griser sur le plan)
 export function zonesBelow(poly, faces, h) {
   const out = [];
-  for (const f of faces) {
-    const cell = convexClip(poly, f.poly);
+  for (const f of faces) for (const part of convexCells(poly)) {
+    const cell = convexClip(part, f.poly);
     const low = cell && splitAtHeight(cell, f.zAt, h, false);
     if (low) out.push(low);
   }

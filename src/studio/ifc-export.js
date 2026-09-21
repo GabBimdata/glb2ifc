@@ -339,7 +339,7 @@ export function exportIfc(project) {
       const frame = styled(faceSet(el.frame, st.z), 'frame', el.body);
       const panel = styled(faceSet(el.panel, st.z), 'window', el.body, IFC_GLASS_TRANSPARENCY);
       const it = el.roofOpening.item;
-      const ent = w.add(`IFCWINDOW(${guid(key)},${oh},${stepString(el.name)},$,$,${pl},${shape([frame, panel], 'Tessellation')},$,${num(it.height)},${num(it.width)},.SKYLIGHT.,.SINGLE_PANEL.,$)`);
+      const ent = w.add(`IFCWINDOW(${guid(key)},${oh},${stepString(el.name)},$,$,${pl},${shape([frame, panel], 'Tessellation')},$,${num(it.height ?? el.roofOpening.preset.height)},${num(it.width ?? el.roofOpening.preset.width)},.SKYLIGHT.,.SINGLE_PANEL.,$)`);
       w.add(`IFCRELFILLSELEMENT(${guid(`relfill-${key}`)},${oh},$,$,${opening},${ent})`);
       contained[el.level.id].push(noteBody(el, ent));
       props(key, ent, 'Pset_WindowCommon', [['IsExternal', 'bool', true], ['Reference', 'label', 'Fenêtre de toit']]);

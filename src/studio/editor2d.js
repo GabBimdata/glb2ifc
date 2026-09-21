@@ -1171,7 +1171,8 @@ export class Editor2D {
     const info = roofOpenings(this.project, level, M.bodyById(this.project, body.id)).find((o) => o.item.id === id);
     const label = (ROOF_OPENINGS[this.roofOpeningType] || ROOF_OPENINGS.skylight).label;
     const allege = info?.poly && info.preset?.kind !== 'dormer' ? ` Allège ${(info.sillZ - info.floorZ).toFixed(2).replace('.', ',')} m.` : '';
-    this.hooks.onToast(`${label} posée sur « ${body.name} ».${allege}`);
+    if (info?.ok) this.hooks.onToast(`${label} posée sur « ${body.name} ».${allege}`);
+    else this.hooks.onToast(`${label} non construite : ${info?.reason || 'hors toiture'}. Ajustez ses dimensions ou sa position.`, 'warn');
     this.select({ type: 'roofitem', id, bodyId: body.id });
   }
 
