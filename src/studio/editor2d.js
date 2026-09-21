@@ -5,6 +5,8 @@ import { WALL_TYPES, OPENING_TYPES, DEFAULTS } from './catalog.js';
 import { loadImage } from './io.js';
 import { roofOpenings } from './build.js';
 import { SKYLIGHT, ROOF_OPENINGS } from './catalog.js';
+import { EQUIPMENT_TYPES } from './equipment-catalog.js';
+import { drawEquipmentSymbol } from './equipment-plan.js';
 
 const INK = '#1f2a30';
 const INK_SOFT = '#5b676e';
@@ -38,6 +40,9 @@ export class Editor2D {
     this.edgeSide = 1;
     this.openingType = 'door';
     this.roofOpeningType = 'skylight';
+    this.planScaleUnlocked = false;
+    this.equipmentType = 'wc';
+    this.equipmentRotation = 0;
     this.selection = null;
     this.hover = null;
     this.mouse = null;
@@ -160,6 +165,7 @@ export class Editor2D {
     this.tool = tool;
     Object.assign(this, opts);
     this.state = {};
+    this.hover = null; // l'aperçu de l'outil précédent ne doit pas survivre au changement
     this.canvas.dataset.tool = tool;
     this.hooks.onToolChange?.(tool);
     this.updateStatus();
@@ -319,7 +325,9 @@ export class Editor2D {
       calage: () => this.calageClick(w),
       align2: () => this.align2Click(w),
       skylight: () => this.skylightClick(w),
+      equipment: () => this.equipmentClick(w),
       movePlan: () => { if (this.level.plan) { this.store.beginGesture('Déplacer le plan'); this.drag = { kind: 'plan', start: w, x: this.level.plan.x, y: this.level.plan.y }; } },
+      planAdjust: () => this.planAdjustDown(w, s),
     }[this.tool];
     try {
       handler?.();
@@ -409,6 +417,17 @@ export class Editor2D {
     }
     if ((e.key === 'Delete' || e.key === 'Backspace') && this.selection) { this.deleteSelection(); e.preventDefault(); return; }
     const k = e.key.toLowerCase();
+    if (this.tool === 'planAdjust' && e.key.startsWith('Arrow')) {
+      const step = e.shiftKey ? 0.1 : 0.01;
+      const d = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.key];
+      if (d) { this.nudgePlan(d[0], d[1]); e.preventDefault(); return; }
+    }
+    if (k === 'r' && this.tool === 'equipment') {
+      this.equipmentRotation = (this.equipmentRotation + 90) % 360;
+      this.invalidate();
+      return;
+    }
+    if (k === 'r' && this.selection?.type === 'equipment') { this.rotateEquipment(this.selection.id, 90); return; }
     if (k === 'f' && this.tool === 'wall') { this.edgeSide *= -1; this.invalidate(); this.hooks.onToast('Côté du mur inversé'); return; }
     if (k === 'v') this.hooks.requestTool?.('select');
     if (k === 'm') this.hooks.requestTool?.('wall');
@@ -442,11 +461,132 @@ export class Editor2D {
       const pr = G.projectOnSegment(w, L.nodes[wall.a], L.nodes[wall.b]);
       if (pr.d <= wall.thickness / 2 + this.px(3)) return { type: 'wall', id: wall.id };
     }
+    const eq = this.equipmentAt(w);
+    if (eq) return eq;
     const { rooms } = M.levelFaces(L);
     for (const r of rooms) {
       if (r.room && G.pointInPolygon(w, r.face.poly)) return { type: 'room', id: r.room.id };
     }
     return null;
+  }
+
+  // ─── Ajustement direct du plan (déplacer, tourner, mettre à l'échelle) ─────
+  planFrame() {
+    const plan = this.level.plan;
+    const img = plan && this.imageFor(plan);
+    if (!img) return null;
+    const W = img.naturalWidth, H = img.naturalHeight;
+    const corners = [[0, 0], [W, 0], [W, H], [0, H]].map((c) => M.planImageToWorld(plan, c));
+    const center = M.planImageToWorld(plan, [W / 2, H / 2]);
+    const topMid = M.planImageToWorld(plan, [W / 2, 0]);
+    const outward = G.norm(G.sub(topMid, center));
+    const rotHandle = G.add(topMid, G.mul(outward, this.px(34)));
+    return { corners, center, topMid, rotHandle, W, H };
+  }
+
+  planAdjustDown(w) {
+    const f = this.planFrame();
+    if (!f) return;
+    const plan = this.level.plan;
+    const snapshot = { ...plan };
+    if (G.dist(w, f.rotHandle) < this.px(12)) {
+      this.store.beginGesture('Tourner le plan');
+      this.drag = { kind: 'planRotate', start: w, plan: snapshot, center: f.center, a0: Math.atan2(w[1] - f.center[1], w[0] - f.center[0]) };
+      return;
+    }
+    if (this.planScaleUnlocked) {
+      const i = f.corners.findIndex((c) => G.dist(w, c) < this.px(10));
+      if (i >= 0) {
+        const anchor = f.corners[(i + 2) % 4];
+        this.store.beginGesture("Mettre le plan à l'échelle");
+        this.drag = { kind: 'planScale', start: w, plan: snapshot, anchor, d0: G.dist(anchor, f.corners[i]) };
+        return;
+      }
+    }
+    this.store.beginGesture('Déplacer le plan');
+    this.drag = { kind: 'plan', start: w, x: plan.x, y: plan.y };
+  }
+
+  nudgePlan(dx, dy) {
+    const levelId = this.levelId;
+    this.store.commit('Déplacer le plan', (pr) => {
+      const plan = pr.levels.find((l) => l.id === levelId).plan;
+      if (plan) { plan.x += dx; plan.y += dy; }
+    });
+  }
+
+  drawPlanFrame() {
+    const f = this.planFrame();
+    if (!f) return;
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.strokeStyle = ACCENT;
+    ctx.lineWidth = 1.5;
+    this.pathPoly(f.corners);
+    ctx.stroke();
+    const a = this.toScreen(f.topMid), r = this.toScreen(f.rotHandle);
+    ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(r[0], r[1]); ctx.stroke();
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(r[0], r[1], 7, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    if (this.planScaleUnlocked) {
+      for (const c of f.corners) {
+        const q = this.toScreen(c);
+        ctx.fillRect(q[0] - 5, q[1] - 5, 10, 10);
+        ctx.strokeRect(q[0] - 5, q[1] - 5, 10, 10);
+      }
+    }
+    const rot = this.level.plan.rotation || 0;
+    ctx.font = '500 11px "Instrument Sans", system-ui, sans-serif';
+    ctx.fillStyle = ACCENT;
+    ctx.textAlign = 'left';
+    ctx.fillText(`${rot.toFixed(1).replace('.', ',')}°`, r[0] + 12, r[1] + 4);
+    ctx.restore();
+  }
+
+  // ─── Équipements ───────────────────────────────────────────────────────────
+  equipmentAt(w) {
+    const items = this.level.equipment || [];
+    const tol = this.px(4);
+    for (let i = items.length - 1; i >= 0; i--) {
+      const it = items[i];
+      const a = (-(it.rotation || 0) * Math.PI) / 180;
+      const dx = w[0] - it.x, dy = w[1] - it.y;
+      const lx = dx * Math.cos(a) - dy * Math.sin(a), ly = dx * Math.sin(a) + dy * Math.cos(a);
+      if (Math.abs(lx) <= it.width / 2 + tol && Math.abs(ly) <= it.depth / 2 + tol) return { type: 'equipment', id: it.id };
+    }
+    return null;
+  }
+
+  snapGrid(p) {
+    const g = DEFAULTS.gridStep;
+    return [Math.round(p[0] / g) * g, Math.round(p[1] / g) * g];
+  }
+
+  equipmentClick(w) {
+    const cat = EQUIPMENT_TYPES[this.equipmentType];
+    if (!cat) return;
+    const p = this.snapGrid(w);
+    const room = M.roomAt(this.project, this.level, p);
+    if (!room) { this.hooks.onToast("Cliquez à l'intérieur d'une pièce fermée.", 'warn'); return; }
+    const id = M.uid('eq');
+    const levelId = this.levelId;
+    this.store.commit(`Poser : ${cat.label}`, (pr) => {
+      const L = pr.levels.find((l) => l.id === levelId);
+      L.equipment = L.equipment || [];
+      L.equipment.push({
+        id, type: this.equipmentType, x: p[0], y: p[1], rotation: this.equipmentRotation,
+        width: cat.width, depth: cat.depth, height: cat.height, zOffset: cat.zOffset || 0, roomId: room.room.id,
+      });
+    });
+    this.select({ type: 'equipment', id });
+  }
+
+  rotateEquipment(id, delta) {
+    const levelId = this.levelId;
+    this.store.commit('Pivoter un équipement', (pr) => {
+      const it = (pr.levels.find((l) => l.id === levelId).equipment || []).find((x) => x.id === id);
+      if (it) it.rotation = ((((it.rotation || 0) + delta) % 360) + 360) % 360;
+    });
   }
 
   selectDown(w, s) {
@@ -466,6 +606,10 @@ export class Editor2D {
       const wall = L.walls.find((x) => x.id === hit.id);
       this.store.beginGesture('Déplacer un mur');
       this.drag = { kind: 'wall', id: hit.id, start: w, a: L.nodes[wall.a].slice(), b: L.nodes[wall.b].slice(), wa: wall.a, wb: wall.b };
+    } else if (hit.type === 'equipment') {
+      const it = (L.equipment || []).find((x) => x.id === hit.id);
+      this.store.beginGesture('Déplacer un équipement');
+      this.drag = { kind: 'equipment', id: hit.id, start: w, x: it.x, y: it.y };
     } else if (hit.type === 'opening') {
       const wall = L.walls.find((x) => x.id === hit.wallId);
       const o = wall.openings.find((x) => x.id === hit.id);
@@ -513,6 +657,36 @@ export class Editor2D {
         lv.nodes[d.wb] = G.add(d.b, G.mul(n, off));
         M.clampOpenings(lv);
       });
+    } else if (d.kind === 'planRotate') {
+      d.moved = true;
+      const a1 = Math.atan2(w[1] - d.center[1], w[0] - d.center[0]);
+      let target = (d.plan.rotation || 0) + ((a1 - d.a0) * 180) / Math.PI;
+      target = ((target % 360) + 360) % 360;
+      const quarter = Math.round(target / 90) * 90;
+      target = Math.abs(target - quarter) < 3 ? quarter % 360 : Math.round(target * 10) / 10; // aimant sur les quarts de tour
+      this.store.live(() => {
+        const plan = this.level.plan;
+        Object.assign(plan, d.plan);
+        M.rotatePlan(plan, target - (d.plan.rotation || 0), d.center);
+      });
+    } else if (d.kind === 'planScale') {
+      d.moved = true;
+      const k = G.dist(d.anchor, w) / Math.max(1e-6, d.d0);
+      if (!(k > 0.05 && k < 20)) return;
+      this.store.live(() => {
+        const plan = this.level.plan;
+        Object.assign(plan, d.plan);
+        M.rescalePlan(plan, k, d.anchor);
+        plan.calibrated = true;
+        plan.scaleFrom = null;
+      });
+    } else if (d.kind === 'equipment') {
+      const p = this.snapGrid([d.x + w[0] - d.start[0], d.y + w[1] - d.start[1]]);
+      if (!M.roomAt(this.project, L, p)) return; // reste dans une pièce
+      this.store.live(() => {
+        const it = (this.level.equipment || []).find((x) => x.id === d.id);
+        if (it) { it.x = p[0]; it.y = p[1]; }
+      });
     } else if (d.kind === 'opening') {
       const wall = L.walls.find((x) => x.id === d.wallId);
       if (!wall) return;
@@ -532,7 +706,7 @@ export class Editor2D {
   deleteSelection() {
     const sel = this.selection;
     if (!sel) return;
-    const labels = { wall: 'Mur supprimé', node: 'Angle supprimé', opening: 'Ouverture supprimée', roofitem: 'Fenêtre de toit supprimée', room: '' };
+    const labels = { wall: 'Mur supprimé', node: 'Angle supprimé', opening: 'Ouverture supprimée', roofitem: 'Ouverture de toiture supprimée', equipment: 'Équipement supprimé', room: '' };
     if (sel.type === 'room') { this.hooks.onToast('Une pièce disparaît quand on supprime un de ses murs.'); return; }
     this.store.commit(labels[sel.type], () => {
       const L = this.level;
@@ -542,6 +716,7 @@ export class Editor2D {
         const wall = L.walls.find((x) => x.id === sel.wallId);
         if (wall) wall.openings = wall.openings.filter((o) => o.id !== sel.id);
       }
+      if (sel.type === 'equipment') L.equipment = (L.equipment || []).filter((x) => x.id !== sel.id);
       if (sel.type === 'roofitem') {
         const body = this.project.bodies.find((b) => b.id === sel.bodyId);
         if (body) body.roofItems = body.roofItems.filter((it) => it.id !== sel.id);
@@ -877,6 +1052,8 @@ export class Editor2D {
       calage: this.state.points?.length ? 'Cliquez maintenant le même point sur l’étage inférieur (en gris).' : 'Cliquez un repère sur le plan (un angle de façade par exemple).',
       align2: ['Repère 1 : cliquez un angle sur le plan.', 'Cliquez le même angle sur l’étage inférieur (en gris).', 'Repère 2 : cliquez un second angle sur le plan, éloigné du premier.', 'Cliquez ce second angle sur l’étage inférieur.'][(this.state.points?.length || 0) % 4],
       movePlan: 'Glissez le plan pour le positionner.',
+      planAdjust: "Glissez l'image pour la déplacer, la poignée ronde pour la tourner. Flèches : 1 cm, Maj + flèches : 10 cm.",
+      equipment: `Cliquez dans une pièce pour poser : ${EQUIPMENT_TYPES[this.equipmentType]?.label || 'équipement'}. R : pivoter.`,
       skylight: this.hover?.type === 'skylightPreview' && this.hover.ok
         ? `Pan de « ${this.hover.body.name} » sous le curseur : cliquez pour poser la fenêtre.`
         : 'Aucun pan de toiture sous le curseur. Visez l’intérieur d’un bâtiment couvert.',
@@ -906,11 +1083,31 @@ export class Editor2D {
     const { rooms } = M.levelFaces(L);
     const polys = G.computeWallPolygons(L);
     for (const r of rooms) this.drawRoomFill(r);
+    for (const it of L.equipment || []) {
+      const selected = this.selection?.type === 'equipment' && this.selection.id === it.id;
+      drawEquipmentSymbol(this, it, { selected });
+    }
     for (const wall of L.walls) this.drawWall(L, wall, polys.get(wall.id));
     this.drawNodes(L);
     for (const r of rooms) this.drawRoomLabel(r);
     this.drawRoofItems();
     this.drawSelection(L, polys);
+    if (this.tool === 'planAdjust') {
+      // les murs connus en orange par-dessus le plan : on voit tout de suite s'ils coïncident
+      const ref = L.walls.length >= 3 ? L : this.levelBelow;
+      if (ref) {
+        const rp = ref === L ? polys : G.computeWallPolygons(ref);
+        {
+          const ctx = this.ctx;
+          ctx.save();
+          ctx.strokeStyle = ACCENT;
+          ctx.lineWidth = 1.6;
+          for (const poly of rp.values()) { this.pathPoly(poly); ctx.stroke(); }
+          ctx.restore();
+        }
+      }
+      this.drawPlanFrame();
+    }
     this.drawTool(L);
   }
 
@@ -1059,7 +1256,9 @@ export class Editor2D {
     }
     const last = slice(cursor, null); if (last) slices.push(last);
     ctx.fillStyle = WALL_FILL[cat];
+    if (this.tool === 'planAdjust') { ctx.globalAlpha = 0.15; }
     for (const sl of slices) { this.pathPoly(sl); ctx.fill(); }
+    ctx.globalAlpha = 1;
 
     // symboles d'ouvertures
     const n = G.perp(u);
@@ -1080,6 +1279,23 @@ export class Editor2D {
         for (const k of [-h / 3, h / 3]) { const p1 = P(s, k), p2 = P(e, k); ctx.moveTo(p1[0], p1[1]); ctx.lineTo(p2[0], p2[1]); }
         if (o.sill < 0.05) { const p1 = P(s, 0), p2 = P(e, 0); ctx.moveTo(p1[0], p1[1]); ctx.lineTo(p2[0], p2[1]); }
         ctx.stroke();
+      } else if (OPENING_TYPES[o.type]?.operation === 'sectional') {
+        // porte de garage : tablier en trait fort, rail de relevage en pointillés côté intérieur
+        const side = o.side || 1;
+        const p1 = P(s, side * h * 0.2), p2 = P(e, side * h * 0.2);
+        ctx.strokeStyle = INK;
+        ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(p1[0], p1[1]); ctx.lineTo(p2[0], p2[1]); ctx.stroke();
+        const reach = Math.min(o.height, 2.5);
+        const q1 = this.toScreen(G.add(G.add(a, G.mul(u, s)), G.mul(n, side * (h + reach))));
+        const q2 = this.toScreen(G.add(G.add(a, G.mul(u, e)), G.mul(n, side * (h + reach))));
+        const r1 = P(s, side * h), r2 = P(e, side * h);
+        ctx.setLineDash([4, 3]);
+        ctx.lineWidth = 0.9;
+        ctx.beginPath();
+        ctx.moveTo(r1[0], r1[1]); ctx.lineTo(q1[0], q1[1]); ctx.lineTo(q2[0], q2[1]); ctx.lineTo(r2[0], r2[1]);
+        ctx.stroke();
+        ctx.setLineDash([]);
       } else {
         const side = o.side || 1;
         const hingeAtStart = (o.hinge || 'start') === 'start';
@@ -1348,8 +1564,8 @@ export class Editor2D {
         ctx.beginPath(); ctx.arc(s[0], s[1], 5, 0, Math.PI * 2); ctx.stroke();
       }
     } else if (this.tool === 'opening') {
-      const pv = this.hover;
-      if (pv && !pv.invalid) {
+      const pv = this.hover?.type === 'openingPreview' ? this.hover : null;
+      if (pv && !pv.invalid && L.walls.some((x) => x.id === pv.wallId)) {
         const wall = L.walls.find((x) => x.id === pv.wallId);
         const a = L.nodes[wall.a], b = L.nodes[wall.b];
         const u = G.norm(G.sub(b, a)), n = G.perp(u);
@@ -1378,6 +1594,16 @@ export class Editor2D {
         const wall = L.walls.find((x) => x.id === pv.wallId);
         const poly = G.computeWallPolygons(L).get(wall.id);
         if (poly) { this.pathPoly(poly); ctx.strokeStyle = '#c83c28'; ctx.lineWidth = 2; ctx.stroke(); }
+      }
+    } else if (this.tool === 'equipment' && m) {
+      const cat = EQUIPMENT_TYPES[this.equipmentType];
+      if (cat) {
+        const p = this.snapGrid(m.w);
+        const inside = !!M.roomAt(this.project, L, p);
+        drawEquipmentSymbol(this, {
+          id: '__preview__', type: this.equipmentType, x: p[0], y: p[1], rotation: this.equipmentRotation,
+          width: cat.width, depth: cat.depth, height: cat.height,
+        }, { alpha: inside ? 0.75 : 0.3, preview: true });
       }
     } else if (this.tool === 'skylight') {
       const pv = this.hover;

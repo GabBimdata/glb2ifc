@@ -4,6 +4,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { buildElements } from './build.js';
 import { colorsOf, GLASS_OPACITY } from './catalog.js';
+import { EQUIPMENT_MATERIALS } from './equipment-models.js';
 
 const IFC_HINT = { wall: 'IfcWall', slab: 'IfcSlab', roof: 'IfcRoof', gable: 'IfcWall', door: 'IfcDoor', window: 'IfcWindow', skylight: 'IfcWindow', dormer: 'IfcRoof', ceiling: 'IfcCovering' };
 
@@ -62,6 +63,7 @@ export function buildObject3D(project, options = {}) {
   const { elements, warnings } = buildElements(project, options);
   const edgeMat = new THREE.LineBasicMaterial({ color: '#3a4449', transparent: true, opacity: 0.35 });
   for (const el of elements) {
+    if (el.kind === 'equipment') { root.add(equipmentGroup(el, options)); continue; }
     const parts = [];
     if (el.kind === 'space') continue;
     const highlight = (options.selectedKey && el.key === options.selectedKey)
@@ -95,6 +97,36 @@ export function buildObject3D(project, options = {}) {
     root.add(group);
   }
   return { root, warnings };
+}
+
+const ifcNameOf = (cls) => ({ IFCSANITARYTERMINAL: 'IfcSanitaryTerminal', IFCELECTRICAPPLIANCE: 'IfcElectricAppliance' }[cls] || 'IfcFurniture');
+
+function equipmentMaterial(key, highlight) {
+  const spec = EQUIPMENT_MATERIALS[key] || EQUIPMENT_MATERIALS.cabinet;
+  const opacity = spec.opacity ?? 1;
+  return material(`equipment-${key}`, { color: spec.color, opacity, highlight });
+}
+
+function equipmentGroup(el, options) {
+  const group = new THREE.Group();
+  const ifcType = ifcNameOf(el.category?.ifcClass);
+  const predefined = el.category?.ifcPredefined || 'NOTDEFINED';
+  group.name = el.name;
+  group.userData = { ifcType, smeltKey: el.key, level: el.level?.name };
+  const highlight = options.selectedKey && el.key === options.selectedKey;
+  for (const part of el.parts) {
+    if (!part.mesh.triangles.length) continue;
+    const m = new THREE.Mesh(toGeometry(part.mesh), equipmentMaterial(part.mat, highlight));
+    m.name = el.name;
+    m.castShadow = true;
+    m.receiveShadow = true;
+    m.userData = {
+      smeltIfcType: ifcType, ifcType, smeltPredefinedType: predefined, smeltSource: 'Smelt Studio',
+      level: el.level?.name || '', body: el.body?.name || '', equipmentType: el.item?.type || '',
+    };
+    group.add(m);
+  }
+  return group;
 }
 
 export class View3D {

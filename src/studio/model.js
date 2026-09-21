@@ -36,7 +36,7 @@ export function newProject(name = 'Nouveau projet') {
 }
 
 export function newLevel(name, height = DEFAULTS.levelHeight) {
-  return { id: uid('L'), name, height, nodes: {}, walls: [], rooms: [], plan: null };
+  return { id: uid('L'), name, height, nodes: {}, walls: [], rooms: [], equipment: [], plan: null };
 }
 
 export function levelElevation(project, levelId) {
@@ -443,6 +443,7 @@ export function duplicateLevelData(source, what) {
     });
   }
   if (what.rooms) lvl.rooms = source.rooms.map((r) => ({ ...r, id: uid('R') }));
+  if (what.equipment) lvl.equipment = (source.equipment || []).map((it) => ({ ...it, id: uid('eq'), roomId: null }));
   // fusion des murs devenus alignés (si on n'a pas copié les cloisons)
   for (const id of Object.keys(lvl.nodes)) if (lvl.nodes[id]) mergeCollinearAt(lvl, id);
   return lvl;
@@ -515,7 +516,21 @@ export function validateProject(data) {
     l.walls = l.walls || [];
     l.rooms = l.rooms || [];
     for (const w of l.walls) w.openings = w.openings || [];
+    l.equipment = Array.isArray(l.equipment) ? l.equipment : [];
+    for (const it of l.equipment) {
+      // dimensions héritées des anciens GLB (boîte englobante incluant le robinet, receveur seul…)
+      if (it.type === 'sink' && Math.abs(it.height - 1.123) < 0.02) it.height = 0.90;
+      if (it.type === 'shower' && it.height < 0.3) it.height = 2.0;
+      if (it.type === 'basin' && Math.abs(it.height - 0.928) < 0.02) it.height = 0.85;
+    }
     for (const r of l.rooms) r.bodyId = r.bodyId || data.bodies[0].id;
   }
   return data;
+}
+
+
+// Pièce qui contient un point (face nette), avec son corps de bâtiment
+export function roomAt(project, level, p) {
+  const info = levelFaces(level).rooms.find((r) => r.room && G.pointInPolygon(p, r.net));
+  return info || null;
 }

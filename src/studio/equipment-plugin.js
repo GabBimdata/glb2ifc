@@ -8,7 +8,8 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import * as M from './model.js';
 import * as G from './geometry.js';
 import { View3D, buildObject3D } from './view3d.js';
-import { EQUIPMENT_TYPES } from './equipment-catalog.js';
+import { EQUIPMENT_TYPES, EQUIPMENT_GROUPS } from './equipment-catalog.js';
+import { equipmentParts, placeEquipment as placeParts, EQUIPMENT_MATERIALS } from './equipment-models.js';
 
 export { EQUIPMENT_TYPES } from './equipment-catalog.js';
 const state = {
@@ -43,8 +44,21 @@ function toast(message, kind = '') {
   setTimeout(() => el.remove(), kind === 'warn' ? 4200 : 2600);
 }
 
+// Les premiers projets ont hérité des dimensions des anciens GLB (boîte englobante
+// comprenant le robinet, receveur de douche seul…). On les ramène aux valeurs métier.
+const LEGACY_FIXES = [
+  { type: 'sink', test: (it) => Math.abs(it.height - 1.123) < 0.02, fix: { height: 0.90 } },
+  { type: 'shower', test: (it) => it.height < 0.3, fix: { height: 2.00 } },
+  { type: 'basin', test: (it) => Math.abs(it.height - 0.928) < 0.02, fix: { height: 0.85 } },
+];
+
 function ensureEquipment(level) {
   if (!Array.isArray(level.equipment)) level.equipment = [];
+  for (const it of level.equipment) {
+    if (it.__migrated) continue;
+    for (const rule of LEGACY_FIXES) if (it.type === rule.type && rule.test(it)) Object.assign(it, rule.fix);
+    Object.defineProperty(it, '__migrated', { value: true, enumerable: false });
+  }
   return level.equipment;
 }
 
@@ -149,6 +163,30 @@ function drawPlanSymbol(editor, item, alpha = 1, preview = false) {
       ctx.arc(x * w, y * d, Math.min(w, d) * 0.10, 0, Math.PI * 2);
       ctx.stroke();
     }
+  } else if (item.type === 'bedDouble' || item.type === 'bedSingle') {
+    const pillows = w > 1.2 ? 2 : 1;
+    const pw = (w - 0.1) / pillows - 0.05;
+    for (let i = 0; i < pillows; i++) ctx.strokeRect(-w / 2 + 0.075 + (pw + 0.05) * i, -d / 2 + 0.1, pw, 0.3);
+    ctx.beginPath(); ctx.moveTo(-w / 2, -d / 2 + 0.55); ctx.lineTo(w / 2, -d / 2 + 0.55); ctx.stroke();
+  } else if (item.type === 'sofa') {
+    ctx.strokeRect(-w / 2, -d / 2, w, 0.22);
+    ctx.strokeRect(-w / 2, -d / 2, 0.18, d);
+    ctx.strokeRect(w / 2 - 0.18, -d / 2, 0.18, d);
+  } else if (item.type === 'wardrobe') {
+    ctx.beginPath(); ctx.moveTo(-w / 2, -d / 2); ctx.lineTo(w / 2, d / 2); ctx.moveTo(w / 2, -d / 2); ctx.lineTo(-w / 2, d / 2); ctx.stroke();
+  } else if (item.type === 'washer') {
+    ctx.beginPath(); ctx.arc(0, 0, Math.min(w, d) * 0.3, 0, Math.PI * 2); ctx.stroke();
+  } else if (item.type === 'chair') {
+    ctx.beginPath(); ctx.moveTo(-w / 2, -d / 2 + 0.05); ctx.lineTo(w / 2, -d / 2 + 0.05); ctx.stroke();
+  } else if (item.type === 'radiator' || item.type === 'towelDryer') {
+    const n = Math.max(3, Math.round(w / 0.08));
+    ctx.beginPath();
+    for (let i = 1; i < n; i++) { const x = -w / 2 + (w / n) * i; ctx.moveTo(x, -d / 2); ctx.lineTo(x, d / 2); }
+    ctx.stroke();
+  } else if (item.type === 'hood' || item.type === 'wallCabinet') {
+    ctx.setLineDash([0.05, 0.04]);
+    ctx.strokeRect(-w / 2 + 0.02, -d / 2 + 0.02, w - 0.04, d - 0.04);
+    ctx.setLineDash([]);
   } else if (item.type === 'fridge') {
     ctx.beginPath();
     ctx.moveTo(-w / 2, 0);
@@ -244,6 +282,20 @@ function equipmentIcon(type) {
     fridge: `<rect x="30" y="3" width="40" height="24" ${common}/><path d="M30 13h40" ${common}/>`,
     cooktop: `<rect x="20" y="4" width="60" height="22" ${common}/><circle cx="38" cy="11" r="5" ${common}/><circle cx="62" cy="11" r="5" ${common}/><circle cx="38" cy="21" r="5" ${common}/><circle cx="62" cy="21" r="5" ${common}/>`,
     worktop: `<rect x="8" y="8" width="84" height="14" ${common}/><path d="M30 8v14M70 8v14" ${common}/>`,
+    vanity: `<rect x="20" y="5" width="60" height="20" ${common}/><ellipse cx="50" cy="14" rx="16" ry="6" ${common}/>`,
+    washer: `<rect x="32" y="3" width="36" height="24" ${common}/><circle cx="50" cy="15" r="8" ${common}/>`,
+    towelDryer: `<path d="M40 4v22M60 4v22M40 8h20M40 13h20M40 18h20M40 23h20" ${common}/>`,
+    oven: `<rect x="30" y="3" width="40" height="24" ${common}/><rect x="35" y="10" width="30" height="13" ${common}/>`,
+    dishwasher: `<rect x="30" y="3" width="40" height="24" ${common}/><path d="M34 8h32" ${common}/>`,
+    hood: `<path d="M26 22h48l-8-8H34z M44 14V4h12v10" ${common}/>`,
+    bedDouble: `<rect x="25" y="2" width="50" height="26" ${common}/><rect x="29" y="4" width="19" height="6" ${common}/><rect x="52" y="4" width="19" height="6" ${common}/><path d="M25 12h50" ${common}/>`,
+    bedSingle: `<rect x="38" y="2" width="24" height="26" ${common}/><rect x="41" y="4" width="18" height="6" ${common}/><path d="M38 12h24" ${common}/>`,
+    sofa: `<rect x="15" y="6" width="70" height="20" ${common}/><path d="M15 12h70M23 12v14M77 12v14" ${common}/>`,
+    table: `<rect x="20" y="7" width="60" height="16" ${common}/>`,
+    chair: `<rect x="40" y="7" width="20" height="18" ${common}/><path d="M40 10h20" ${common}/>`,
+    desk: `<rect x="20" y="8" width="60" height="14" ${common}/><path d="M24 8v14M76 8v14" ${common}/>`,
+    wardrobe: `<rect x="25" y="5" width="50" height="20" ${common}/><path d="M25 5l50 20M75 5 25 25" ${common}/>`,
+    radiator: `<rect x="20" y="11" width="60" height="8" ${common}/><path d="M28 11v8M36 11v8M44 11v8M52 11v8M60 11v8M68 11v8" ${common}/>`,
   };
   return `<svg viewBox="0 0 100 30" aria-hidden="true">${shapes[type] || shapes.baseCabinet}</svg>`;
 }
@@ -252,20 +304,14 @@ function stepHtml(editor) {
   const items = ensureEquipment(editor.level);
   return `
     <p>Choisissez un équipement puis cliquez dans une pièce pour le poser.</p>
-    <span class="field-label">Sanitaires</span>
-    <div class="grid2">
-      ${Object.entries(EQUIPMENT_TYPES).filter(([, x]) => x.group === 'sanitary').map(([k, x]) => `
-        <button class="tile ${state.type === k && editor.tool === 'equipment' ? 'on' : ''}" data-equipment-type="${k}">
-          ${equipmentIcon(k)}<span>${esc(x.label)}</span><small>${fmt(x.width)} × ${fmt(x.depth)} m</small>
-        </button>`).join('')}
-    </div>
-    <span class="field-label">Cuisine</span>
-    <div class="grid2">
-      ${Object.entries(EQUIPMENT_TYPES).filter(([, x]) => x.group === 'kitchen').map(([k, x]) => `
-        <button class="tile ${state.type === k && editor.tool === 'equipment' ? 'on' : ''}" data-equipment-type="${k}">
-          ${equipmentIcon(k)}<span>${esc(x.label)}</span><small>${fmt(x.width)} × ${fmt(x.depth)} m</small>
-        </button>`).join('')}
-    </div>
+    ${Object.entries(EQUIPMENT_GROUPS).map(([group, title]) => `
+      <span class="field-label">${esc(title)}</span>
+      <div class="grid2">
+        ${Object.entries(EQUIPMENT_TYPES).filter(([, x]) => x.group === group).map(([k, x]) => `
+          <button class="tile ${state.type === k && editor.tool === 'equipment' ? 'on' : ''}" data-equipment-type="${k}">
+            ${equipmentIcon(k)}<span>${esc(x.label)}</span><small>${fmt(x.width)} × ${fmt(x.depth)} m</small>
+          </button>`).join('')}
+      </div>`).join('')}
     <ul class="keys">
       <li>Clic : poser l'équipement dans une pièce.</li>
       <li><kbd>R</kbd> : pivoter de 90° avant la pose.</li>
@@ -575,14 +621,8 @@ function loadEquipmentAsset(type) {
         throw new Error(`Dimensions invalides pour ${cat.asset}`);
       }
       const asset = { scene, box, size, center };
-
-      // A replacement GLB may be a few centimetres different from the original.
-      // Its native bounding box becomes the default size for NEW placements.
-      // Existing project items keep their stored dimensions and are not modified.
-      cat.width = size.x;
-      cat.height = size.y;
-      cat.depth = size.z;
-
+      // Le catalogue n'est plus modifié au chargement : les dimensions par défaut restent
+      // celles du catalogue, quel que soit le moment où le fichier finit de charger.
       equipmentAssets.set(type, asset);
       return asset;
     })
@@ -644,92 +684,78 @@ function assetEquipmentObject(project, level, item, asset) {
   return group;
 }
 
-const ceramicMat = new THREE.MeshStandardMaterial({ color: '#f2f1ed', roughness: 0.48, metalness: 0 });
-const cabinetMat = new THREE.MeshStandardMaterial({ color: '#c9bba8', roughness: 0.72, metalness: 0 });
-const metalMat = new THREE.MeshStandardMaterial({ color: '#8c9599', roughness: 0.34, metalness: 0.65 });
-const darkMat = new THREE.MeshStandardMaterial({ color: '#2f3437', roughness: 0.3, metalness: 0.15 });
-const glassMat = new THREE.MeshStandardMaterial({ color: '#c9e2ea', roughness: 0.08, metalness: 0, transparent: true, opacity: 0.35, side: THREE.DoubleSide });
-
-function boxMesh(w, h, d, mat, x = 0, y = h / 2, z = 0) {
-  const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
-  mesh.position.set(x, y, z);
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
-  return mesh;
+const materialCache = new Map();
+function equipmentMaterial(key) {
+  if (materialCache.has(key)) return materialCache.get(key);
+  const spec = EQUIPMENT_MATERIALS[key] || EQUIPMENT_MATERIALS.cabinet;
+  const m = new THREE.MeshStandardMaterial({
+    color: spec.color,
+    roughness: spec.roughness ?? 0.6,
+    metalness: spec.metalness ?? 0,
+    transparent: (spec.opacity ?? 1) < 1,
+    opacity: spec.opacity ?? 1,
+    depthWrite: (spec.opacity ?? 1) >= 1,
+    side: THREE.DoubleSide,
+  });
+  m.name = key;
+  materialCache.set(key, m);
+  return m;
 }
 
-function proceduralEquipmentObject(project, level, item) {
+// plan (x, y vers le bas, z haut) → three (x, y haut, z), géométrie indexée
+function planMeshToGeometry(mesh) {
+  const pos = new Float32Array(mesh.triangles.length * 9);
+  let k = 0;
+  for (const tri of mesh.triangles) {
+    for (const idx of [tri[0], tri[2], tri[1]]) {
+      const p = mesh.positions[idx];
+      pos[k++] = p[0]; pos[k++] = p[2]; pos[k++] = p[1];
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.computeVertexNormals();
+  const count = pos.length / 3;
+  const index = count > 65535 ? new Uint32Array(count) : new Uint16Array(count);
+  for (let i = 0; i < count; i++) index[i] = i;
+  g.setIndex(new THREE.BufferAttribute(index, 1));
+  return g;
+}
+
+function ifcTypeOf(cat) {
+  if (cat.ifcClass === 'IFCSANITARYTERMINAL') return 'IfcSanitaryTerminal';
+  if (cat.ifcClass === 'IFCELECTRICAPPLIANCE') return 'IfcElectricAppliance';
+  return 'IfcFurniture';
+}
+
+function generatedEquipmentObject(project, level, item) {
   const cat = EQUIPMENT_TYPES[item.type] || EQUIPMENT_TYPES.baseCabinet;
   const group = new THREE.Group();
   group.name = cat.label;
   group.userData = {
     smeltKey: `equipment-${item.id}`,
-    ifcType: cat.ifcClass === 'IFCSANITARYTERMINAL' ? 'IfcSanitaryTerminal' : 'IfcFurniture',
+    ifcType: ifcTypeOf(cat),
     smeltSource: 'Smelt Studio',
     level: level.name,
+    equipmentType: item.type,
   };
-
-  const w = item.width, d = item.depth, h = item.height;
-  const z0 = item.zOffset || 0;
-
-  if (item.type === 'wc') {
-    group.add(boxMesh(w * 0.78, Math.min(0.38, h * 0.48), d * 0.22, ceramicMat, 0, z0 + Math.min(0.38, h * 0.48) / 2, -d * 0.34));
-    const bowl = new THREE.Mesh(new THREE.CylinderGeometry(w * 0.30, w * 0.35, Math.min(0.42, h * 0.55), 24), ceramicMat);
-    bowl.scale.z = 1.25;
-    bowl.position.set(0, z0 + Math.min(0.42, h * 0.55) / 2, d * 0.08);
-    bowl.castShadow = bowl.receiveShadow = true;
-    group.add(bowl);
-  } else if (item.type === 'basin') {
-    group.add(boxMesh(w * 0.82, h * 0.82, d * 0.72, ceramicMat, 0, z0 + h * 0.41, d * 0.08));
-    const bowl = new THREE.Mesh(new THREE.CylinderGeometry(w * 0.31, w * 0.34, 0.10, 24), ceramicMat);
-    bowl.scale.z = 0.75;
-    bowl.position.set(0, z0 + h - 0.05, -d * 0.03);
-    group.add(bowl);
-  } else if (item.type === 'shower') {
-    group.add(boxMesh(w, 0.06, d, ceramicMat, 0, z0 + 0.03, 0));
-    group.add(boxMesh(0.02, h, d, glassMat, -w / 2 + 0.01, z0 + h / 2, 0));
-    group.add(boxMesh(w, h, 0.02, glassMat, 0, z0 + h / 2, -d / 2 + 0.01));
-  } else if (item.type === 'bath') {
-    const rim = 0.07;
-    group.add(boxMesh(w, h, rim, ceramicMat, 0, z0 + h / 2, -d / 2 + rim / 2));
-    group.add(boxMesh(w, h, rim, ceramicMat, 0, z0 + h / 2, d / 2 - rim / 2));
-    group.add(boxMesh(rim, h, d - 2 * rim, ceramicMat, -w / 2 + rim / 2, z0 + h / 2, 0));
-    group.add(boxMesh(rim, h, d - 2 * rim, ceramicMat, w / 2 - rim / 2, z0 + h / 2, 0));
-    group.add(boxMesh(w - 2 * rim, 0.08, d - 2 * rim, ceramicMat, 0, z0 + 0.04, 0));
-  } else if (item.type === 'sink') {
-    group.add(boxMesh(w, h - 0.08, d, cabinetMat, 0, z0 + (h - 0.08) / 2, 0));
-    group.add(boxMesh(w, 0.08, d, metalMat, 0, z0 + h - 0.04, 0));
-    const bowl = new THREE.Mesh(new THREE.CylinderGeometry(w * 0.22, w * 0.25, 0.08, 24), metalMat);
-    bowl.scale.z = 0.8;
-    bowl.position.set(0, z0 + h + 0.005, 0);
-    group.add(bowl);
-  } else if (item.type === 'cooktop') {
-    group.add(boxMesh(w, h - 0.04, d, cabinetMat, 0, z0 + (h - 0.04) / 2, 0));
-    group.add(boxMesh(w, 0.04, d, darkMat, 0, z0 + h - 0.02, 0));
-    for (const x of [-w * 0.20, w * 0.20]) for (const z of [-d * 0.20, d * 0.20]) {
-      const plate = new THREE.Mesh(new THREE.CylinderGeometry(Math.min(w, d) * 0.11, Math.min(w, d) * 0.11, 0.008, 20), metalMat);
-      plate.position.set(x, z0 + h + 0.003, z);
-      group.add(plate);
-    }
-  } else if (item.type === 'worktop') {
-    group.add(boxMesh(w, 0.06, d, cabinetMat, 0, z0 + h - 0.03, 0));
-    group.add(boxMesh(0.06, h - 0.06, d * 0.75, cabinetMat, -w * 0.42, z0 + (h - 0.06) / 2, 0));
-    group.add(boxMesh(0.06, h - 0.06, d * 0.75, cabinetMat, w * 0.42, z0 + (h - 0.06) / 2, 0));
-  } else {
-    group.add(boxMesh(w, h, d, item.type === 'fridge' ? metalMat : cabinetMat, 0, z0 + h / 2, 0));
-    if (item.type === 'fridge') group.add(boxMesh(w + 0.006, 0.012, d + 0.006, darkMat, 0, z0 + h * 0.55, 0));
+  const parts = placeParts(item, equipmentParts({ ...item, model: cat.model }), floorZ(project, level, item));
+  for (const p of parts) {
+    const mesh = new THREE.Mesh(planMeshToGeometry(p.mesh), equipmentMaterial(p.mat));
+    mesh.name = cat.label;
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    mesh.userData = { smeltIfcType: ifcTypeOf(cat), ifcType: ifcTypeOf(cat), smeltSource: 'Smelt Studio', level: level.name, equipmentType: item.type };
+    group.add(mesh);
   }
-
-  group.position.set(item.x, floorZ(project, level, item), item.y);
-  group.rotation.y = -(item.rotation || 0) * Math.PI / 180;
   return group;
 }
 
-
 function equipmentObject(project, level, item) {
-  const asset = equipmentAssets.get(item.type);
+  const cat = EQUIPMENT_TYPES[item.type];
+  const asset = cat?.asset ? equipmentAssets.get(item.type) : null;
   if (asset) return assetEquipmentObject(project, level, item, asset);
-  return proceduralEquipmentObject(project, level, item);
+  return generatedEquipmentObject(project, level, item);
 }
 
 function addEquipment3D(root, project) {
@@ -809,7 +835,7 @@ async function exportIfcNow() {
   // préchargés et produit des IfcTriangulatedFaceSet.
   const text = smelt.exportIfc();
   download(`${safeName(project.name)}.ifc`, text, 'application/x-step');
-  toast('IFC exporté avec la géométrie GLB des équipements.');
+  toast('IFC exporté avec les équipements.');
 }
 
 function bindUi(editor) {

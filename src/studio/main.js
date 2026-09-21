@@ -6,6 +6,9 @@ import { Editor2D } from './editor2d.js';
 import { View3D, exportGlb } from './view3d.js';
 import { exportIfc } from './ifc-export.js';
 import * as B from './build.js';
+import { autoAlignPlan, applyAlignment, referenceWalls } from './plan-align.js';
+import { EQUIPMENT_TYPES, EQUIPMENT_GROUPS } from './equipment-catalog.js';
+import { equipmentIcon } from './equipment-plan.js';
 import * as IO from './io.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -181,6 +184,8 @@ function setViewMode(mode) {
 
 function setTool(tool, opts) {
   editor.setTool(tool, opts);
+  if (tool !== 'planAdjust' && ui.alignBanner && tool !== 'select') ui.alignBanner = null;
+  renderAlignBanner();
   if (tool === 'skylight' && ui.viewMode === 'plan') setViewMode('split');
   renderSteps();
 }
@@ -193,6 +198,7 @@ const STEPS = [
   { id: 'walls', title: 'Tracer les murs', tool: 'wall' },
   { id: 'openings', title: 'Poser portes et fenêtres', tool: 'opening' },
   { id: 'rooms', title: 'Nommer les pièces', tool: 'select' },
+  { id: 'equipment', title: 'Équiper les pièces', tool: 'equipment' },
   { id: 'bodies', title: 'Corps de bâtiment', tool: 'select' },
   { id: 'levels', title: 'Gérer les étages', tool: 'select' },
   { id: 'roof', title: 'Couvrir', tool: 'select' },
@@ -214,6 +220,7 @@ function stepDone(id) {
     case 'openings': return L.walls.some((w) => w.openings.length);
     case 'rooms': return L.rooms.length > 0 && L.rooms.every((r) => !/^Pièce \d+$/.test(r.name));
     case 'bodies': return p.bodies.length > 1;
+    case 'equipment': return (L.equipment || []).length > 0;
     case 'levels': return p.levels.length > 1;
     case 'roof': return p.bodies.some((b) => b.roof.enabled) && p.levels[p.levels.length - 1].walls.length > 0;
     case 'export': return ui.exported;
@@ -245,6 +252,9 @@ const openingIcon = (key) => {
   const o = OPENING_TYPES[key];
   const w = 20 + o.width * 22;
   const x0 = (100 - w) / 2;
+  if (o.operation === 'sectional') {
+    return `<svg viewBox="0 0 100 30" aria-hidden="true"><path d="M0 26H${x0}M${x0 + w} 26H100" stroke="#26323a" stroke-width="5"/><path d="M${x0} 24H${x0 + w}" stroke="#1f2a30" stroke-width="2.2"/><path d="M${x0} 22V4H${x0 + w}V22" fill="none" stroke="#1f2a30" stroke-dasharray="2 2"/></svg>`;
+  }
   if (o.kind === 'door') {
     return `<svg viewBox="0 0 100 30" aria-hidden="true"><path d="M0 26H${x0}M${x0 + w} 26H100" stroke="#26323a" stroke-width="5"/><path d="M${x0} 24V${24 - Math.min(22, w)}" stroke="#1f2a30" stroke-width="1.5"/><path d="M${x0} ${24 - Math.min(22, w)}A${Math.min(22, w)} ${Math.min(22, w)} 0 0 1 ${x0 + Math.min(22, w)} 24" fill="none" stroke="#1f2a30" stroke-dasharray="2 2"/></svg>`;
   }
@@ -265,24 +275,35 @@ function stepBody(id) {
         <p>Pas de plan ? Passez directement à l'étape 3 et tracez sur la grille.</p>`;
     case 'scale': {
       if (!plan) return '<p>Aucun plan sur ce niveau : pas besoin d\'échelle. Vous pouvez tracer directement.</p>';
+      const ref = alignReference();
+      const upper = editor.levelIndex > 0;
       const pdf = plan.ptPerPx
         ? `<label class="field"><span class="field-label">Échelle indiquée sur le PDF</span>
             <div class="inline"><span>1 /</span><input type="text" inputmode="numeric" placeholder="100" data-field="pdf-ratio" style="width:90px" /><button class="btn" data-act="apply-ratio">Appliquer</button></div></label>` : '';
-      const below = editor.levelBelow;
-      return `
-        ${plan.calibrated ? '<p class="ok">Échelle réglée. Vérifiez sur une deuxième cote avec l\'outil Mesurer.</p>' : '<p class="note">Indispensable avant de tracer : sans échelle, les murs n\'auront pas les bonnes dimensions.</p>'}
-        <p>Cliquez les deux extrémités d'une cote connue, puis saisissez sa longueur réelle. Plus la cote est longue, plus l'échelle est précise.</p>
-        <div class="row">
-          <button class="btn ${plan.calibrated ? '' : 'primary'}" data-act="tool-scale">${plan.calibrated ? "Refaire l'échelle" : 'Mesurer une cote'}</button>
-          <button class="btn" data-act="tool-measure">Vérifier une cote</button>
-        </div>
-        ${pdf}
-        ${below ? `<section style="margin-top:14px"><span class="field-label">Superposer à l'étage inférieur</span>
-          <p>Cliquez un repère sur ce plan, puis le même point sur l'étage du dessous (affiché en gris).</p>
-          <div class="row"><button class="btn primary" data-act="tool-align2">Caler sur 2 points</button><button class="btn" data-act="tool-calage">Caler par un point</button></div>
-          <div class="row"><button class="btn ghost" data-act="tool-move-plan">Déplacer à la main</button><button class="btn ghost" data-act="tool-scale">Refaire l'échelle</button></div>
-          <p>Deux points suffisent : l'échelle, la rotation et la position du plan sont recalculées d'un coup.</p></section>` : ''}
-        <div class="row" style="margin-top:6px"><button class="btn ghost" data-act="rotate-plan" data-deg="-90">Pivoter à gauche</button><button class="btn ghost" data-act="rotate-plan" data-deg="90">Pivoter à droite</button></div>`;
+      const scaleBlock = plan.scaleFrom
+        ? `<p class="ok">Échelle reprise de ${esc(plan.scaleFrom)}, le même dossier en général.</p>
+           <div class="row"><button class="btn ghost" data-act="tool-measure">Vérifier une cote</button><button class="btn ghost" data-act="tool-scale">Refaire l'échelle</button></div>`
+        : `${plan.calibrated ? '<p class="ok">Échelle réglée. Vérifiez sur une deuxième cote avec l\'outil Mesurer.</p>' : '<p class="note">Indispensable avant de tracer : sans échelle, les murs n\'auront pas les bonnes dimensions.</p>'}
+           <p>Cliquez les deux extrémités d'une cote connue, puis saisissez sa longueur réelle. Plus la cote est longue, plus l'échelle est précise.</p>
+           <div class="row">
+             <button class="btn ${plan.calibrated ? '' : 'primary'}" data-act="tool-scale">${plan.calibrated ? "Refaire l'échelle" : 'Mesurer une cote'}</button>
+             <button class="btn" data-act="tool-measure">Vérifier une cote</button>
+           </div>${pdf}`;
+      const alignBlock = upper && ref
+        ? `<section style="margin-top:14px">
+            <span class="field-label">Superposer ce plan</span>
+            <p>Smelt cherche la position qui fait tomber le plan sur ${esc(ref.label)}, les murs extérieurs se superposant d'un étage à l'autre.</p>
+            <div class="row">
+              <button class="btn ${plan.calibrated ? 'primary' : ''}" data-act="align-auto" ${plan.calibrated ? '' : 'disabled'}>Caler automatiquement</button>
+              <button class="btn" data-act="plan-adjust">Ajuster à la main</button>
+            </div>
+            <details class="more"><summary>Autres méthodes</summary>
+              <div class="row"><button class="btn ghost" data-act="tool-align2">Caler sur 2 points</button><button class="btn ghost" data-act="tool-calage">Caler par un point</button></div>
+              <div class="row"><button class="btn ghost" data-act="rotate-plan" data-deg="-90">Pivoter à gauche</button><button class="btn ghost" data-act="rotate-plan" data-deg="90">Pivoter à droite</button></div>
+            </details>
+          </section>`
+        : `<div class="row" style="margin-top:6px"><button class="btn ghost" data-act="plan-adjust">Déplacer ou tourner le plan</button></div>`;
+      return scaleBlock + alignBlock;
     }
     case 'walls': {
       if (plan && !plan.calibrated) {
@@ -321,6 +342,23 @@ function stepBody(id) {
         <p>Cliquez une pièce (ici ou sur le plan) pour la renommer.</p>
         <table class="table"><tbody>${list.map((r) => `<tr data-room="${r.room.id}" class="${sel === r.room.id ? 'sel' : ''}"><td>${esc(r.room.name)}</td><td>${fmt(r.area, 1)} m²</td></tr>`).join('')}</tbody>
         <tfoot><tr><td>Total ${esc(L.name)}</td><td>${fmt(total, 1)} m²</td></tr></tfoot></table>`;
+    }
+    case 'equipment': {
+      const count = (L.equipment || []).length;
+      return `
+        <p>Choisissez un équipement puis cliquez dans une pièce pour le poser.</p>
+        ${Object.entries(EQUIPMENT_GROUPS).map(([group, title]) => `
+          <span class="field-label">${esc(title)}</span>
+          <div class="grid2">${Object.entries(EQUIPMENT_TYPES).filter(([, x]) => x.group === group).map(([k, x]) => `
+            <button class="tile ${editor.equipmentType === k && editor.tool === 'equipment' ? 'on' : ''}" data-equipment-type="${k}">
+              ${equipmentIcon(k)}<span>${esc(x.label)}</span><small>${fmt(x.width)} × ${fmt(x.depth)} m</small>
+            </button>`).join('')}</div>`).join('')}
+        <ul class="keys">
+          <li>Clic : poser dans une pièce. <kbd>R</kbd> : pivoter de 90°.</li>
+          <li><kbd>V</kbd> : revenir à la sélection pour déplacer un élément.</li>
+          <li><kbd>Suppr</kbd> : supprimer l'élément sélectionné.</li>
+        </ul>
+        ${count ? `<p class="ok">${count} équipement${count > 1 ? 's' : ''} sur ce niveau.</p>` : ''}`;
     }
     case 'bodies': {
       const sel = editor.selection?.type === 'room' ? L.rooms.find((r) => r.id === editor.selection.id) : null;
@@ -510,6 +548,10 @@ function findSelection() {
     return opening ? { ...sel, wall, opening } : null;
   }
   if (sel.type === 'node') return L.nodes[sel.id] ? { ...sel, point: L.nodes[sel.id] } : null;
+  if (sel.type === 'equipment') {
+    const item = (L.equipment || []).find((x) => x.id === sel.id);
+    return item ? { ...sel, item } : null;
+  }
   if (sel.type === 'roofitem') {
     const body = store.project.bodies.find((b) => b.id === sel.bodyId);
     const item = body?.roofItems?.find((it) => it.id === sel.id);
@@ -615,13 +657,25 @@ function renderInspector() {
         ${numField('Position', 'op-offset', o.offset - o.width / 2)}
       </div>
       <p class="sub">Position : distance entre le début du mur et le bord de l'ouverture.</p>
-      ${o.kind === 'door' ? '<div class="row"><button class="btn" data-act="op-flip-side">Inverser le côté</button><button class="btn" data-act="op-flip-hinge">Inverser le sens</button></div>' : ''}
+      ${o.kind === 'door' && OPENING_TYPES[o.type]?.operation !== 'sectional' ? '<div class="row"><button class="btn" data-act="op-flip-side">Inverser le côté</button><button class="btn" data-act="op-flip-hinge">Inverser le sens</button></div>' : ''}
+      ${OPENING_TYPES[o.type]?.operation === 'sectional' ? '<div class="row"><button class="btn" data-act="op-flip-side">Relevage de l\'autre côté</button></div>' : ''}
       <section><button class="btn danger block" data-act="delete-selection">Supprimer <kbd>Suppr</kbd></button></section>`;
   } else if (s.type === 'node') {
     el.innerHTML = `
       <h2>Angle</h2><p class="sub">Point de jonction des murs</p>
       <div class="grid2">${numField('X', 'node-x', s.point[0])}${numField('Y', 'node-y', -s.point[1])}</div>
       <section><button class="btn danger block" data-act="delete-selection">Supprimer l'angle et ses murs</button></section>`;
+  } else if (s.type === 'equipment') {
+    const it = s.item;
+    const cat = EQUIPMENT_TYPES[it.type] || { label: 'Équipement' };
+    const room = M.roomAt(store.project, L, [it.x, it.y]);
+    el.innerHTML = `
+      <h2>${esc(cat.label)}</h2><p class="sub">${room?.room ? `Dans : ${esc(room.room.name)}` : 'Équipement'}</p>
+      <div class="grid2">${numField('Largeur', 'eq-width', it.width)}${numField('Profondeur', 'eq-depth', it.depth)}</div>
+      <div class="grid2">${numField('Hauteur', 'eq-height', it.height)}${numField('Hauteur de pose', 'eq-zOffset', it.zOffset || 0)}</div>
+      ${numField('Rotation', 'eq-rotation', it.rotation || 0, '°')}
+      <div class="row"><button class="btn" data-act="eq-rotate" data-deg="-90">Pivoter à gauche</button><button class="btn" data-act="eq-rotate" data-deg="90">Pivoter à droite</button></div>
+      <section><button class="btn danger block" data-act="delete-selection">Supprimer <kbd>Suppr</kbd></button></section>`;
   } else if (s.type === 'roofitem' && ROOF_OPENINGS[s.item.type]?.kind === 'dormer') {
     const it = s.item;
     const preset = ROOF_OPENINGS[it.type];
@@ -671,6 +725,19 @@ function applyProp(prop, raw) {
   const levelId = L.id;
   const lv = (pr) => pr.levels.find((l) => l.id === levelId);
   const needNum = !['wall-type', 'room-name', 'room-body'].includes(prop);
+  if (prop.startsWith('eq-')) {
+    const key = prop.slice(3);
+    if (!Number.isFinite(value) || (['width', 'depth', 'height'].includes(key) && value < 0.05) || (key === 'zOffset' && value < 0)) {
+      toast('Valeur invalide.', 'warn'); renderInspector(); return;
+    }
+    store.commit('Modifier un équipement', (pr) => {
+      const it = (pr.levels.find((l) => l.id === L.id).equipment || []).find((x) => x.id === s.id);
+      if (!it) return false;
+      it[key] = key === 'rotation' ? ((value % 360) + 360) % 360 : value;
+      return true;
+    });
+    return;
+  }
   if (prop.startsWith('sky-')) {
     if (!(value >= 0) || (prop !== 'sky-setback' && prop !== 'sky-winsill' && !(value > 0))) { toast('Valeur invalide.', 'warn'); renderInspector(); return; }
     store.commit('Modifier une fenêtre de toit', (pr) => {
@@ -766,7 +833,8 @@ async function duplicateLevel() {
       <label class="check"><input type="checkbox" name="walls" checked /> Murs extérieurs et porteurs</label>
       <label class="check"><input type="checkbox" name="partitions" checked /> Cloisons</label>
       <label class="check"><input type="checkbox" name="openings" checked /> Portes et fenêtres</label>
-      <label class="check"><input type="checkbox" name="rooms" checked /> Noms des pièces</label>`,
+      <label class="check"><input type="checkbox" name="rooms" checked /> Noms des pièces</label>
+      <label class="check"><input type="checkbox" name="equipment" /> Équipements (cuisine, sanitaires, mobilier)</label>`,
     actions: [
       { label: 'Annuler', id: null },
       {
@@ -786,7 +854,9 @@ async function duplicateLevel() {
     newId = copy.id;
   });
   switchLevel(newId);
-  toast(`Niveau ${editor.level.name} créé.`);
+  ui.step = 'plan';
+  renderSteps();
+  toast(`Niveau ${editor.level.name} créé. Importez son plan : il sera mis à l'échelle et calé sur ces murs automatiquement.`);
 }
 
 function addLevel() {
@@ -825,20 +895,27 @@ async function setPlanForLevel(levelId, image, meta = {}) {
   store.project.assets[assetId] = image.dataUrl;
   store.commit('Importer un plan', (pr) => {
     const L = pr.levels.find((l) => l.id === levelId);
-    const below = pr.levels[pr.levels.findIndex((l) => l.id === levelId) - 1];
+    const idx = pr.levels.findIndex((l) => l.id === levelId);
     const prev = L.plan;
-    // conserve la position/échelle d'un plan précédent ou de l'étage inférieur (souvent même échelle)
-    const ref = prev || below?.plan || null;
+    // Plan calé le plus proche en dessous : c'est presque toujours le même dossier,
+    // donc la même échelle. On la reprend d'office ; « Refaire l'échelle » reste possible.
+    let source = null;
+    for (let i = idx - 1; i >= 0 && !source; i--) if (pr.levels[i].plan?.calibrated) source = pr.levels[i];
+    const ref = prev?.calibrated ? prev : source?.plan || null;
+    // un PDF rendu à une autre densité (autre fichier) garde la même échelle papier
+    let scale = ref?.calibrated ? ref.scale : 0.01;
+    if (ref?.calibrated && ref.ptPerPx && meta.ptPerPx) scale = ref.scale * (meta.ptPerPx / ref.ptPerPx);
     L.plan = {
       assetId,
       width: image.width,
       height: image.height,
       x: ref ? ref.x : 0,
       y: ref ? ref.y : 0,
-      scale: ref?.calibrated && ref.ptPerPx === meta.ptPerPx && ref.width === image.width ? ref.scale : 0.01,
-      rotation: 0,
+      scale,
+      rotation: ref?.rotation || 0,
       opacity: 0.55,
-      calibrated: !!(ref?.calibrated && ref.ptPerPx === meta.ptPerPx && ref.width === image.width && meta.ptPerPx),
+      calibrated: !!ref?.calibrated,
+      scaleFrom: !prev?.calibrated && source ? source.name : null,
       ptPerPx: meta.ptPerPx || null,
       source: meta.source || '',
     };
@@ -895,10 +972,68 @@ async function importPlan(file) {
     editor.needsFit = true;
     editor.fit();
     goStep('scale');
+    if (editor.level.plan?.calibrated && alignReference()) await runAutoAlign();
   } catch (err) {
     console.error(err);
     toast(`Import impossible : ${err.message}`, 'warn');
   }
+}
+
+// ─── Superposition des plans d'étage ─────────────────────────────────────────
+
+// Murs sur lesquels caler le plan : ceux de l'étage lui-même s'il a été dupliqué,
+// sinon ceux de l'étage du dessous. Les murs extérieurs se superposent d'un étage à l'autre.
+function alignReference() {
+  const L = editor.level;
+  if (L.walls.length >= 3) return { level: L, label: `les murs de ${L.name}` };
+  const below = editor.levelBelow;
+  if (below && below.walls.length >= 3) return { level: below, label: `les murs de ${below.name}` };
+  return null;
+}
+
+async function runAutoAlign() {
+  const L = editor.level;
+  const ref = alignReference();
+  if (!L.plan || !ref) { toast("Aucun mur de référence : tracez d'abord l'étage du dessous.", 'warn'); return; }
+  const img = await IO.loadImage(store.project.assets[L.plan.assetId]);
+  const done = busy('Superposition du plan…');
+  let result = null;
+  try {
+    await new Promise((r) => setTimeout(r, 30)); // laisse le temps d'afficher le message
+    const below = editor.levelBelow;
+    result = autoAlignPlan(L.plan, img, referenceWalls(ref.level), { preferRotation: below?.plan?.rotation ?? L.plan.rotation ?? 0 });
+  } finally { done(); }
+  if (!result) { toast('Superposition impossible sur ce plan.', 'warn'); return; }
+  const levelId = L.id;
+  store.commit('Superposer le plan', (pr) => {
+    const plan = pr.levels.find((l) => l.id === levelId).plan;
+    applyAlignment(plan, result);
+  });
+  ui.alignBanner = { levelId, confidence: result.confidence, label: ref.label };
+  renderAlignBanner();
+}
+
+function renderAlignBanner() {
+  const el = $('#alignBanner');
+  const b = ui.alignBanner;
+  if (!b || b.levelId !== editor.levelId || !editor.level.plan) { el.hidden = true; return; }
+  const sure = b.confidence >= 0.45;
+  const adjusting = editor.tool === 'planAdjust';
+  el.hidden = false;
+  el.innerHTML = `
+    <div>
+      <b>${adjusting ? 'Ajustez le plan' : sure ? 'Plan superposé' : 'Superposition incertaine'}</b>
+      <span>${adjusting
+        ? "Glissez l'image pour la déplacer, la poignée ronde pour la tourner. Flèches : 1 cm, Maj + flèches : 10 cm."
+        : sure ? `Calé sur ${esc(b.label)}. Vérifiez que les murs tombent sur ceux du plan.`
+          : `Le plan ne ressemble pas assez à ${esc(b.label)}. Ajustez-le à la main.`}</span>
+    </div>
+    <div class="row">
+      ${adjusting ? `<label class="check"><input type="checkbox" data-field="plan-scale-lock" ${ui.scaleUnlocked ? '' : 'checked'} /> Échelle verrouillée</label>` : ''}
+      <button class="btn ghost" data-act="align-auto">Recaler</button>
+      ${adjusting ? '' : `<button class="btn ${sure ? '' : 'primary'}" data-act="align-adjust">Ajuster à la main</button>`}
+      <button class="btn ${sure || adjusting ? 'primary' : ''}" data-act="align-ok">${adjusting ? 'Terminé' : "C'est bon"}</button>
+    </div>`;
 }
 
 // ─── Export et projet ─────────────────────────────────────────────────────────
@@ -977,6 +1112,7 @@ async function newProjectFlow() {
 
 function renderAll() {
   const p = store.project;
+  renderAlignBanner();
   if (document.activeElement !== $('#projectName')) $('#projectName').value = p.name;
   renderLevelTabs();
   renderBodyBar();
@@ -1020,6 +1156,7 @@ document.addEventListener('click', (e) => {
   if (d.opening) { editor.openingType = d.opening; setTool('opening'); return; }
   if (d.room) { setTool('select'); editor.select({ type: 'room', id: d.room }); renderSteps(); return; }
   if (d.roomName) { applyProp('room-name', d.roomName); return; }
+  if (d.equipmentType) { editor.equipmentType = d.equipmentType; ui.step = 'equipment'; setTool('equipment'); return; }
   if (d.roofopening) { editor.roofOpeningType = d.roofopening; setTool('skylight'); return; }
   if (d.roof) {
     editBody(roofBody().id, 'Type de toiture', (b) => {
@@ -1048,6 +1185,10 @@ document.addEventListener('click', (e) => {
     'tool-calage': () => setTool('calage'),
     'tool-align2': () => setTool('align2'),
     'tool-skylight': () => setTool('skylight'),
+    'align-auto': () => runAutoAlign(),
+    'align-adjust': () => { ui.alignBanner = ui.alignBanner || { levelId: editor.levelId, confidence: 1, label: 'le plan' }; setTool('planAdjust'); renderAlignBanner(); },
+    'align-ok': () => { ui.alignBanner = null; setTool('select'); renderAlignBanner(); toast('Plan en place. Vous pouvez tracer ou modifier les murs de cet étage.'); goStep('walls'); },
+    'plan-adjust': () => { ui.alignBanner = { levelId: editor.levelId, confidence: 1, label: 'le plan' }; setTool('planAdjust'); renderAlignBanner(); },
     'tool-move-plan': () => setTool('movePlan'),
     'rotate-plan': () => {
       if (!L.plan) return;
@@ -1112,6 +1253,7 @@ document.addEventListener('click', (e) => {
         pr.activeBodyId = fallback;
       });
     },
+    'eq-rotate': () => { if (editor.selection?.type === 'equipment') editor.rotateEquipment(editor.selection.id, +d.deg); },
     'add-level': addLevel,
     'dup-level': duplicateLevel,
     'del-level': deleteLevel,
@@ -1185,6 +1327,11 @@ document.addEventListener('change', (e) => {
     case 'roof-overhang':
       if (!(v >= 0 && v <= 2)) return bad();
       editBody(roofBody().id, 'Débord de toiture', (b) => { b.roof.overhang = v; });
+      break;
+    case 'plan-scale-lock':
+      ui.scaleUnlocked = !t.checked;
+      editor.planScaleUnlocked = ui.scaleUnlocked;
+      editor.invalidate();
       break;
     case 'roof-flip':
       editBody(roofBody().id, 'Sens du faîtage', (b) => { b.roof.ridgeFlip = t.checked; });

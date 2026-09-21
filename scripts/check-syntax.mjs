@@ -70,17 +70,16 @@ if ((ifc.match(/'window', el\.body, IFC_GLASS_TRANSPARENCY/g) || []).length < 2)
 
 
 const equipmentIfcFailures = [];
-if (!ifc.includes("equipmentAssetFaceSets")) {
-  equipmentIfcFailures.push('ifc-export.js doit convertir les meshes GLB en géométrie IFC.');
+// Les équipements sont générés par le code (equipment-models.js) : l'export IFC
+// ne doit dépendre d'aucun fichier chargé dans le navigateur.
+if (!ifc.includes("from './equipment-models.js'")) {
+  equipmentIfcFailures.push('ifc-export.js doit générer la géométrie des équipements via equipment-models.js.');
 }
 if (!ifc.includes('IFCTRIANGULATEDFACESET')) {
-  equipmentIfcFailures.push('ifc-export.js doit utiliser IFCTRIANGULATEDFACESET pour les équipements GLB.');
+  equipmentIfcFailures.push('ifc-export.js doit utiliser IFCTRIANGULATEDFACESET pour les équipements.');
 }
-if (!ifc.includes("shape(geometryItems, asset ? 'Tessellation' : 'SweptSolid')")) {
-  equipmentIfcFailures.push("Les équipements GLB doivent utiliser une représentation IFC 'Tessellation'.");
-}
-if (!ifc.includes("spec.exactAsset")) {
-  equipmentIfcFailures.push('Un équipement doté d’un GLB ne doit jamais retomber silencieusement sur un cube.');
+if (!ifc.includes("shape(geometryItems, 'Tessellation')")) {
+  equipmentIfcFailures.push("Les équipements doivent utiliser une représentation IFC 'Tessellation'.");
 }
 if (!ifc.includes("'Smelt_Equipment'")) {
   equipmentIfcFailures.push("ifc-export.js doit conserver le Pset 'Smelt_Equipment'.");
@@ -88,26 +87,25 @@ if (!ifc.includes("'Smelt_Equipment'")) {
 if (!ifc.includes("from './equipment-catalog.js'")) {
   equipmentIfcFailures.push("ifc-export.js doit utiliser le catalogue équipements partagé.");
 }
-const equipmentPlugin = await readFile('src/studio/equipment-plugin.js', 'utf8');
-const equipmentCatalog = await readFile('src/studio/equipment-catalog.js', 'utf8');
-if (!equipmentPlugin.includes("from './equipment-catalog.js'")) {
-  equipmentIfcFailures.push("equipment-plugin.js doit utiliser le catalogue équipements partagé.");
+if (/IFCSURFACESTYLESHADING\(\$\{col\}\)/.test(ifc)) {
+  equipmentIfcFailures.push('IfcSurfaceStyleShading demande deux attributs en IFC4 (couleur, transparence).');
 }
-for (const asset of [
-  'wc.glb',
-  'lavabo.glb',
-  'douche.glb',
-  'evier.glb',
-  'baignoire.glb',
-  'meuble_bas_60.glb',
-  'meuble_haut_60.glb',
-  'frigo_60.glb',
-  'plaque_60.glb',
-  'plan_travail_120.glb',
-]) {
-  if (!equipmentCatalog.includes(`/assets/equipment/${asset}`)) {
-    equipmentIfcFailures.push(`Asset non câblé dans equipment-catalog.js : ${asset}`);
-  }
+// Les équipements sont natifs : construits par build.js, édités par l'éditeur, étape déclarée dans main.js.
+const studioBuild = await readFile('src/studio/build.js', 'utf8');
+const studioEditor = await readFile('src/studio/editor2d.js', 'utf8');
+const studioMain = await readFile('src/studio/main.js', 'utf8');
+const studioHtml = await readFile('public/studio.html', 'utf8');
+if (!studioBuild.includes("from './equipment-models.js'")) {
+  equipmentIfcFailures.push('build.js doit construire les équipements (equipment-models.js).');
+}
+if (!studioEditor.includes('equipmentClick')) {
+  equipmentIfcFailures.push("L'éditeur doit porter l'outil de pose des équipements.");
+}
+if (!studioMain.includes("id: 'equipment'")) {
+  equipmentIfcFailures.push("L'étape « Équiper les pièces » doit être déclarée dans le parcours (main.js).");
+}
+if (studioHtml.includes('equipment-plugin.js')) {
+  equipmentIfcFailures.push("studio.html ne doit plus charger equipment-plugin.js (remplacé par l'intégration native).");
 }
 
 if (equipmentIfcFailures.length) {
@@ -115,7 +113,7 @@ if (equipmentIfcFailures.length) {
   console.error('\\nEquipment IFC regression:');
   for (const message of equipmentIfcFailures) console.error(`- ${message}`);
 } else {
-  console.log('Equipment IFC exact-geometry guard: OK.');
+  console.log('Equipment generated-geometry guard: OK.');
 }
 
 if (glassFailures.length) {
