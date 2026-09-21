@@ -2,6 +2,8 @@
 // Coordonnées : plan (x, y vers le bas) + z vertical, en mètres.
 import * as G from './geometry.js';
 import { WALL_TYPES, OPENING_TYPES, ROOF_OPENINGS } from './catalog.js';
+import { EQUIPMENT_TYPES } from './equipment-catalog.js';
+import { equipmentParts, placeEquipment } from './equipment-models.js';
 import { levelElevation, wallHeight, levelFaces, bodyById, bodyHeight, bodyOutlines, bodyTopLevelIndex } from './model.js';
 
 export { triangulate } from './geometry.js';
@@ -110,6 +112,16 @@ function openingMesh(op, center, u, wallThickness, zBase) {
     orientedBox(center, u, w, depth, z1 - f, z1),
   ];
   if (op.kind === 'window') frame.push(orientedBox(center, u, w, depth, z0, z0 + f));
+  if (OPENING_TYPES[op.type]?.operation === 'sectional') {
+    // porte de garage sectionnelle : panneaux horizontaux séparés par un joint
+    const sections = Math.max(3, Math.round((h - f) / 0.5));
+    const sh = (h - f) / sections;
+    const panels = [];
+    for (let i = 0; i < sections; i++) {
+      panels.push(orientedBox(center, u, w - 2 * f, 0.045, z0 + i * sh + 0.006, z0 + (i + 1) * sh - 0.006));
+    }
+    return { frame: mergeMeshes(frame), panel: mergeMeshes(panels) };
+  }
   const panel = op.kind === 'window'
     ? orientedBox(center, u, w - 2 * f, 0.02, z0 + f, z1 - f)
     : orientedBox(center, u, w - 2 * f, 0.04, z0, z1 - f);
@@ -439,6 +451,20 @@ export function buildElements(project, options = {}) {
           key: `op-${op.id}`,
         });
       }
+    }
+
+    // Équipements : posés sur le sol du corps de bâtiment de la pièce qui les contient
+    for (const item of level.equipment || []) {
+      const cat = EQUIPMENT_TYPES[item.type];
+      const roomInfo = rooms.find((r) => r.room && G.pointInPolygon([item.x, item.y], r.net)) || null;
+      const body = roomInfo ? bodyOfRoom(roomInfo.room) : bodyById(project, mainId);
+      const parts = placeEquipment(item, equipmentParts({ ...item, model: cat?.model }), floorOf(body));
+      elements.push({
+        kind: 'equipment', level, levelIndex: li, body, item, category: cat, room: roomInfo?.room || null,
+        name: cat?.label || 'Équipement',
+        parts,
+        key: `equipment-${item.id}`,
+      });
     }
 
     // Plafonds : sous la toiture, pour ne pas voir les rampants depuis l'intérieur

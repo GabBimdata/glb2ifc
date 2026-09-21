@@ -23,6 +23,7 @@ export const WALL_TYPES = {
 export const OPENING_TYPES = {
   door: { label: 'Porte', kind: 'door', width: 0.9, height: 2.15, sill: 0 },
   doorDouble: { label: 'Porte double', kind: 'door', width: 1.4, height: 2.15, sill: 0 },
+  garageDoor: { label: 'Porte de garage', kind: 'door', operation: 'sectional', width: 2.4, height: 2.0, sill: 0 },
   window: { label: 'Fenêtre', kind: 'window', width: 1.2, height: 1.25, sill: 0.95 },
   windowSmall: { label: 'Petite fenêtre', kind: 'window', width: 0.6, height: 0.75, sill: 1.35 },
   frenchWindow: { label: 'Porte-fenêtre', kind: 'window', width: 1.4, height: 2.15, sill: 0 },

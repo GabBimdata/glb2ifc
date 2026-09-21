@@ -193,6 +193,21 @@ function parseSmeltCoordinateOrigin(extras = {}) {
   return { x, y, z };
 }
 
+// Types qu'un émetteur (Smelt Studio notamment) peut imposer via extras.smeltIfcType.
+// Ils court-circuitent la classification heuristique, qui ne sert qu'aux GLB anonymes.
+const TRUSTED_IFC_TYPES = {
+  IFCSPACE: 'space',
+  IFCWALL: 'wall',
+  IFCSLAB: 'slab',
+  IFCROOF: 'roof',
+  IFCDOOR: 'door',
+  IFCWINDOW: 'window',
+  IFCSANITARYTERMINAL: 'sanitary',
+  IFCFURNITURE: 'furniture',
+  IFCELECTRICAPPLIANCE: 'appliance',
+  IFCCOVERING: 'covering',
+};
+
 function manualIfcTypeFromExtras(extras, nodeName = '') {
   const raw = String(extras?.smeltIfcType || extras?.ifcType || extras?.IFCType || '').toUpperCase();
   if (raw === 'IFCSPACE') return 'IFCSPACE';
@@ -200,7 +215,17 @@ function manualIfcTypeFromExtras(extras, nodeName = '') {
   if (/^IFCSPACE[_\s#-]/i.test(String(nodeName || ''))) return 'IFCSPACE';
   if (/^Generated IFC Spaces/i.test(String(nodeName || ''))) return '';
 
+  // Un type explicite n'est pris au pied de la lettre que s'il est signé par Smelt Studio,
+  // pour ne pas faire confiance à des métadonnées arbitraires venues d'autres outils.
+  if (extras?.smeltSource === 'Smelt Studio' && TRUSTED_IFC_TYPES[raw]) return raw;
+
   return '';
+}
+
+function trustedClassification(mesh) {
+  const raw = String(mesh?.manualIfcType || '').toUpperCase();
+  if (!raw || raw === 'IFCSPACE') return null;
+  return TRUSTED_IFC_TYPES[raw] || null;
 }
 
 function extractMaterialInfo(primitive) {
@@ -1776,6 +1801,7 @@ function refineRoofs(meshes, storeys) {
       s.areaXZ >= 2.0 &&
       f.horizontalRatio >= 0.35;
 
+    if (mesh.classificationLocked) continue;
     if (explicitRoof || slopedHighRoof || flatHighRoof) {
       if (mesh.classification !== 'roof') stats.promoted += 1;
       mesh.classification = 'roof';
@@ -1793,8 +1819,10 @@ function refineRoofs(meshes, storeys) {
 
 function ifcGuid() {
   const chars = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_$';
-  let s = '';
-  for (let i = 0; i < 22; i++) s += chars[Math.floor(Math.random() * 64)];
+  // Un GlobalId code 128 bits sur 22 caractères : le premier ne porte que 2 bits,
+  // il doit donc être 0, 1, 2 ou 3 (sinon l'IFC est rejeté par les validateurs).
+  let s = chars[Math.floor(Math.random() * 4)];
+  for (let i = 1; i < 22; i++) s += chars[Math.floor(Math.random() * 64)];
   return s;
 }
 
@@ -1805,6 +1833,10 @@ const IFC_TYPE_MAP = {
   column: { class: 'IFCCOLUMN',                predefined: '.COLUMN.'     },
   stair:  { class: 'IFCSTAIR',                 predefined: '.NOTDEFINED.' },
   roof:   { class: 'IFCROOF',                  predefined: '.NOTDEFINED.' },
+  sanitary:  { class: 'IFCSANITARYTERMINAL',   predefined: '.NOTDEFINED.' },
+  furniture: { class: 'IFCFURNITURE',          predefined: '.NOTDEFINED.' },
+  appliance: { class: 'IFCELECTRICAPPLIANCE',  predefined: '.NOTDEFINED.' },
+  covering:  { class: 'IFCCOVERING',           predefined: '.CEILING.' },
   proxy:  { class: 'IFCBUILDINGELEMENTPROXY',  predefined: '.NOTDEFINED.' }
   // door & window have different attribute lists, handled inline below
 };
@@ -1826,6 +1858,10 @@ const DEFAULT_CLASS_COLORS = {
   door:   { r: 0.45, g: 0.25, b: 0.12 }, // wood/brown
   window: { r: 0.35, g: 0.62, b: 0.88 }, // glass blue
   space:  { r: 0.45, g: 0.72, b: 1.00 }, // editable/generated spaces
+  sanitary:  { r: 0.95, g: 0.95, b: 0.93 }, // céramique
+  furniture: { r: 0.69, g: 0.54, b: 0.38 }, // bois
+  appliance: { r: 0.93, g: 0.94, b: 0.94 }, // électroménager
+  covering:  { r: 0.95, g: 0.94, b: 0.91 }, // plafond
   proxy:  { r: 0.68, g: 0.72, b: 0.78 }  // neutral blue-grey fallback
 };
 
@@ -2097,6 +2133,10 @@ function generateIFC(meshes, storeys, originalFilename, scaleInfo = null) {
     space:  { name: 'A-SPACE',  description: 'Approximate spaces' },
     beam:   { name: 'S-BEAM',   description: 'Structural beams' },
     column: { name: 'S-COLUMN', description: 'Structural columns' },
+    sanitary:  { name: 'P-FIXT',   description: 'Sanitary fixtures' },
+    furniture: { name: 'I-FURN',   description: 'Furniture' },
+    appliance: { name: 'I-EQPM',   description: 'Appliances' },
+    covering:  { name: 'A-CLNG',   description: 'Ceilings' },
     proxy:  { name: 'Z-PROXY',  description: 'Unclassified proxy geometry' }
   };
 
@@ -3955,6 +3995,10 @@ function generateIFC(meshes, storeys, originalFilename, scaleInfo = null) {
   // Build elements grouped by storey
   const elementsByStorey = Array.from({ length: storeys.length }, () => []);
   const stats = {
+    sanitary: 0,
+    furniture: 0,
+    appliance: 0,
+    covering: 0,
     wall: 0,
     slab: 0,
     beam: 0,
@@ -4001,7 +4045,11 @@ function generateIFC(meshes, storeys, originalFilename, scaleInfo = null) {
     door: 'Door',
     window: 'Window',
     proxy: 'Proxy',
-    space: 'Space'
+    space: 'Space',
+    sanitary: 'Sanitary',
+    furniture: 'Furniture',
+    appliance: 'Appliance',
+    covering: 'Ceiling'
   };
 
   function generatedElementName(mesh) {
@@ -4194,8 +4242,11 @@ function generateIFC(meshes, storeys, originalFilename, scaleInfo = null) {
       const width  = Math.max(maxX - minX, maxZ - minZ).toFixed(4);
       lines.push(`${elemId}=IFCWINDOW('${ifcGuid()}',${ownerHistory},'${safeName}',$,$,${placement},${productShape},$,${height},${width},.WINDOW.,.NOTDEFINED.,$);`);
     } else {
-      const typeInfo = IFC_TYPE_MAP[mesh.classification];
-      lines.push(`${elemId}=${typeInfo.class}('${ifcGuid()}',${ownerHistory},'${safeName}',$,$,${placement},${productShape},$,${typeInfo.predefined});`);
+      const typeInfo = IFC_TYPE_MAP[mesh.classification] || IFC_TYPE_MAP.proxy;
+      // le sous-type fourni par l'émetteur (ex. TOILETPAN, REFRIGERATOR) est conservé
+      const explicitPredefined = mesh.classificationLocked && /^[A-Z_]+$/.test(String(mesh.smeltPredefinedType || ''))
+        ? `.${mesh.smeltPredefinedType}.` : null;
+      lines.push(`${elemId}=${typeInfo.class}('${ifcGuid()}',${ownerHistory},'${safeName}',$,$,${placement},${productShape},$,${explicitPredefined || typeInfo.predefined});`);
 
       if (mesh.classification === 'wall') {
         addWallCommonPset(elemId, mesh);
@@ -5347,9 +5398,18 @@ app.post('/api/convert', upload.single('glb'), async (req, res) => {
       console.log(`  Input scale normalization: none (${scaleInfo.reason})`);
     }
 
+    let trustedCount = 0;
     for (const mesh of meshes) {
-      mesh.classification = isManualSpaceMesh(mesh) ? 'space' : classifyMeshFirstPass(mesh);
+      const trusted = isManualSpaceMesh(mesh) ? null : trustedClassification(mesh);
+      if (trusted) {
+        mesh.classification = trusted;
+        mesh.classificationLocked = true;
+        trustedCount++;
+      } else {
+        mesh.classification = isManualSpaceMesh(mesh) ? 'space' : classifyMeshFirstPass(mesh);
+      }
     }
+    if (trustedCount > 0) console.log(`  Types IFC fournis par Smelt Studio : ${trustedCount} maillage(s), classification heuristique ignorée`);
 
     const physicalMeshes = meshes.filter(mesh => !isManualSpaceMesh(mesh));
 
