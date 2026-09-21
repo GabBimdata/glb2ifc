@@ -1,10 +1,10 @@
 // Smelt Studio — transforme le modèle sémantique en éléments constructifs avec géométrie.
 // Coordonnées : plan (x, y vers le bas) + z vertical, en mètres.
 import * as G from './geometry.js';
-import { WALL_TYPES, OPENING_TYPES, ROOF_OPENINGS } from './catalog.js';
+import { WALL_TYPES, OPENING_TYPES, ROOF_OPENINGS, BALCONY } from './catalog.js';
 import { EQUIPMENT_TYPES } from './equipment-catalog.js';
 import { equipmentParts, placeEquipment } from './equipment-models.js';
-import { levelElevation, wallHeight, levelFaces, bodyById, bodyHeight, bodyOutlines, bodyTopLevelIndex } from './model.js';
+import { levelElevation, wallHeight, levelFaces, bodyById, bodyHeight, bodyOutlines, bodyTopLevelIndex, isAttic, roofBaseHeight } from './model.js';
 
 export { triangulate } from './geometry.js';
 const triangulate = G.triangulate;
@@ -74,6 +74,96 @@ export function extrude(poly, z0, z1) {
     else triangles.push([base, base + 2, base + 1], [base, base + 3, base + 2]);
   }
   return { positions, triangles };
+}
+
+// Prisme vertical percé (terrasse en anneau autour d'un étage plus petit)
+export function extrudeWithHoles(outer, holes, z0, z1) {
+  if (!holes?.length) return extrude(outer, z0, z1);
+  const merged = G.bridgeHoles(outer, holes);
+  const tri = G.triangulate(merged);
+  const positions = [];
+  const triangles = [];
+  const n = merged.length;
+  for (const p of merged) positions.push([p[0], p[1], z0]);
+  for (const p of merged) positions.push([p[0], p[1], z1]);
+  for (const [a, b, c] of tri) triangles.push([a, c, b], [n + a, n + b, n + c]);
+  for (const loop of [outer, ...holes]) {
+    for (let i = 0; i < loop.length; i++) {
+      const p = loop[i], q = loop[(i + 1) % loop.length];
+      const k = positions.length;
+      positions.push([p[0], p[1], z0], [q[0], q[1], z0], [q[0], q[1], z1], [p[0], p[1], z1]);
+      triangles.push([k, k + 1, k + 2], [k, k + 2, k + 3]);
+    }
+  }
+  return { positions, triangles };
+}
+
+/**
+ * Garde-corps le long du segment p → q, posé à zBase, décalé vers `inward`.
+ * Renvoie des parties { mesh, key } : key = clé de couleur (railing, window, exterior).
+ */
+export function railingParts(p, q, zBase, height, type, inward) {
+  const L = G.dist(p, q);
+  if (L < 0.05) return [];
+  const u = G.norm(G.sub(q, p));
+  const parts = [];
+  const push = (key, mesh) => parts.push({ key, mesh });
+  const inset = type === 'wall' ? 0.075 : 0.05;
+  const mid = G.add(G.mul(G.add(p, q), 0.5), G.mul(inward, inset));
+  if (type === 'wall') {
+    push('exterior', orientedBox(mid, u, L, 0.15, zBase, zBase + height));
+    push('railing', orientedBox(mid, u, L, 0.17, zBase + height, zBase + height + 0.03));
+    return parts;
+  }
+  push('railing', orientedBox(mid, u, L, 0.05, zBase + height - 0.05, zBase + height)); // main courante
+  const posts = Math.max(2, Math.ceil(L / 1.5) + 1);
+  for (let i = 0; i < posts; i++) {
+    const t = -L / 2 + 0.03 + ((L - 0.06) * i) / (posts - 1);
+    push('railing', orientedBox(mid, u, 0.04, 0.04, zBase, zBase + height - 0.05, t));
+  }
+  if (type === 'glass') {
+    push('window', orientedBox(mid, u, L - 0.08, 0.012, zBase + 0.06, zBase + height - 0.08));
+  } else {
+    push('railing', orientedBox(mid, u, L, 0.04, zBase + 0.08, zBase + 0.12)); // lisse basse
+    const bars = Math.max(1, Math.ceil(L / 0.11)); // vide entre barreaux ≤ 11 cm
+    for (let i = 1; i < bars; i++) {
+      push('railing', orientedBox(mid, u, 0.018, 0.018, zBase + 0.12, zBase + height - 0.05, -L / 2 + (L * i) / bars));
+    }
+  }
+  return parts;
+}
+
+// Terrasses d'un niveau : partie de l'étage du dessous que ce niveau ne couvre pas
+export function levelTerraces(project, levelIndex) {
+  if (levelIndex <= 0) return [];
+  const level = project.levels[levelIndex];
+  const lower = project.levels[levelIndex - 1];
+  const up = levelFaces(level);
+  if (!up.outlines.length) return []; // étage sans contour fermé : la toiture du dessous s'en charge
+  const low = levelFaces(lower);
+  const out = [];
+  low.outlines.forEach((gross, k) => {
+    const diff = G.polygonDifference(gross, up.outlines);
+    if (!diff.pieces.length) return;
+    const net = low.innerOutlines[k] ? G.polygonDifference(low.innerOutlines[k], up.outlines) : diff;
+    const area = diff.pieces.reduce((a, pc) => a + Math.abs(G.polygonArea(pc.outer))
+      - pc.holes.reduce((b, h) => b + Math.abs(G.polygonArea(h)), 0), 0);
+    out.push({ key: `terrace-${level.id}-${k}`, gross: diff.pieces, net: net.pieces, free: diff.free, facade: diff.facade, area });
+  });
+  return out;
+}
+
+const insidePiece = (p, pieces) => pieces.some((pc) => G.pointInPolygon(p, pc.outer) && !pc.holes.some((h) => G.pointInPolygon(p, h)));
+
+export function balconyGeometry(b) {
+  const n = G.norm(b.dir), t = G.perp(n);
+  const base = [b.x, b.y];
+  const w2 = b.width / 2;
+  const poly = [
+    G.add(base, G.mul(t, -w2)), G.add(base, G.mul(t, w2)),
+    G.add(G.add(base, G.mul(t, w2)), G.mul(n, b.depth)), G.add(G.add(base, G.mul(t, -w2)), G.mul(n, b.depth)),
+  ];
+  return { poly, n, t, base };
 }
 
 export function mergeMeshes(list) {
@@ -237,7 +327,7 @@ export function roofOpenings(project, level, body) {
   if (!items.length || !body.roof?.enabled) return [];
   const z = levelElevation(project, level.id);
   const floorZ = z + (body.elevation || 0);
-  const baseZ = floorZ + bodyHeight(project, level, body);
+  const baseZ = floorZ + roofBaseHeight(project, level, body);
   const outlines = bodyOutlines(project, level, body.id, 1);
   const out = [];
   outlines.forEach((outline, k) => {
@@ -340,6 +430,48 @@ export function roofOpenings(project, level, body) {
 }
 
 /**
+ * Étage sous toiture : pour chaque corps couvert sur ce niveau, les dessous de pans
+ * (plans) qui limitent murs intérieurs, pièces, plafond et équipements.
+ */
+export function atticContext(project, levelIndex) {
+  const level = project.levels[levelIndex];
+  const map = new Map();
+  if (!isAttic(level)) return map;
+  const z = levelElevation(project, level.id);
+  const mainId = project.bodies[0].id;
+  const ids = new Set(level.rooms.map((r) => r.bodyId || mainId));
+  for (const id of ids) {
+    const body = bodyById(project, id);
+    if (!body.roof?.enabled || bodyTopLevelIndex(project, body.id) !== levelIndex) continue;
+    const floorZ = z + (body.elevation || 0);
+    const baseZ = floorZ + roofBaseHeight(project, level, body);
+    const faces = [];
+    let maxZ = baseZ;
+    for (const outline of bodyOutlines(project, level, body.id, 1)) {
+      const roof = G.buildRoof(outline, { ...body.roof, baseZ });
+      const tv = roof.thicknessV || body.roof.thickness || 0.25;
+      for (const f of roof.faces) {
+        const zp = G.planeOf(f.poly);
+        if (!zp) continue;
+        faces.push({ poly: f.poly.map((q) => [q[0], q[1]]), zAt: (q) => zp(q) - tv });
+        for (const q of f.poly) maxZ = Math.max(maxZ, q[2] - tv);
+      }
+    }
+    const zUnder = (q) => {
+      let zz = Infinity;
+      for (const f of faces) if (G.pointInPolygon(q, f.poly)) zz = Math.min(zz, f.zAt(q));
+      return zz;
+    };
+    map.set(body.id, {
+      body, faces, floorZ, maxZ, zUnder,
+      knee: level.attic.kneeWall ?? 0.9,
+      ceilingZ: body.ceiling ? floorZ + (level.attic.ceilingHeight ?? 2.5) : null,
+    });
+  }
+  return map;
+}
+
+/**
  * Construit la liste des éléments du bâtiment.
  * Chaque pièce appartient à un corps de bâtiment (altitude du sol, hauteur des murs, toiture propres).
  * options.upToLevelIndex : limite l'affichage aux niveaux inférieurs ou égaux
@@ -361,7 +493,10 @@ export function buildElements(project, options = {}) {
 
     const bodyOfRoom = (room) => bodyById(project, room?.bodyId || mainId);
     const floorOf = (body) => z + (body.elevation || 0);
+    const attic = atticContext(project, li);
     const topOf = (body, category) => {
+      const ctx = attic.get(body.id);
+      if (ctx) return category === 'exterior' ? ctx.floorZ + ctx.knee : Math.min(ctx.ceilingZ ?? Infinity, ctx.maxZ);
       const h = bodyHeight(project, level, body);
       const cut = category === 'exterior' || isTopLevel ? 0 : slabT;
       return floorOf(body) + h - cut;
@@ -406,6 +541,19 @@ export function buildElements(project, options = {}) {
       if (!room || net.length < 3) return;
       const body = bodyOfRoom(room);
       const zf = floorOf(body);
+      const ctx = attic.get(body.id);
+      if (ctx) {
+        // pièce sous les rampants : volume découpé, surface habitable à 1,80 m
+        const top = ctx.ceilingZ ?? ctx.maxZ;
+        elements.push({
+          kind: 'space', level, levelIndex: li, name: room.name, room, area, body,
+          areaHabitable: G.areaAtLeast(net, ctx.faces, zf + 1.8),
+          profile: net, z0: zf, depth: top - zf,
+          mesh: G.prismUnderRoof(net, zf, top, ctx.faces), tessellated: true,
+          key: `space-${room.id}`,
+        });
+        return;
+      }
       const underCeiling = body.ceiling && bodyTopLevelIndex(project, body.id) === li ? (body.ceilingThickness || 0.15) : 0;
       const ceiling = topOf(body, 'interior') - zf - underCeiling;
       elements.push({
@@ -431,11 +579,29 @@ export function buildElements(project, options = {}) {
       const hw = top - base;
       if (hw <= 0.05) continue;
       const pieces = G.wallPieces(level, wall, poly, hw);
+      const actx = type.category !== 'exterior' ? attic.get(bodies[0].id) : null;
+      const wallMesh = actx
+        ? mergeMeshes(pieces.map((p) => G.prismUnderRoof(p.poly, base + p.z0, base + p.z1, actx.faces)))
+        : mergeMeshes(pieces.map((p) => extrude(p.poly, base + p.z0, base + p.z1)));
+      if (actx) {
+        // une ouverture qui dépasse sous la pente est signalée
+        const a0 = level.nodes[wall.a], b0 = level.nodes[wall.b];
+        const u0 = G.norm(G.sub(b0, a0));
+        for (const op of wall.openings || []) {
+          const top = base + op.sill + op.height;
+          const lim = Math.min(...[-op.width / 2, op.width / 2].map((d) => actx.zUnder(G.add(a0, G.mul(u0, op.offset + d)))), actx.ceilingZ ?? Infinity);
+          if (top > lim + 0.01) warnings.push(`${level.name} : ${OPENING_TYPES[op.type]?.label || 'Ouverture'} trop haute sous la pente (${Math.round((top - lim) * 100)} cm de trop).`);
+        }
+      } else if (attic.get(bodies[0].id) && type.category === 'exterior') {
+        for (const op of wall.openings || []) {
+          if (base + op.sill + op.height > base + hw + 0.01) warnings.push(`${level.name} : ${OPENING_TYPES[op.type]?.label || 'Ouverture'} plus haute que la jambette (${Math.round((op.sill + op.height - hw) * 100)} cm de trop) : préférez une fenêtre de toit ou une lucarne.`);
+        }
+      }
       elements.push({
         kind: 'wall', level, levelIndex: li, wall, wallType: type, body: bodies[0], wallIds: group.ids,
         name: `${type.label} ${wall.id.slice(-4)}`,
-        profile: poly, z0: base, depth: hw,
-        mesh: mergeMeshes(pieces.map((p) => extrude(p.poly, base + p.z0, base + p.z1))),
+        profile: poly, z0: base, depth: hw, tessellated: !!actx,
+        mesh: wallMesh,
         key: `wall-${wall.id}`,
       });
       for (const op of wall.openings || []) {
@@ -453,12 +619,65 @@ export function buildElements(project, options = {}) {
       }
     }
 
+    // Terrasses : dessus de l'étage inférieur que ce niveau ne couvre pas
+    for (const tr of levelTerraces(project, li)) {
+      const settings = level.terrace || { mode: 'terrace', railing: 'glass', railingHeight: 1.0 };
+      const slabMesh = mergeMeshes(tr.net.map((pc) => extrudeWithHoles(pc.outer, pc.holes, z - slabT, z)));
+      const railParts = [];
+      if (settings.mode === 'terrace') {
+        for (const [p, q] of tr.free) {
+          const m = G.mul(G.add(p, q), 0.5);
+          let inward = G.perp(G.norm(G.sub(q, p)));
+          if (!insidePiece(G.add(m, G.mul(inward, 0.05)), tr.gross)) inward = G.mul(inward, -1);
+          railParts.push(...railingParts(p, q, z, settings.railingHeight || 1.0, settings.railing || 'glass', inward));
+        }
+      }
+      elements.push({
+        kind: 'terrace', level, levelIndex: li, body: bodyById(project, mainId), mode: settings.mode,
+        name: settings.mode === 'roof' ? `Toiture-terrasse ${level.name}` : `Terrasse ${level.name}`,
+        pieces: tr.net, area: tr.area, slabMesh, railParts, z0: z - slabT, depth: slabT, top: z,
+        key: tr.key,
+      });
+    }
+
+    // Balcons en saillie : dalle en porte-à-faux, dessus au niveau du plancher
+    for (const b of level.balconies || []) {
+      const g = balconyGeometry(b);
+      const th = b.thickness || BALCONY.thickness;
+      const slabMesh = extrude(g.poly, z - th, z);
+      const edges = [[g.poly[1], g.poly[2]], [g.poly[2], g.poly[3]], [g.poly[3], g.poly[0]]];
+      const railParts = [];
+      const centre = G.polygonCentroid(g.poly);
+      for (const [p, q] of edges) {
+        const m = G.mul(G.add(p, q), 0.5);
+        const inward = G.norm(G.sub(centre, m));
+        railParts.push(...railingParts(p, q, z, b.railingHeight || 1.0, b.railing || 'bars', inward));
+      }
+      elements.push({
+        kind: 'balcony', level, levelIndex: li, body: bodyById(project, mainId), item: b,
+        name: 'Balcon', pieces: [{ outer: g.poly, holes: [] }], area: b.width * b.depth,
+        slabMesh, railParts, z0: z - th, depth: th, top: z,
+        key: `balcony-${b.id}`,
+      });
+    }
+
     // Équipements : posés sur le sol du corps de bâtiment de la pièce qui les contient
     for (const item of level.equipment || []) {
       const cat = EQUIPMENT_TYPES[item.type];
       const roomInfo = rooms.find((r) => r.room && G.pointInPolygon([item.x, item.y], r.net)) || null;
       const body = roomInfo ? bodyOfRoom(roomInfo.room) : bodyById(project, mainId);
       const parts = placeEquipment(item, equipmentParts({ ...item, model: cat?.model }), floorOf(body));
+      const ectx = attic.get(body.id);
+      if (ectx) {
+        const a = ((item.rotation || 0) * Math.PI) / 180;
+        const corners = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([sx, sy]) => {
+          const lx = (sx * item.width) / 2, ly = (sy * item.depth) / 2;
+          return [item.x + lx * Math.cos(a) - ly * Math.sin(a), item.y + lx * Math.sin(a) + ly * Math.cos(a)];
+        });
+        const lim = Math.min(...corners.map(ectx.zUnder), ectx.ceilingZ ?? Infinity);
+        const top = floorOf(body) + (item.zOffset || 0) + item.height;
+        if (top > lim + 0.01) warnings.push(`${level.name} : ${cat?.label || 'Équipement'} dépasse sous la pente (${Math.round((top - lim) * 100)} cm).`);
+      }
       elements.push({
         kind: 'equipment', level, levelIndex: li, body, item, category: cat, room: roomInfo?.room || null,
         name: cat?.label || 'Équipement',
@@ -472,6 +691,22 @@ export function buildElements(project, options = {}) {
       if (!body.ceiling) continue;
       if (bodyTopLevelIndex(project, body.id) !== li) continue;
       const ep = body.ceilingThickness || 0.15;
+      const cctx = attic.get(body.id);
+      if (cctx) {
+        // faux plafond horizontal, limité à la zone où les rampants sont plus hauts
+        bodyOutlines(project, level, body.id, -1).forEach((outline, k) => {
+          const cells = G.cellsUnderRoof(outline, cctx.ceilingZ, cctx.ceilingZ + ep, cctx.faces);
+          if (!cells.length) return;
+          elements.push({
+            kind: 'ceiling', level, levelIndex: li, body,
+            name: `Faux plafond ${body.name}${k ? ` ${k + 1}` : ''}`,
+            profile: outline, z0: cctx.ceilingZ, depth: ep, tessellated: true,
+            mesh: mergeMeshes(cells.map((c) => G.prismVarTop(c.poly, cctx.ceilingZ, c.top))),
+            key: `ceil-${level.id}-${body.id}-${k}`,
+          });
+        });
+        continue;
+      }
       const zTop = floorOf(body) + bodyHeight(project, level, body);
       bodyOutlines(project, level, body.id, -1).forEach((outline, k) => {
         if (!outline || outline.length < 3) return;
@@ -490,7 +725,7 @@ export function buildElements(project, options = {}) {
       if (!body.roof?.enabled) continue;
       if (bodyTopLevelIndex(project, body.id) !== li) continue;
       if (li > lastIndex) continue;
-      const baseZ = floorOf(body) + bodyHeight(project, level, body);
+      const baseZ = floorOf(body) + roofBaseHeight(project, level, body);
       const outlines = bodyOutlines(project, level, body.id, 1);
       // épaisseur du mur porteur sous un point donné du contour (pour les pignons)
       const thicknessAt = (p) => {

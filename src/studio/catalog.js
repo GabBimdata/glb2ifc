@@ -30,6 +30,14 @@ export const OPENING_TYPES = {
   bay: { label: 'Baie vitrée', kind: 'window', width: 2.4, height: 2.15, sill: 0 },
 };
 
+// Balcons et terrasses
+export const RAILING_TYPES = {
+  glass: 'Vitré',
+  bars: 'Barreaudé',
+  wall: 'Maçonné',
+};
+export const BALCONY = { label: 'Balcon en saillie', width: 3.0, depth: 1.2, thickness: 0.18, railing: 'bars', railingHeight: 1.0 };
+
 export const SKYLIGHT = { label: 'Fenêtre de toit', width: 0.78, height: 1.18, sill: 1.1 };
 
 // Ouvertures de toiture : fenêtre de toit et lucarnes
@@ -57,6 +65,8 @@ export const COLOR_LABELS = {
   interior: 'Murs porteurs',
   partition: 'Cloisons',
   slab: 'Planchers',
+  balcony: 'Balcons et terrasses',
+  railing: 'Garde-corps',
   ceiling: 'Plafonds',
   roof: 'Toiture',
   gable: 'Pignons',
@@ -70,6 +80,8 @@ export const COLORS = {
   interior: '#ece8e1',
   partition: '#f4f2ee',
   slab: '#c9c4bb',
+  balcony: '#d3cdc2',
+  railing: '#3b4247',
   ceiling: '#f2efe9',
   roof: '#9b5a43',
   gable: '#e9e4dc',

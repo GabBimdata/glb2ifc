@@ -145,6 +145,16 @@ export function exportIfc(project) {
     const pl = w.add(`IFCPOLYLINE((${pts.join(',')}))`);
     return w.add(`IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,${pl})`);
   };
+  // profil avec vides (terrasse en anneau)
+  const profileWithVoids = (outer, holes) => {
+    if (!holes?.length) return profilePolyline(outer);
+    const loop = (poly) => {
+      const pts = poly.map((p) => w.add(`IFCCARTESIANPOINT((${num(p[0])},${num(-p[1])}))`));
+      pts.push(pts[0]);
+      return w.add(`IFCPOLYLINE((${pts.join(',')}))`);
+    };
+    return w.add(`IFCARBITRARYPROFILEDEFWITHVOIDS(.AREA.,$,${loop(outer)},(${holes.map(loop).join(',')}))`);
+  };
   const extrusion = (profile, depth, zOffset = 0) => {
     const pt = w.add(`IFCCARTESIANPOINT((0.,0.,${num(zOffset)}))`);
     const pos = w.add(`IFCAXIS2PLACEMENT3D(${pt},$,$)`);
@@ -172,6 +182,7 @@ export function exportIfc(project) {
       else if (type === 'label') v = `IFCLABEL(${stepString(value)})`;
       else if (type === 'length') v = `IFCLENGTHMEASURE(${num(value)})`;
       else if (type === 'ratio') v = `IFCPOSITIVERATIOMEASURE(${num(value)})`;
+      else if (type === 'area') v = `IFCAREAMEASURE(${num(value)})`;
       return w.add(`IFCPROPERTYSINGLEVALUE(${stepString(name)},$,${v},$)`);
     });
     const pset = w.add(`IFCPROPERTYSET(${guid(`pset-${key}`)},${oh},${stepString(psetName)},$,(${items.join(',')}))`);
@@ -230,9 +241,11 @@ export function exportIfc(project) {
     const key = el.key;
     if (el.kind === 'wall') {
       const pl = placement(st.placement);
-      const solid = styled(extrusion(profilePolyline(el.profile), el.depth), el.wallType.category || 'interior', el.body);
+      const solid = el.tessellated
+        ? styled(faceSet(el.mesh, st.z), el.wallType.category || 'interior', el.body)
+        : styled(extrusion(profilePolyline(el.profile), el.depth, el.z0 - st.z), el.wallType.category || 'interior', el.body);
       const predefined = el.wallType.category === 'partition' ? '.PARTITIONING.' : '.STANDARD.';
-      const ent = w.add(`IFCWALL(${guid(key)},${oh},${stepString(el.name)},$,$,${pl},${shape([solid])},$,${predefined})`);
+      const ent = w.add(`IFCWALL(${guid(key)},${oh},${stepString(el.name)},$,$,${pl},${shape([solid], el.tessellated ? 'Tessellation' : 'SweptSolid')},$,${predefined})`);
       contained[el.level.id].push(noteBody(el, ent));
       el._ifc = { entity: ent, placement: pl };
       const L = Math.hypot(el.level.nodes[el.wall.b][0] - el.level.nodes[el.wall.a][0], el.level.nodes[el.wall.b][1] - el.level.nodes[el.wall.a][1]);
@@ -255,21 +268,33 @@ export function exportIfc(project) {
       linkMaterial('Béton', ent);
     } else if (el.kind === 'ceiling') {
       const pl = placement(st.placement);
-      const solid = styled(extrusion(profilePolyline(el.profile), el.depth, el.z0 - st.z), 'ceiling', el.body);
-      const ent = w.add(`IFCCOVERING(${guid(key)},${oh},${stepString(el.name)},$,$,${pl},${shape([solid])},$,.CEILING.)`);
+      const solid = el.tessellated
+        ? styled(faceSet(el.mesh, st.z), 'ceiling', el.body)
+        : styled(extrusion(profilePolyline(el.profile), el.depth, el.z0 - st.z), 'ceiling', el.body);
+      const ent = w.add(`IFCCOVERING(${guid(key)},${oh},${stepString(el.name)},$,$,${pl},${shape([solid], el.tessellated ? 'Tessellation' : 'SweptSolid')},$,.CEILING.)`);
       contained[el.level.id].push(noteBody(el, ent));
       props(key, ent, 'Pset_CoveringCommon', [['IsExternal', 'bool', false]]);
       linkMaterial('Plaque de plâtre', ent);
     } else if (el.kind === 'space') {
       const pl = placement(st.placement);
-      const solid = extrusion(profilePolyline(el.profile), el.depth);
-      const ent = w.add(`IFCSPACE(${guid(key)},${oh},${stepString(String(spacesByStorey[el.level.id].length + 1))},$,$,${pl},${shape([solid])},${stepString(el.name)},.ELEMENT.,.INTERNAL.,$)`);
+      // pièce sous les rampants : volume découpé ; sinon prisme posé sur le sol de son corps
+      const solid = el.tessellated ? faceSet(el.mesh, st.z) : extrusion(profilePolyline(el.profile), el.depth, el.z0 - st.z);
+      const ent = w.add(`IFCSPACE(${guid(key)},${oh},${stepString(String(spacesByStorey[el.level.id].length + 1))},$,$,${pl},${shape([solid], el.tessellated ? 'Tessellation' : 'SweptSolid')},${stepString(el.name)},.ELEMENT.,.INTERNAL.,$)`);
       spacesByStorey[el.level.id].push(ent);
       if (el.room?.id) spaceByRoom[el.level.id][el.room.id] = ent;
       if (multiBody && el.body) (zoneSpaces[el.body.id] ||= { body: el.body, items: [] }).items.push(ent);
       quantities(key, ent, 'Qto_SpaceBaseQuantities', [
-        ['NetFloorArea', 'area', el.area], ['Height', 'length', el.depth], ['NetVolume', 'volume', el.area * el.depth],
+        ['NetFloorArea', 'area', el.area], ['Height', 'length', el.depth],
+        ...(el.tessellated ? [] : [['NetVolume', 'volume', el.area * el.depth]]),
       ]);
+      if (el.areaHabitable !== undefined) {
+        // sous toiture : la surface habitable ne compte que la hauteur d'au moins 1,80 m
+        props(`surf-${key}`, ent, 'Smelt_Surfaces', [
+          ['SurfaceAuSol', 'area', el.area],
+          ['SurfaceHabitable', 'area', el.areaHabitable],
+          ['HauteurMinimaleHabitable', 'length', 1.8],
+        ]);
+      }
     } else if (el.kind === 'door' || el.kind === 'window') {
       const host = elements.find((x) => x.kind === 'wall' && x.wall === el.wall);
       if (!host?._ifc) continue;
@@ -335,6 +360,44 @@ export function exportIfc(project) {
       linkMaterial('Couverture', cover);
       linkMaterial('Vitrage', win);
       props(key, win, 'Pset_WindowCommon', [['IsExternal', 'bool', true], ['Reference', 'label', el.name]]);
+    } else if (el.kind === 'terrace' || el.kind === 'balcony') {
+      const pl = placement(st.placement);
+      const isRoof = el.kind === 'terrace' && el.mode === 'roof';
+      const solids = el.pieces.map((pc) => styled(extrusion(profileWithVoids(pc.outer, pc.holes), el.depth, el.z0 - st.z), isRoof ? 'slab' : 'balcony', el.body));
+      const label = el.kind === 'balcony' ? 'Balcon' : isRoof ? 'Toiture-terrasse' : 'Terrasse';
+      const slab = w.add(`IFCSLAB(${guid(key)},${oh},${stepString(el.name)},$,${stepString(label)},${pl},${shape(solids)},$,${isRoof ? '.ROOF.' : '.FLOOR.'})`);
+      contained[el.level.id].push(noteBody(el, slab));
+      props(key, slab, 'Pset_SlabCommon', [['IsExternal', 'bool', true], ['LoadBearing', 'bool', true], ['Reference', 'label', label]]);
+      linkMaterial('Béton', slab);
+      if (el.railParts?.length) {
+        const byKey = new Map();
+        for (const rp of el.railParts) {
+          if (!byKey.has(rp.key)) byKey.set(rp.key, []);
+          byKey.get(rp.key).push(rp.mesh);
+        }
+        const items = [];
+        for (const [k2, meshes] of byKey) {
+          const merged = { positions: [], triangles: [] };
+          for (const m of meshes) {
+            const off = merged.positions.length;
+            merged.positions.push(...m.positions);
+            for (const t of m.triangles) merged.triangles.push([t[0] + off, t[1] + off, t[2] + off]);
+          }
+          items.push(styled(faceSet(merged, st.z), k2, el.body, k2 === 'window' ? 0.6 : 0));
+        }
+        const height = el.kind === 'balcony' ? (el.item.railingHeight || 1) : (el.level.terrace?.railingHeight || 1);
+        const rail = w.add(`IFCRAILING(${guid(`rail-${key}`)},${oh},${stepString(`Garde-corps ${label.toLowerCase()}`)},$,$,${pl},${shape(items, 'Tessellation')},$,.GUARDRAIL.)`);
+        contained[el.level.id].push(noteBody(el, rail));
+        props(`rail-${key}`, rail, 'Pset_RailingCommon', [['IsExternal', 'bool', true], ['Height', 'length', height]]);
+        linkMaterial('Métal', rail);
+      }
+      if (!isRoof) {
+        // espace extérieur, pour les surfaces annexes
+        const spaceSolids = el.pieces.map((pc) => extrusion(profileWithVoids(pc.outer, pc.holes), 2.5, el.top - st.z));
+        const sp = w.add(`IFCSPACE(${guid(`space-${key}`)},${oh},${stepString(label)},$,$,${pl},${shape(spaceSolids)},${stepString(label)},.ELEMENT.,.EXTERNAL.,$)`);
+        spacesByStorey[el.level.id].push(sp);
+        quantities(`space-${key}`, sp, 'Qto_SpaceBaseQuantities', [['NetFloorArea', 'area', el.area]]);
+      }
     } else if (el.kind === 'gable') {
       const pl = placement(st.placement);
       const item = styled(faceSet(el.mesh, st.z), 'gable', el.body);

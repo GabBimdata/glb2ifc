@@ -249,7 +249,7 @@ export function wallPieces(level, wall, poly, height) {
   const d = norm(sub(b, a));
   const L = dist(a, b);
   const ops = (wall.openings || [])
-    .map((o) => ({ s: o.offset - o.width / 2, e: o.offset + o.width / 2, z0: o.sill, z1: Math.min(o.sill + o.height, height) }))
+    .map((o) => ({ s: o.offset - o.width / 2, e: o.offset + o.width / 2, z0: Math.min(o.sill, height), z1: Math.min(o.sill + o.height, height) }))
     .filter((o) => o.e > o.s)
     .sort((m, n) => m.s - n.s);
   if (!ops.length) return [{ poly, z0: 0, z1: height }];
@@ -1028,4 +1028,211 @@ export function convexHullUV(points) {
     return out;
   };
   return [...half(pts), ...half(pts.slice().reverse())];
+}
+
+// ─── Superposition de deux emprises (terrasses) ───────────────────────────────
+// On fusionne les arêtes des deux polygones en un graphe planaire (découpées à chaque
+// croisement et à chaque sommet posé sur une arête, y compris quand deux façades se
+// superposent exactement), puis on classe chaque face : dans A, dans B, ou les deux.
+
+function overlayGraph(polys) {
+  const segs = [];
+  for (const poly of polys) {
+    for (let i = 0; i < poly.length; i++) segs.push({ a: poly[i], b: poly[(i + 1) % poly.length] });
+  }
+  const cuts = segs.map(() => [0, 1]);
+  for (let i = 0; i < segs.length; i++) {
+    for (let j = i + 1; j < segs.length; j++) {
+      const s = segs[i], t = segs[j];
+      const hit = segmentIntersection(s.a, s.b, t.a, t.b);
+      if (hit && hit.t > -1e-9 && hit.t < 1 + 1e-9 && hit.u > -1e-9 && hit.u < 1 + 1e-9) {
+        cuts[i].push(Math.min(1, Math.max(0, hit.t)));
+        cuts[j].push(Math.min(1, Math.max(0, hit.u)));
+      }
+      // arêtes superposées : chaque extrémité de l'une découpe l'autre
+      for (const p of [t.a, t.b]) { const pr = projectOnSegment(p, s.a, s.b); if (pr.d < 1e-6) cuts[i].push(pr.t); }
+      for (const p of [s.a, s.b]) { const pr = projectOnSegment(p, t.a, t.b); if (pr.d < 1e-6) cuts[j].push(pr.t); }
+    }
+  }
+  const nodes = {};
+  const keyOf = (p) => `${Math.round(p[0] * 1e5)}_${Math.round(p[1] * 1e5)}`;
+  const nodeId = (p) => { const k = keyOf(p); if (!nodes[k]) nodes[k] = [p[0], p[1]]; return k; };
+  const seen = new Set();
+  const walls = [];
+  segs.forEach((s, i) => {
+    const ts = [...new Set(cuts[i].map((v) => +v.toFixed(9)))].sort((m, n) => m - n);
+    for (let k = 0; k + 1 < ts.length; k++) {
+      const p = add(s.a, mul(sub(s.b, s.a), ts[k]));
+      const q = add(s.a, mul(sub(s.b, s.a), ts[k + 1]));
+      if (dist(p, q) < 1e-6) continue;
+      const a = nodeId(p), b = nodeId(q);
+      if (a === b) continue;
+      const key = a < b ? `${a}|${b}` : `${b}|${a}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      walls.push({ id: `o${walls.length}`, a, b, thickness: 0 });
+    }
+  });
+  return { nodes, walls };
+}
+
+function distToBoundary(p, poly) {
+  let best = Infinity;
+  for (let i = 0; i < poly.length; i++) best = Math.min(best, projectOnSegment(p, poly[i], poly[(i + 1) % poly.length]).d);
+  return best;
+}
+
+/**
+ * Partie de A non couverte par B (B peut être une liste de polygones).
+ * Retour : { pieces: [{ outer, holes }], free: [[p, q]] bords libres (garde-corps),
+ *            facade: [[p, q]] bords appuyés contre B }.
+ * Un étage plus petit posé au milieu donne une terrasse « en anneau » : un contour et un trou.
+ */
+export function polygonDifference(A, Bs) {
+  const Blist = Array.isArray(Bs[0]?.[0]) ? Bs : [Bs];
+  const graph = overlayGraph([A, ...Blist]);
+  const { rooms } = detectFaces(graph);
+  const inA = (p) => pointInPolygon(p, A);
+  const inB = (p) => Blist.some((b) => pointInPolygon(p, b));
+  const keep = (p) => inA(p) && !inB(p);
+  const faces = rooms.map((f) => ({ poly: f.poly, area: Math.abs(polygonArea(f.poly)) }));
+
+  // trous d'une face : les faces qu'elle contient directement
+  const childrenOf = (F) => faces.filter((G2) => G2 !== F && G2.area < F.area
+    && G2.poly.every((q) => pointInPolygon(q, F.poly) || distToBoundary(q, F.poly) < 1e-6)
+    && G2.poly.some((q) => distToBoundary(q, F.poly) > 1e-6));
+  const direct = (F) => {
+    const kids = childrenOf(F);
+    return kids.filter((k) => !kids.some((o) => o !== k && o.area > k.area && pointInPolygon(interiorPoint(k.poly), o.poly)));
+  };
+  // un point dans F mais hors de ses trous
+  const sampleInside = (F, holes) => {
+    const c = interiorPoint(F.poly);
+    if (!holes.some((h) => pointInPolygon(c, h.poly))) return c;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const q of F.poly) { x0 = Math.min(x0, q[0]); y0 = Math.min(y0, q[1]); x1 = Math.max(x1, q[0]); y1 = Math.max(y1, q[1]); }
+    for (let j = 1; j < 40; j++) for (let i = 1; i < 40; i++) {
+      const q = [x0 + ((x1 - x0) * i) / 40, y0 + ((y1 - y0) * j) / 40];
+      if (pointInPolygon(q, F.poly) && !holes.some((h) => pointInPolygon(q, h.poly))) return q;
+    }
+    return c;
+  };
+
+  const pieces = [], free = [], facade = [];
+  const classify = (a, b) => {
+    const m = mul(add(a, b), 0.5);
+    const nrm = mul(perp(norm(sub(b, a))), 1e-4);
+    const s1 = add(m, nrm), s2 = sub(m, nrm);
+    const k1 = keep(s1), k2 = keep(s2);
+    if (k1 === k2) return; // arête intérieure (ou étrangère à la terrasse)
+    const onB = Blist.some((b2) => distToBoundary(m, b2) < 1e-4);
+    (onB ? facade : free).push([a.slice(), b.slice()]);
+  };
+  for (const F of faces) {
+    const holes = direct(F);
+    if (!keep(sampleInside(F, holes))) continue;
+    pieces.push({ outer: F.poly.map((q) => q.slice()), holes: holes.map((h) => h.poly.map((q) => q.slice())) });
+    const loops = [F.poly, ...holes.map((h) => h.poly)];
+    for (const loop of loops) for (let i = 0; i < loop.length; i++) classify(loop[i], loop[(i + 1) % loop.length]);
+  }
+  return { pieces, free, facade };
+}
+
+// ─── Découpe sous les rampants (étage sous toiture) ───────────────────────────
+// faces : [{ poly: [[x,y]...] convexe, zAt: (p) => z du dessous du pan }]
+
+function convexClip(poly, clipPoly) {
+  const c = polygonCentroid(clipPoly);
+  let out = poly;
+  for (let i = 0; i < clipPoly.length && out.length >= 3; i++) {
+    const a = clipPoly[i], b = clipPoly[(i + 1) % clipPoly.length];
+    let n = perp(norm(sub(b, a)));
+    if (dot(sub(c, a), n) < 0) n = mul(n, -1);
+    out = clipHalfPlane(out, a, n, 0, true);
+  }
+  return out.length >= 3 ? out : null;
+}
+
+function gradientOf(zAt, p0) {
+  const z0 = zAt(p0);
+  return { z0, g: [zAt([p0[0] + 1, p0[1]]) - z0, zAt([p0[0], p0[1] + 1]) - z0] };
+}
+
+// Parties d'un polygone où le dessous du pan est au-dessus (keepAbove) ou au-dessous d'une cote.
+function splitAtHeight(cell, zAt, h, keepAbove) {
+  const p0 = cell[0];
+  const { z0, g } = gradientOf(zAt, p0);
+  const gl = len(g);
+  if (gl < 1e-9) return (z0 >= h) === keepAbove ? cell : null;
+  const out = clipHalfPlane(cell, p0, mul(g, 1 / gl), (h - z0) / gl, keepAbove);
+  return out.length >= 3 ? out : null;
+}
+
+// Prisme à fond plat et dessus défini point par point (plan par morceau)
+export function prismVarTop(poly, z0, topFn) {
+  const P = cleanPolygon(poly);
+  const positions = [];
+  const triangles = [];
+  if (P.length < 3) return { positions, triangles };
+  const tri = triangulate(P);
+  const n = P.length;
+  for (const p of P) positions.push([p[0], p[1], z0]);
+  for (const p of P) positions.push([p[0], p[1], topFn(p)]);
+  for (const [a, b, c] of tri) triangles.push([a, c, b], [n + a, n + b, n + c]);
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    triangles.push([i, j, n + j], [i, n + j, n + i]);
+  }
+  return { positions, triangles };
+}
+
+/**
+ * Découpe un prisme [z0, zTop] sous les pans : renvoie des cellules { poly, top: fonction }.
+ * Au-dessus d'un pan, le prisme est arrêté par le rampant ; ailleurs par zTop.
+ */
+export function cellsUnderRoof(poly, z0, zTop, faces) {
+  const cells = [];
+  for (const f of faces) {
+    const cell = convexClip(poly, f.poly);
+    if (!cell) continue;
+    const high = splitAtHeight(cell, f.zAt, zTop, true);
+    if (high) cells.push({ poly: high, top: () => zTop });
+    let low = splitAtHeight(cell, f.zAt, zTop, false);
+    if (low) low = splitAtHeight(low, f.zAt, z0 + 0.02, true); // rien sous le plancher
+    if (low) cells.push({ poly: low, top: (p) => f.zAt(p) });
+  }
+  return cells;
+}
+
+export function prismUnderRoof(poly, z0, zTop, faces) {
+  const meshes = cellsUnderRoof(poly, z0, zTop, faces).map((c) => prismVarTop(c.poly, z0, c.top));
+  const positions = [], triangles = [];
+  for (const m of meshes) {
+    const off = positions.length;
+    positions.push(...m.positions);
+    for (const t of m.triangles) triangles.push([t[0] + off, t[1] + off, t[2] + off]);
+  }
+  return { positions, triangles };
+}
+
+// Surface d'un polygone où le dessous des rampants est à au moins h (réglementaire : 1,80 m)
+export function areaAtLeast(poly, faces, h) {
+  let total = 0;
+  for (const f of faces) {
+    const cell = convexClip(poly, f.poly);
+    const high = cell && splitAtHeight(cell, f.zAt, h, true);
+    if (high) total += Math.abs(polygonArea(high));
+  }
+  return total;
+}
+
+// Zones d'un polygone sous une hauteur donnée (pour les griser sur le plan)
+export function zonesBelow(poly, faces, h) {
+  const out = [];
+  for (const f of faces) {
+    const cell = convexClip(poly, f.poly);
+    const low = cell && splitAtHeight(cell, f.zAt, h, false);
+    if (low) out.push(low);
+  }
+  return out;
 }
