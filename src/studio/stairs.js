@@ -1,12 +1,19 @@
-// Smelt Studio — escaliers paramétriques (droit, quart tournant avec palier).
+// Smelt Studio : escaliers droits, avec palier ou avec marches rayonnantes.
 // Module pur : géométrie en repère du plan (x, y vers le bas) et hauteurs depuis le plancher
 // de départ. Partagé par la construction 3D, l'éditeur, l'IFC et les tests.
 import * as G from './geometry.js';
 
 export const STAIR_TYPES = {
   straight: 'Droit',
-  quarter: 'Quart tournant',
+  quarter: 'Quart tournant avec palier',
+  winder: 'Quart tournant sans palier',
 };
+
+export const isTurningStair = (stair) => stair.type === 'quarter' || stair.type === 'winder';
+
+export const STAIR_LIMITS = { flight: 100, winders: 8 };
+const count = (value, fallback, min = 0, max = STAIR_LIMITS.flight) =>
+  Number.isFinite(value) ? Math.min(max, Math.max(min, Math.round(value))) : fallback;
 
 export const STAIR_DEFAULTS = {
   width: 0.9,
@@ -24,10 +31,24 @@ export const STAIR_DEFAULTS = {
  */
 export function stairRhythm(height, opts = {}) {
   const target = opts.targetRiser ?? STAIR_DEFAULTS.targetRiser;
-  const risers = Math.max(2, Math.round(height / target));
+  const risers = count(opts.risers, Math.max(2, Math.round(height / target)), 2, 2 * STAIR_LIMITS.flight + STAIR_LIMITS.winders + 1);
   const riser = height / risers;
   const going = Math.min(0.32, Math.max(0.22, (opts.blondel ?? STAIR_DEFAULTS.blondel) - 2 * riser));
   return { risers, riser, going };
+}
+
+// Les anciens projets (flight1 seul) gardent leur nombre de hauteurs automatique.
+// Dès que les deux volées sont renseignées, leur somme fixe ce nombre : on ajuste
+// la hauteur de marche, jamais la hauteur d'arrivée de l'escalier.
+export function stairParameters(stair, height) {
+  const automatic = stairRhythm(height);
+  if (!isTurningStair(stair)) return { ...automatic, flights: [automatic.risers - 1], turnSteps: 0 };
+  const turnSteps = stair.type === 'winder' ? count(stair.winderSteps, 3, 2, STAIR_LIMITS.winders) : 1;
+  const available = Math.max(0, automatic.risers - 1 - turnSteps);
+  const explicit = Number.isFinite(stair.flight1) && Number.isFinite(stair.flight2);
+  const k1 = count(stair.flight1, Math.floor(available / 2), 0, explicit ? STAIR_LIMITS.flight : available);
+  const k2 = explicit ? count(stair.flight2, 0) : available - k1;
+  return { ...stairRhythm(height, { risers: k1 + turnSteps + k2 + 1 }), flights: [k1, k2], turnSteps };
 }
 
 // Boîte orientée dans le repère local (u, v) de l'escalier, z depuis le plancher
@@ -44,6 +65,8 @@ function boxUV(u0, u1, v0, v1, z0, z1) {
 // Prisme dont le profil est dans le plan vertical (s, z) d'une volée, épaisseur selon l'autre axe
 function profilePrism(profile, t0, t1, place) {
   const P = G.cleanPolygon(profile);
+  // (s, z, t) -> (u, v, z) inverse l'orientation ; le profil doit être horaire.
+  if (G.polygonArea(P) > 0) P.reverse();
   const positions = [];
   const triangles = [];
   if (P.length < 3) return { positions, triangles };
@@ -83,10 +106,10 @@ function flight({ start, axis, width, treads, z0, riser, going, railSide }) {
     const top = (s) => z0 + riser + s * slope + 0.1;
     const depth = 0.3;
     const sEnd = run;
-    const bottomAt0 = top(0) - depth - z0;
-    const profile = bottomAt0 >= 0
-      ? [[0, z0 + bottomAt0], [0, top(0)], [sEnd, top(sEnd)], [sEnd, top(sEnd) - depth]]
-      : [[0, z0], [0, top(0)], [sEnd, top(sEnd)], [sEnd, top(sEnd) - depth], [(-bottomAt0) / slope, z0]];
+    const profile = G.clipHalfPlane(
+      [[0, top(0) - depth], [0, top(0)], [sEnd, top(sEnd)], [sEnd, top(sEnd) - depth]],
+      [0, z0], [0, 1], 0,
+    );
     for (const t of [-w2, w2 - 0.04]) {
       parts.push({ key: 'stringer', mesh: profilePrism(profile, t, t + 0.04, ([s, z], tt) => { const q = at(s, tt); return [q[0], q[1], z]; }) });
     }
@@ -107,70 +130,134 @@ function flight({ start, axis, width, treads, z0, riser, going, railSide }) {
   return { parts, run };
 }
 
+// Quart de carré partagé par des rayons autour du coin intérieur. Le rayon
+// rencontre le contour carré, pas un cercle : aucune encoche au coin extérieur.
+function winder({ u, width, steps, z0, riser }) {
+  const w2 = width / 2;
+  const pivot = [u, w2];
+  const corner = [u + width, -w2];
+  const at = (a) => {
+    const s = Math.sin(a), c = Math.cos(a), r = width / Math.max(s, c);
+    return [u + r * s, w2 - r * c];
+  };
+  const parts = [], lines = [];
+  const angles = Array.from({ length: steps + 1 }, (_, i) => i * Math.PI / (2 * steps));
+  for (let i = 0; i < steps; i++) {
+    const a = angles[i], b = angles[i + 1];
+    const poly = [pivot, at(a)];
+    if (a < Math.PI / 4 - 1e-9 && b > Math.PI / 4 + 1e-9) poly.push(corner);
+    poly.push(at(b));
+    const top = z0 + (i + 1) * riser;
+    parts.push({ key: 'tread', mesh: G.slopedPrism(poly, () => top, -STAIR_DEFAULTS.tread, 0) });
+  }
+  for (const a of angles) lines.push([pivot, at(a)]);
+
+  // Limons et main courante suivent les deux bords extérieurs, avec raccord
+  // aux rampes des volées droites. Le coin à 45° reste un sommet explicite.
+  const edgeAngles = [...new Set([...angles, Math.PI / 4])].sort((a, b) => a - b);
+  const railBase = (a) => z0 + (1 + steps * a / (Math.PI / 2)) * riser;
+  for (let i = 0; i < edgeAngles.length - 1; i++) {
+    const a = edgeAngles[i], b = edgeAngles[i + 1];
+    if (b - a < 1e-9) continue;
+    const p = at(a), q = at(b), len = G.dist(p, q), d = G.norm(G.sub(q, p)), n = G.perp(d);
+    const place = ([s, z], t) => [p[0] + d[0] * s + n[0] * t, p[1] + d[1] * s + n[1] * t, z];
+    for (const [key, offset, depth, thickness] of [['stringer', 0.1, 0.3, 0.04], ['rail', STAIR_DEFAULTS.handrail, 0.05, 0.05]]) {
+      const za = railBase(a) + offset, zb = railBase(b) + offset;
+      parts.push({ key, mesh: profilePrism([[0, za - depth], [0, za], [len, zb], [len, zb - depth]], 0.005, 0.005 + thickness, place) });
+    }
+  }
+  for (const a of [0, Math.PI / 4, Math.PI / 2]) {
+    const p = at(a);
+    const x = Math.min(u + width - 0.03, Math.max(u + 0.03, p[0]));
+    const y = Math.min(w2 - 0.03, Math.max(-w2 + 0.03, p[1]));
+    const step = Math.min(steps, Math.floor(steps * a / (Math.PI / 2)) + 1);
+    parts.push({ key: 'rail', mesh: boxUV(x - 0.02, x + 0.02, y - 0.02, y + 0.02, z0 + step * riser - STAIR_DEFAULTS.tread, railBase(a) + STAIR_DEFAULTS.handrail) });
+  }
+  const path = Array.from({ length: 9 }, (_, i) => {
+    const a = i * Math.PI / 16;
+    return [u + w2 * Math.sin(a), w2 - w2 * Math.cos(a)];
+  });
+  return { parts, lines, path };
+}
+
 /**
  * Mise en plan et en volume d'un escalier.
  * stair : { type, x, y (milieu du bord de départ), dir ([dx, dy], sens de montée), width,
- *           turn (1 = à droite, -1 = à gauche), flight1 (marches avant le palier) }
+ *           turn (1 = à droite, -1 = à gauche), flight1, flight2 (marches droites),
+ *           winderSteps (marches rayonnantes, uniquement pour type = 'winder') }
  * height : hauteur à monter (plancher à plancher) ; slabT : épaisseur de la dalle du dessus.
  * Renvoie tout en coordonnées du plan, hauteurs depuis le plancher de départ.
  */
 export function stairLayout(stair, height, slabT = 0.2) {
-  const { risers, riser, going } = stairRhythm(height);
-  const width = Math.max(0.6, stair.width || STAIR_DEFAULTS.width);
+  const { risers, riser, going, flights, turnSteps } = stairParameters(stair, height);
+  const width = Number.isFinite(stair.width) ? Math.min(2.5, Math.max(0.6, stair.width)) : STAIR_DEFAULTS.width;
   const w2 = width / 2;
   const turn = stair.turn === -1 ? -1 : 1;
-  const U = G.norm(stair.dir || [0, -1]);
+  const direction = stair.dir?.length === 2 && stair.dir.every(Number.isFinite) && G.len(stair.dir) > G.EPS ? stair.dir : [0, -1];
+  const U = G.norm(direction);
   const V = G.mul(G.perp(U), turn);
   const O = [stair.x, stair.y];
   const toWorld = ([u, v]) => G.add(G.add(O, G.mul(U, u)), G.mul(V, v));
-  const mapMesh = (m) => ({ positions: m.positions.map(([u, v, z]) => { const w = toWorld([u, v]); return [w[0], w[1], z]; }), triangles: m.triangles });
+  const mapMesh = (m) => ({
+    positions: m.positions.map(([u, v, z]) => { const w = toWorld([u, v]); return [w[0], w[1], z]; }),
+    // Le miroir gauche/droite inverse l'orientation des faces.
+    triangles: turn < 0 ? m.triangles.map(([a, b, c]) => [a, c, b]) : m.triangles,
+  });
 
   const treadsTotal = risers - 1;
   const zCut = height - slabT - STAIR_DEFAULTS.headroom; // au-dessus : moins de 2 m sous la dalle
   const parts = [];
   let footprint, tremie, arrival, treadLines = [], path;
-  const info = { risers, riser, going, blondel: 2 * riser + going, width, treads: treadsTotal };
+  const info = { risers, riser, going, blondel: 2 * riser + going, width, treads: treadsTotal - (stair.type === 'quarter' ? 1 : 0), flights, turnSteps };
 
-  if (stair.type === 'quarter') {
-    // volée 1, palier carré, volée 2 perpendiculaire (côté du virage)
-    const available = treadsTotal - 1; // le palier compte comme une marche
-    const k1 = Math.min(available - 1, Math.max(1, stair.flight1 ?? Math.floor(available / 2)));
-    const k2 = available - k1;
+  if (isTurningStair(stair)) {
+    const [k1, k2] = flights;
     const f1 = flight({ start: [0, 0], axis: [1, 0], width, treads: k1, z0: 0, riser, going, railSide: -1 });
     const u1 = f1.run;
-    const zLanding = (k1 + 1) * riser;
-    const f2 = flight({ start: [u1 + w2, w2], axis: [0, 1], width, treads: k2, z0: zLanding, riser, going, railSide: 1 });
-    parts.push(...f1.parts, ...f2.parts);
-    parts.push({ key: 'landing', mesh: boxUV(u1, u1 + width, -w2, w2, zLanding - 0.2, zLanding) });
-    // garde-corps extérieur du palier
-    const h = STAIR_DEFAULTS.handrail;
-    parts.push({ key: 'rail', mesh: boxUV(u1, u1 + width, -w2 + 0.005, -w2 + 0.055, zLanding + h - 0.05, zLanding + h) });
-    parts.push({ key: 'rail', mesh: boxUV(u1 + width - 0.055, u1 + width - 0.005, -w2, w2, zLanding + h - 0.05, zLanding + h) });
-    parts.push({ key: 'rail', mesh: boxUV(u1 + width - 0.05, u1 + width - 0.01, -w2 + 0.01, -w2 + 0.05, zLanding - 0.2, zLanding + h) });
+    const zTurn = (k1 + turnSteps) * riser;
+    const f2 = flight({ start: [u1 + w2, w2], axis: [0, 1], width, treads: k2, z0: zTurn, riser, going, railSide: -1 });
+    parts.push(...f1.parts.map((p) => ({ ...p, flight: 0 })), ...f2.parts.map((p) => ({ ...p, flight: 1 })));
+    let turnPath;
+    if (stair.type === 'winder') {
+      const fan = winder({ u: u1, width, steps: turnSteps, z0: k1 * riser, riser });
+      parts.push(...fan.parts);
+      treadLines.push(...fan.lines);
+      turnPath = fan.path;
+      info.winderGoing = Math.PI * width / (4 * turnSteps); // ligne de foulée au milieu
+    } else {
+      parts.push({ key: 'landing', mesh: boxUV(u1, u1 + width, -w2, w2, zTurn - 0.2, zTurn) });
+      const h = STAIR_DEFAULTS.handrail;
+      parts.push({ key: 'rail', mesh: boxUV(u1, u1 + width, -w2 + 0.005, -w2 + 0.055, zTurn + h - 0.05, zTurn + h) });
+      parts.push({ key: 'rail', mesh: boxUV(u1 + width - 0.055, u1 + width - 0.005, -w2, w2, zTurn + h - 0.05, zTurn + h) });
+      parts.push({ key: 'rail', mesh: boxUV(u1 + width - 0.05, u1 + width - 0.01, -w2 + 0.01, -w2 + 0.05, zTurn - 0.2, zTurn + h) });
+      treadLines.push([[u1, -w2], [u1, w2]], [[u1, w2], [u1 + width, w2]]);
+      turnPath = [[u1, 0], [u1 + w2, 0], [u1 + w2, w2]];
+    }
     const v2end = w2 + f2.run;
     footprint = [[0, -w2], [u1 + width, -w2], [u1 + width, v2end], [u1, v2end], [u1, w2], [0, w2]];
-    for (let i = 1; i <= k1; i++) treadLines.push([[i * going, -w2], [i * going, w2]]);
-    treadLines.push([[u1, -w2], [u1, w2]]);
-    for (let j = 0; j <= k2; j++) treadLines.push([[u1, w2 + j * going], [u1 + width, w2 + j * going]]);
-    path = [[going / 2, 0], [u1 + w2, 0], [u1 + w2, v2end - going / 2]];
+    for (let i = 1; i < k1; i++) treadLines.push([[i * going, -w2], [i * going, w2]]);
+    for (let j = 1; j <= k2; j++) treadLines.push([[u1, w2 + j * going], [u1 + width, w2 + j * going]]);
+    path = [...(k1 ? [[going / 2, 0]] : []), ...turnPath, ...(k2 ? [[u1 + w2, v2end - going / 2]] : [])];
     arrival = [[u1, v2end], [u1 + width, v2end]];
     // trémie : depuis la première marche où l'échappée passe sous 2 m, jusqu'à l'arrivée
     const firstLow = (z0, count) => { for (let i = 0; i < count; i++) if (z0 + (i + 1) * riser > zCut) return i; return count; };
     const i1 = firstLow(0, k1);
     if (i1 < k1) {
-      const uc = i1 * going;
+      const uc = i1 * going - STAIR_DEFAULTS.nosing;
       tremie = [[uc, -w2], [u1 + width, -w2], [u1 + width, v2end], [u1, v2end], [u1, w2], [uc, w2]];
-    } else if (zLanding > zCut) {
+    } else if (zTurn > zCut) {
+      // Le carré entier est ouvert si une marche tournante manque d'échappée.
       tremie = [[u1, -w2], [u1 + width, -w2], [u1 + width, v2end], [u1, v2end]];
     } else {
-      const i2 = firstLow(zLanding, k2);
-      tremie = [[u1, w2 + i2 * going], [u1 + width, w2 + i2 * going], [u1 + width, v2end], [u1, v2end]];
+      const i2 = firstLow(zTurn, k2);
+      const vc = w2 + i2 * going - STAIR_DEFAULTS.nosing;
+      tremie = i2 < k2 ? [[u1, vc], [u1 + width, vc], [u1 + width, v2end], [u1, v2end]] : null;
     }
     info.flights = [k1, k2];
     info.run = [u1 + width, v2end + w2];
   } else {
     const f = flight({ start: [0, 0], axis: [1, 0], width, treads: treadsTotal, z0: 0, riser, going, railSide: 1 });
-    parts.push(...f.parts);
+    parts.push(...f.parts.map((p) => ({ ...p, flight: 0 })));
     const L = f.run;
     footprint = [[0, -w2], [L, -w2], [L, w2], [0, w2]];
     for (let i = 1; i <= treadsTotal; i++) treadLines.push([[i * going, -w2], [i * going, w2]]);
@@ -178,16 +265,17 @@ export function stairLayout(stair, height, slabT = 0.2) {
     arrival = [[L, -w2], [L, w2]];
     let i0 = treadsTotal;
     for (let i = 0; i < treadsTotal; i++) if ((i + 1) * riser > zCut) { i0 = i; break; }
-    tremie = [[i0 * going, -w2], [L, -w2], [L, w2], [i0 * going, w2]];
+    const uc = i0 * going - STAIR_DEFAULTS.nosing;
+    tremie = i0 < treadsTotal ? [[uc, -w2], [L, -w2], [L, w2], [uc, w2]] : null;
     info.flights = [treadsTotal];
     info.run = [L, width];
   }
 
   // les polygones sont rendus dans le sens positif pour le reste du moteur
-  const world = (poly) => { const p = poly.map(toWorld); return G.polygonArea(p) > 0 ? p : p.reverse(); };
+  const world = (poly) => { const p = G.cleanPolygon(poly.map(toWorld)); return G.polygonArea(p) > 0 ? p : p.reverse(); };
   return {
     info,
-    parts: parts.map((p) => ({ key: p.key, mesh: mapMesh(p.mesh) })),
+    parts: parts.map((p) => ({ ...p, mesh: mapMesh(p.mesh) })),
     footprint: world(footprint),
     tremie: tremie ? world(tremie) : null,
     arrival: arrival.map(toWorld),

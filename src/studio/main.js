@@ -7,7 +7,7 @@ import { View3D, exportGlb } from './view3d.js';
 import { exportIfc } from './ifc-export.js';
 import * as B from './build.js';
 import { autoAlignPlan, applyAlignment, referenceWalls } from './plan-align.js';
-import { STAIR_TYPES, stairLayout } from './stairs.js';
+import { STAIR_TYPES, STAIR_LIMITS, isTurningStair, stairLayout } from './stairs.js';
 import { EQUIPMENT_TYPES, EQUIPMENT_GROUPS } from './equipment-catalog.js';
 import { equipmentIcon } from './equipment-plan.js';
 import * as IO from './io.js';
@@ -477,7 +477,9 @@ function aboveCeiling(s) {
 function stairPanel(L) {
   const idx = editor.levelIndex;
   const above = store.project.levels[idx + 1];
-  const icon = (type) => type === 'quarter'
+  const icon = (type) => type === 'winder'
+    ? '<svg viewBox="0 0 100 30" aria-hidden="true"><path d="M30 26V4h40v22H46V20H30M30 9h16M30 14h16M46 20V4M46 20L54 4M46 20L62 4M46 20L70 12M46 20h24" fill="none" stroke="#1f2a30" stroke-width="1.2"/><path d="M38 26V16Q38 10 48 10H65" fill="none" stroke="#e8672a" stroke-width="1.6"/></svg>'
+    : type === 'quarter'
     ? '<svg viewBox="0 0 100 30" aria-hidden="true"><path d="M30 4h24v22H30M54 4h16v22H54M30 9h24M30 14h24M30 19h24M54 4v22" fill="none" stroke="#1f2a30" stroke-width="1.2"/><path d="M36 26V8h26" fill="none" stroke="#e8672a" stroke-width="1.6"/></svg>'
     : '<svg viewBox="0 0 100 30" aria-hidden="true"><rect x="20" y="9" width="60" height="12" fill="none" stroke="#1f2a30" stroke-width="1.2"/><path d="M28 9v12M36 9v12M44 9v12M52 9v12M60 9v12M68 9v12" stroke="#1f2a30" stroke-width="1"/><path d="M22 15h54" stroke="#e8672a" stroke-width="1.6"/></svg>';
   return `
@@ -486,6 +488,7 @@ function stairPanel(L) {
       <div class="grid2">${Object.entries(STAIR_TYPES).map(([k, label]) => `
         <button class="tile ${editor.tool === 'stair' && editor.stairType === k ? 'on' : ''}" data-stair-type="${k}">${icon(k)}<span>${esc(label)}</span></button>`).join('')}</div>
       <p class="sub">Cliquez le départ, puis le sens de la montée. Les marches se calculent sur la hauteur d'étage (${fmt(L.height)} m) et la trémie se perce dans le plancher de ${esc(above?.name || "l'étage du dessus")}.</p>
+      <p class="sub">Sélectionnez ensuite l'escalier pour régler séparément les marches avant et après le virage.</p>
       ${above ? '' : '<p class="note">Aucun étage au-dessus : ajoutez-en un pour que l\'escalier y arrive.</p>'}
     </section>`;
 }
@@ -645,6 +648,9 @@ function findSelection() {
 const numField = (label, field, value, unit = 'm') => `
   <label class="field"><span class="field-label">${label}</span><span class="unit" data-unit="${unit}"><input type="text" inputmode="decimal" value="${fmt(value)}" data-prop="${field}" /></span></label>`;
 
+const stairCountField = (label, field, value, min = 0, max = STAIR_LIMITS.flight) => `
+  <label class="field"><span class="field-label">${label}</span><input type="number" inputmode="numeric" min="${min}" max="${max}" step="1" value="${value}" data-prop="stair-${field}" /></label>`;
+
 const colorScopeBody = () => (ui.colorScope && ui.colorScope !== 'project' ? M.bodyById(store.project, ui.colorScope) : null);
 
 // Réglages du corps actif, disponibles depuis n'importe quelle étape
@@ -741,24 +747,34 @@ function renderInspector() {
       <section><button class="btn danger block" data-act="delete-selection">Supprimer l'angle et ses murs</button></section>`;
   } else if (s.type === 'stair') {
     const st = s.item, i = s.layout.info;
+    const turning = isTurningStair(st);
     const above = store.project.levels[editor.levelIndex + 1];
     el.innerHTML = `
-      <h2>Escalier ${st.type === 'quarter' ? 'quart tournant' : 'droit'}</h2>
+      <h2>Escalier ${esc((STAIR_TYPES[st.type] || STAIR_TYPES.straight).toLowerCase())}</h2>
       <p class="sub">De ${esc(L.name)} à ${esc(above?.name || "l'étage du dessus (à créer)")}, ${fmt(L.height)} m à monter</p>
       <div class="stat"><span>Marches</span><b>${i.risers} hauteurs de ${fmt(i.riser * 100, 1)} cm</b></div>
-      <div class="stat"><span>Giron</span><b>${fmt(i.going * 100, 1)} cm</b></div>
-      <div class="stat"><span>Confort (2 h + g)</span><b>${fmt(i.blondel * 100, 1)} cm</b></div>
+      <div class="stat"><span>Giron droit</span><b>${fmt(i.going * 100, 1)} cm</b></div>
+      ${st.type === 'winder' ? `<div class="stat"><span>Giron au milieu du tournant</span><b>${fmt(i.winderGoing * 100, 1)} cm</b></div>` : ''}
+      <div class="stat"><span>2 h + g (volées droites)</span><b>${fmt(i.blondel * 100, 1)} cm</b></div>
       <div class="stat"><span>Emprise au sol</span><b>${fmt(i.run[0])} × ${fmt(i.run[1])} m</b></div>
       <section>
         <label class="field"><span class="field-label">Forme</span>
           <select data-prop="stair-type">${Object.entries(STAIR_TYPES).map(([k, v]) => `<option value="${k}" ${k === st.type ? 'selected' : ''}>${esc(v)}</option>`).join('')}</select></label>
-        ${numField('Largeur', 'stair-width', st.width)}
-        ${st.type === 'quarter' ? numField('Marches avant le palier', 'stair-flight1', i.flights[0], '') : ''}
+        ${numField('Largeur', 'stair-width', i.width)}
+        ${turning ? `<div class="grid2">
+          ${stairCountField('Marches avant le virage', 'flight1', i.flights[0])}
+          ${stairCountField('Marches après le virage', 'flight2', i.flights[1])}
+        </div>
+        ${st.type === 'winder' ? stairCountField('Marches dans le tournant', 'winderSteps', i.turnSteps, 2, STAIR_LIMITS.winders) : ''}
+        <p class="sub">${i.flights[0]} avant + ${st.type === 'winder' ? `${i.turnSteps} tournantes` : '1 palier'} + ${i.flights[1]} après + l'arrivée à l'étage = ${i.risers} hauteurs. Modifier une volée conserve le nombre de marches de l'autre. La hauteur de marche s'adapte.</p>
+        <button class="btn" data-act="stair-auto">Répartition automatique</button>` : ''}
+        ${st.type === 'winder' ? '<p class="sub">Marches en éventail autour du coin intérieur. Le giron tournant est mesuré au milieu de la largeur.</p>' : ''}
         <div class="row">
           <button class="btn" data-act="stair-rotate">Pivoter <kbd>R</kbd></button>
-          ${st.type === 'quarter' ? '<button class="btn" data-act="stair-flip">Virer de l\'autre côté <kbd>F</kbd></button>' : ''}
+          ${turning ? '<button class="btn" data-act="stair-flip">Virer de l\'autre côté <kbd>F</kbd></button>' : ''}
         </div>
-        ${st.width < 0.8 ? '<p class="note">Largeur inférieure à 0,80 m : passage étroit pour un escalier principal.</p>' : ''}
+        ${i.width < 0.8 ? '<p class="note">Largeur inférieure à 0,80 m : passage étroit pour un escalier principal.</p>' : ''}
+        ${i.riser < 0.14 || i.riser > 0.20 || i.blondel < 0.60 || i.blondel > 0.66 ? '<p class="note">Cette répartition donne des marches très basses ou très hautes, ou un pas inconfortable. Ajustez les nombres de marches.</p>' : ''}
         <p class="sub">Glissez l'escalier pour le déplacer. La trémie et son garde-corps suivent.</p>
       </section>
       <section><button class="btn danger block" data-act="delete-selection">Supprimer <kbd>Suppr</kbd></button></section>`;
@@ -865,13 +881,20 @@ function applyProp(prop, raw) {
   const needNum = !['wall-type', 'room-name', 'room-body', 'bal-railing', 'ter-mode', 'ter-railing', 'stair-type'].includes(prop);
   if (prop.startsWith('stair-')) {
     const key = prop.slice(6);
-    if (key !== 'type' && !(value > 0)) { toast('Valeur invalide.', 'warn'); renderInspector(); return; }
+    const flightCount = key === 'flight1' || key === 'flight2';
+    if (key === 'type' ? !Object.hasOwn(STAIR_TYPES, raw) : (!Number.isFinite(value) || (flightCount ? value < 0 : value <= 0))) {
+      toast('Valeur invalide.', 'warn'); renderInspector(); return;
+    }
     store.commit("Modifier l'escalier", (pr) => {
       const st = (pr.levels.find((l) => l.id === L.id).stairs || []).find((x) => x.id === s.id);
       if (!st) return false;
       if (key === 'type') st.type = raw;
       if (key === 'width') st.width = Math.max(0.6, Math.min(2.5, value));
-      if (key === 'flight1') st.flight1 = Math.max(1, Math.round(value));
+      if (flightCount || key === 'winderSteps') {
+        // Figer les deux valeurs affichées avant de modifier celle demandée.
+        [st.flight1, st.flight2] = s.layout.info.flights;
+        st[key] = Math.max(key === 'winderSteps' ? 2 : 0, Math.min(key === 'winderSteps' ? STAIR_LIMITS.winders : STAIR_LIMITS.flight, Math.round(value)));
+      }
       return true;
     });
     return;
@@ -1367,6 +1390,15 @@ document.addEventListener('click', (e) => {
     'tool-balcony': () => setTool('balcony'),
     'stair-rotate': () => { if (editor.selection?.type === 'stair') editor.rotateStair(editor.selection.id, 90); },
     'stair-flip': () => { if (editor.selection?.type === 'stair') editor.flipStair(editor.selection.id); },
+    'stair-auto': () => {
+      const sel = findSelection();
+      if (sel?.type !== 'stair') return;
+      store.commit('Répartition automatique des marches', (pr) => {
+        const st = pr.levels.find((l) => l.id === L.id).stairs.find((x) => x.id === sel.id);
+        delete st.flight1;
+        delete st.flight2;
+      });
+    },
     'balcony-window': () => {
       const sel = findSelection();
       if (!sel?.item) return;

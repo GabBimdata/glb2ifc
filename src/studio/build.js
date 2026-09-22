@@ -4,7 +4,7 @@ import * as G from './geometry.js';
 import { WALL_TYPES, OPENING_TYPES, ROOF_OPENINGS, BALCONY } from './catalog.js';
 import { EQUIPMENT_TYPES } from './equipment-catalog.js';
 import { equipmentParts, placeEquipment } from './equipment-models.js';
-import { stairLayout } from './stairs.js';
+import { STAIR_TYPES, stairLayout } from './stairs.js';
 import { levelElevation, wallHeight, levelFaces, bodyById, bodyHeight, bodyOutlines, bodyTopLevelIndex, isAttic, roofBaseHeight } from './model.js';
 
 export { triangulate } from './geometry.js';
@@ -633,8 +633,8 @@ export function buildElements(project, options = {}) {
     for (const { stair, layout } of levelStairs(project, li)) {
       elements.push({
         kind: 'stair', level, levelIndex: li, body: bodyById(project, mainId), stair, layout,
-        name: `Escalier ${stair.type === 'quarter' ? 'quart tournant' : 'droit'}`,
-        parts: layout.parts.map((p) => ({ key: p.key, mesh: { positions: p.mesh.positions.map(([x, y, zz]) => [x, y, z + zz]), triangles: p.mesh.triangles } })),
+        name: `Escalier ${(STAIR_TYPES[stair.type] || STAIR_TYPES.straight).toLowerCase()}`,
+        parts: layout.parts.map((p) => ({ ...p, mesh: { positions: p.mesh.positions.map(([x, y, zz]) => [x, y, z + zz]), triangles: p.mesh.triangles } })),
         key: `stair-${stair.id}`,
       });
     }

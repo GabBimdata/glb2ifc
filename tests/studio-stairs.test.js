@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as G from '../src/studio/geometry.js';
 import * as M from '../src/studio/model.js';
-import { stairRhythm, stairLayout } from '../src/studio/stairs.js';
+import { stairRhythm, stairParameters, stairLayout } from '../src/studio/stairs.js';
 import { buildElements, levelTremies } from '../src/studio/build.js';
 import { exportIfc } from '../src/studio/ifc-export.js';
 
@@ -16,7 +16,7 @@ test('the rhythm follows the Blondel rule', () => {
 });
 
 test('headroom is at least 2 m wherever the slab above is kept', () => {
-  for (const type of ['straight', 'quarter']) {
+  for (const type of ['straight', 'quarter', 'winder']) {
     const L = stairLayout({ type, x: 0, y: 0, dir: [1, 0], width: 0.9, turn: 1 }, 2.8, 0.2);
     // chaque marche hors trémie a au moins 2 m sous la dalle du dessus
     const treads = L.parts.filter((p) => p.key === 'tread');
@@ -68,4 +68,143 @@ test('stairs are exported as IfcStair with flights, landing and handrail', () =>
   assert.match(ifc, /IFCSLAB\([^\n]*\.LANDING\./);
   assert.match(ifc, /IFCRAILING\([^\n]*\.HANDRAIL\./);
   assert.match(ifc, /IFCARBITRARYPROFILEDEFWITHVOIDS\(/, 'plancher percé');
+});
+
+test('legacy stairs keep their automatic rhythm and asymmetric split', () => {
+  for (const [flight1, expected] of [[undefined, [7, 7]], [3, [3, 11]], [11, [11, 3]]]) {
+    const p = stairParameters({ type: 'quarter', flight1 }, 2.8);
+    assert.equal(p.risers, 16);
+    assert.equal(p.riser, 0.175);
+    assert.equal(p.going, 0.28);
+    assert.deepEqual(p.flights, expected);
+  }
+});
+
+test('independent flight counts preserve the exact storey height', () => {
+  for (const type of ['quarter', 'winder']) {
+    const stair = { type, x: 0, y: 0, dir: [1, 0], flight1: 3, flight2: 9 };
+    const L = stairLayout(stair, 2.8);
+    assert.deepEqual(L.info.flights, [3, 9]);
+    assert.equal(L.info.risers, type === 'quarter' ? 14 : 16);
+    const surfaces = L.parts.filter((p) => ['tread', 'landing'].includes(p.key));
+    const tops = surfaces.map((p) => Math.max(...p.mesh.positions.map((v) => v[2]))).sort((a, b) => a - b);
+    assert.equal(tops.length, L.info.risers - 1);
+    tops.push(2.8);
+    tops.forEach((z, i) => assert.ok(Math.abs(z - (i + 1) * L.info.riser) < 1e-9));
+    const changed = stairParameters({ ...stair, flight1: 6 }, 2.8);
+    assert.deepEqual(changed.flights, [6, 9]);
+    assert.equal(changed.risers, L.info.risers + 3);
+    assert.equal(stairParameters({ ...stair, type: 'straight' }, 2.8).risers, 16, 'straight ignores hidden turning settings');
+  }
+});
+
+function checkClosedMesh(mesh) {
+  const edges = new Map();
+  let volume = 0;
+  for (const v of mesh.positions) assert.ok(v.every(Number.isFinite));
+  for (const [a, b, c] of mesh.triangles) {
+    const p = mesh.positions[a], q = mesh.positions[b], r = mesh.positions[c];
+    const u = q.map((v, i) => v - p[i]), v = r.map((x, i) => x - p[i]);
+    const cross = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+    assert.ok(Math.hypot(...cross) > 1e-10, 'no degenerate triangles');
+    volume += p.reduce((s, x, i) => s + x * cross[i], 0) / 6;
+    for (const [i, j] of [[a, b], [b, c], [c, a]]) {
+      const key = `${Math.min(i, j)}:${Math.max(i, j)}`;
+      const edge = edges.get(key) || { count: 0, direction: 0 };
+      edge.count++;
+      edge.direction += i < j ? 1 : -1;
+      edges.set(key, edge);
+    }
+  }
+  for (const edge of edges.values()) assert.deepEqual(edge, { count: 2, direction: 0 }, 'closed and consistently wound');
+  assert.ok(volume > 0, `outward normals, volume=${volume}`);
+}
+
+test('both turns stay closed under mirroring, rotation and zero-length flights', () => {
+  for (const type of ['quarter', 'winder']) for (const turn of [-1, 1]) {
+    for (const angle of [0, Math.PI / 2, 0.37]) for (const [flight1, flight2] of [[3, 9], [9, 3], [0, 12], [12, 0], [0, 0], [1, 20]]) {
+      for (const winderSteps of type === 'winder' ? [2, 3, 4, 5, 8] : [1]) {
+        const L = stairLayout({ type, turn, x: 2, y: -3, dir: [Math.cos(angle), Math.sin(angle)], flight1, flight2, winderSteps }, 2.8);
+        assert.ok(G.polygonArea(L.footprint) > 0);
+        if (L.tremie) assert.ok(G.polygonArea(L.tremie) > 0);
+        for (const part of L.parts) checkClosedMesh(part.mesh);
+      }
+    }
+  }
+});
+
+test('fan treads tile the entire square turn without a landing or overlap', () => {
+  for (const winderSteps of [2, 3, 4, 5, 8]) for (const width of [0.6, 0.9, 1.2]) {
+    const L = stairLayout({ type: 'winder', x: 0, y: 0, dir: [1, 0], flight1: 0, flight2: 0, winderSteps, width }, 1.2);
+    assert.equal(L.parts.filter((p) => p.key === 'landing').length, 0);
+    const treads = L.parts.filter((p) => p.key === 'tread');
+    assert.equal(treads.length, winderSteps);
+    const polygons = treads.map((p) => p.mesh.positions.slice(0, p.mesh.positions.length / 2).map((v) => v.slice(0, 2)));
+    assert.ok(Math.abs(polygons.reduce((a, p) => a + G.polygonArea(p), 0) - width * width) < 1e-9);
+    for (let x = 0; x < 17; x++) for (let y = 0; y < 17; y++) {
+      const point = [width * (x + 0.31) / 17, width * ((y + 0.63) / 17 - 0.5)];
+      assert.equal(polygons.filter((p) => G.pointInPolygon(point, p)).length, 1, 'every point belongs to exactly one tread');
+    }
+  }
+});
+
+test('headroom openings include the noses and all high turning treads', () => {
+  for (const type of ['straight', 'quarter', 'winder']) for (const turn of [-1, 1]) {
+    for (const height of [2.1, 2.8, 3.2]) for (const [flight1, flight2] of [[2, 10], [10, 2], [0, 12], [12, 0]]) {
+      const L = stairLayout({ type, x: 2, y: 4, dir: [Math.cos(0.37), Math.sin(0.37)], turn, flight1, flight2 }, height, 0.25);
+      for (const part of L.parts.filter((p) => ['tread', 'landing'].includes(p.key))) {
+        const top = Math.max(...part.mesh.positions.map((p) => p[2]));
+        if (height - 0.25 - top >= 2 - 1e-9) continue;
+        const poly = part.mesh.positions.slice(0, part.mesh.positions.length / 2).map((p) => p.slice(0, 2));
+        const center = G.polygonCentroid(poly);
+        for (const p of poly) {
+          const inside = G.add(G.mul(p, 0.999), G.mul(center, 0.001));
+          assert.ok(L.tremie && G.pointInPolygon(inside, L.tremie), `${type}: low headroom at ${inside}`);
+        }
+      }
+    }
+  }
+});
+
+test('invalid counts are bounded and never create partial or non-finite steps', () => {
+  const p = stairParameters({ type: 'winder', flight1: -8, flight2: 9999, winderSteps: 9999 }, 2.8);
+  assert.deepEqual(p.flights, [0, 100]);
+  assert.equal(p.turnSteps, 8);
+  const q = stairParameters({ type: 'winder', flight1: NaN, flight2: Infinity, winderSteps: NaN }, 2.8);
+  assert.deepEqual(q.flights, [6, 6]);
+  assert.equal(q.turnSteps, 3);
+  assert.deepEqual(stairParameters({ type: 'quarter', flight1: 3.4, flight2: 8.8 }, 2.8).flights, [3, 9]);
+});
+
+test('winder settings survive save/load and undo/redo, and update the upper slab', () => {
+  const store = new M.Store(house());
+  store.commit('winder', (p) => Object.assign(p.levels[0].stairs[0], { type: 'winder', flight1: 3, flight2: 9, winderSteps: 3 }));
+  const saved = M.validateProject(JSON.parse(JSON.stringify(store.project)));
+  assert.deepEqual(stairParameters(saved.levels[0].stairs[0], 2.8).flights, [3, 9]);
+  const before = levelTremies(saved, 1)[0].poly;
+  store.undo();
+  assert.equal(store.project.levels[0].stairs[0].type, 'quarter');
+  store.redo();
+  assert.equal(store.project.levels[0].stairs[0].flight2, 9);
+  store.commit('change split', (p) => Object.assign(p.levels[0].stairs[0], { flight1: 9, flight2: 3 }));
+  assert.notDeepEqual(levelTremies(store.project, 1)[0].poly, before);
+  assert.equal(buildElements(saved).elements.filter((e) => e.kind === 'stair').length, 2);
+  assert.equal(buildElements(saved).elements.filter((e) => e.kind === 'tremieRail').length, 2);
+});
+
+test('IFC distinguishes a winding flight from two straight flights and a landing', () => {
+  const p = house();
+  p.levels[0].stairs = [{ id: 'custom', type: 'winder', x: 1, y: 7, dir: [1, 0], turn: -1, flight1: 3, flight2: 9, winderSteps: 3 }];
+  const ifc = exportIfc(p);
+  assert.match(ifc, /IFCSTAIR\([^\n]*\.QUARTER_WINDING_STAIR\./);
+  assert.match(ifc, /IFCSTAIRFLIGHT\([^\n]*,16,15,0\.175,0\.28,\.WINDER\.\)/);
+  assert.doesNotMatch(ifc, /IFCSLAB\([^\n]*\.LANDING\./);
+  assert.match(ifc, /IFCARBITRARYPROFILEDEFWITHVOIDS\(/);
+  p.levels[0].stairs[0].type = 'quarter';
+  const landingIfc = exportIfc(p);
+  const flights = landingIfc.match(/IFCSTAIRFLIGHT\([^\n]+/g);
+  assert.equal(flights.length, 2);
+  assert.match(flights[0], /,4,3,0\.2,0\.23,\.STRAIGHT\.\)/);
+  assert.match(flights[1], /,10,9,0\.2,0\.23,\.STRAIGHT\.\)/);
+  assert.match(landingIfc, /IFCSLAB\([^\n]*\.LANDING\./);
 });

@@ -404,9 +404,9 @@ export function exportIfc(project) {
       // IfcStair regroupe ses volées (avec leurs marches et limons), son palier et sa main courante
       const pl = placement(st.placement);
       const info = el.layout.info;
-      const mergeKey = (keys) => {
+      const mergeKey = (keys, flightIndex = null) => {
         const m = { positions: [], triangles: [] };
-        for (const p of el.parts.filter((x) => keys.includes(x.key))) {
+        for (const p of el.parts.filter((x) => keys.includes(x.key) && (flightIndex === null || x.flight === flightIndex))) {
           const off = m.positions.length;
           m.positions.push(...p.mesh.positions);
           for (const t of p.mesh.triangles) m.triangles.push([t[0] + off, t[1] + off, t[2] + off]);
@@ -414,11 +414,17 @@ export function exportIfc(project) {
         return m.triangles.length ? m : null;
       };
       const quarter = el.stair.type === 'quarter';
-      const stair = w.add(`IFCSTAIR(${guid(key)},${oh},${stepString(el.name)},$,$,${pl},$,$,${quarter ? '.QUARTER_TURN_STAIR.' : '.STRAIGHT_RUN_STAIR.'})`);
+      const winding = el.stair.type === 'winder';
+      const stair = w.add(`IFCSTAIR(${guid(key)},${oh},${stepString(el.name)},$,$,${pl},$,$,${winding ? '.QUARTER_WINDING_STAIR.' : quarter ? '.QUARTER_TURN_STAIR.' : '.STRAIGHT_RUN_STAIR.'})`);
       const children = [];
-      const flightMesh = mergeKey(['tread', 'stringer']);
-      if (flightMesh) {
-        const fl = w.add(`IFCSTAIRFLIGHT(${guid(`flight-${key}`)},${oh},${stepString('Volées')},$,$,${pl},${shape([styled(faceSet(flightMesh, st.z), 'stair', el.body)], 'Tessellation')},$,${info.risers},${info.treads},${num(info.riser)},${num(info.going)},.STRAIGHT.)`);
+      // Un palier sépare deux volées droites ; sans palier, le quart tournant
+      // constitue une seule volée de type WINDER, incluant les marches en éventail.
+      const flights = quarter ? info.flights.map((treads, index) => ({ index, treads, risers: treads + 1 }))
+        : [{ index: null, treads: info.treads, risers: info.risers }];
+      for (const f of flights) {
+        const flightMesh = mergeKey(['tread', 'stringer'], f.index);
+        if (!flightMesh) continue;
+        const fl = w.add(`IFCSTAIRFLIGHT(${guid(`flight-${key}-${f.index ?? 'all'}`)},${oh},${stepString(quarter ? `Volée ${f.index + 1}` : 'Volée')},$,$,${pl},${shape([styled(faceSet(flightMesh, st.z), 'stair', el.body)], 'Tessellation')},$,${f.risers},${f.treads},${num(info.riser)},${num(info.going)},${winding ? '.WINDER.' : '.STRAIGHT.'})`);
         children.push(fl);
       }
       const landingMesh = mergeKey(['landing']);
