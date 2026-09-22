@@ -943,11 +943,15 @@ export function buildDormer(opts) {
     const depth = Math.max(0.6, opts.depth ?? 2);
     const tanS = Math.max(0.05, s - hW / depth);
     const zf = (p) => hW + p[0] * tanS;
-    roofSurfaces.push({ poly: [[0, -w2], [40, -w2], [40, w2], [0, w2]], zf });
+    const e = 0.06; // léger débord : une rive franche, sans face confondue avec la façade
+    roofSurfaces.push({ poly: [[-e, -w2 - e], [40, -w2 - e], [40, w2 + e], [-e, w2 + e]], zf });
   } else {
     const zRight = (p) => hR - Math.abs(p[1]) * tanD;
-    roofSurfaces.push({ poly: [[0, 0], [40, 0], [40, w2], [0, w2]], zf: zRight });
-    roofSurfaces.push({ poly: [[0, -w2], [40, -w2], [40, 0], [0, 0]], zf: zRight });
+    // léger débord en façade et sur les rives : sans lui, le haut du pignon et la
+    // sous-face de la couverture sont dans le même plan et scintillent à l'écran
+    const e = type === 'hip' ? 0 : 0.06;
+    roofSurfaces.push({ poly: [[-e, 0], [40, 0], [40, w2 + e], [-e, w2 + e]], zf: zRight });
+    roofSurfaces.push({ poly: [[-e, -w2 - e], [40, -w2 - e], [40, 0], [-e, 0]], zf: zRight });
     if (type === 'hip') {
       // croupe avant : plan montant depuis l'égout de la lucarne
       const zHip = (p) => hW + p[0] * tanD;
@@ -971,6 +975,10 @@ export function buildDormer(opts) {
   let hole = [];
   for (const c of clipped) for (const p of c.poly) hole.push(p);
   hole = convexHullUV(hole);
+  // le percement suit l'emprise des joues et de la façade, pas le débord de la couverture
+  hole = clipUV(hole, (p) => p[0]) || hole;
+  hole = clipUV(hole, (p) => w2 - p[1]) || hole;
+  hole = clipUV(hole, (p) => w2 + p[1]) || hole;
 
   // — joues —
   const shedTan = Math.max(0.05, s - hW / Math.max(0.6, opts.depth ?? 2));
@@ -1013,7 +1021,11 @@ export function buildDormer(opts) {
       t / 2 - 0.01, t / 2 + 0.01, (p, u) => [u, p[0], p[1]]),
   });
 
-  return { hole, parts, ceilingFaces: clipped.map((c) => ({ poly: c.poly, zAt: (p) => c.zf(p) - tr })), ridgeZ: type === 'shed' ? hW + 1 : hR, window: { width: ww, height: wh, sill: win.sill } };
+  return { hole, parts, ceilingFaces: clipped
+    // dessous de la couverture, limité à l'emprise de la lucarne (le débord est dehors)
+    .map((c) => ({ c, poly: [(p) => p[0], (p) => w2 - p[1], (p) => w2 + p[1]].reduce((acc, f) => acc && clipUV(acc, f), c.poly) }))
+    .filter((x) => x.poly)
+    .map(({ c, poly }) => ({ poly, zAt: (p) => c.zf(p) - tr })), ridgeZ: type === 'shed' ? hW + 1 : hR, window: { width: ww, height: wh, sill: win.sill } };
 }
 
 // Enveloppe convexe (les emprises de lucarnes sont convexes : rectangle ou pentagone)

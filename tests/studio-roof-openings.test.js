@@ -155,7 +155,8 @@ test('invalid and overlapping roof openings produce explicit warnings and no bro
   addRoof(h, 'skylight', [5, 1]);
   addRoof(h, 'skylight', [5, 1]);
   addRoof(h, 'skylight', [2, 1], { width: 30 });
-  addRoof(h, 'dormerGable', [8, 1], { wallHeight: 0.3 });
+  // lucarne impossible : égout (depuis le plancher) plus bas que l'allège de sa baie
+  addRoof(h, 'dormerGable', [8, 1], { ref: 'floor', eave: 0.5, winSill: 0.95 });
   addRoof(h, 'skylight', [100, 100]);
   const openings = roofOpenings(h.p, h.l, h.b);
   assert.equal(openings.length, 5);

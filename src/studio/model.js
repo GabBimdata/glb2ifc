@@ -37,7 +37,7 @@ export function newProject(name = 'Nouveau projet') {
 
 export function newLevel(name, height = DEFAULTS.levelHeight) {
   return {
-    id: uid('L'), name, height, nodes: {}, walls: [], rooms: [], equipment: [], balconies: [], plan: null,
+    id: uid('L'), name, height, nodes: {}, walls: [], rooms: [], equipment: [], balconies: [], stairs: [], plan: null,
     // zone de l'étage inférieur non couverte par celui-ci : terrasse accessible ou toiture-terrasse
     terrace: { mode: 'terrace', railing: 'glass', railingHeight: 1.0 },
     // étage sous toiture : jambettes et faux plafond
@@ -551,6 +551,7 @@ export function validateProject(data) {
     for (const w of l.walls) w.openings = w.openings || [];
     l.equipment = Array.isArray(l.equipment) ? l.equipment : [];
     l.balconies = Array.isArray(l.balconies) ? l.balconies : [];
+    l.stairs = Array.isArray(l.stairs) ? l.stairs : []; // un escalier part de son niveau et monte au suivant
     l.terrace = { mode: 'terrace', railing: 'glass', railingHeight: 1.0, ...(l.terrace || {}) };
     l.attic = { enabled: false, kneeWall: 0.9, ceilingHeight: 2.5, ...(l.attic || {}) };
     for (const it of l.equipment) {

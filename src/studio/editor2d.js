@@ -3,7 +3,8 @@ import * as G from './geometry.js';
 import * as M from './model.js';
 import { WALL_TYPES, OPENING_TYPES, DEFAULTS } from './catalog.js';
 import { loadImage } from './io.js';
-import { roofOpenings, levelTerraces, balconyGeometry, atticContext } from './build.js';
+import { roofOpenings, levelTerraces, balconyGeometry, atticContext, levelStairs, levelTremies } from './build.js';
+import { stairLayout } from './stairs.js';
 import { SKYLIGHT, ROOF_OPENINGS, BALCONY } from './catalog.js';
 import { EQUIPMENT_TYPES } from './equipment-catalog.js';
 import { drawEquipmentSymbol } from './equipment-plan.js';
@@ -42,6 +43,7 @@ export class Editor2D {
     this.roofOpeningType = 'skylight';
     this.planScaleUnlocked = false;
     this.equipmentType = 'wc';
+    this.stairType = 'straight';
     this.equipmentRotation = 0;
     this.selection = null;
     this.hover = null;
@@ -327,6 +329,7 @@ export class Editor2D {
       skylight: () => this.skylightClick(w),
       equipment: () => this.equipmentClick(w),
       balcony: () => this.balconyClick(w),
+      stair: () => this.stairClick(w),
       movePlan: () => { if (this.level.plan) { this.store.beginGesture('Déplacer le plan'); this.drag = { kind: 'plan', start: w, x: this.level.plan.x, y: this.level.plan.y }; } },
       planAdjust: () => this.planAdjustDown(w, s),
     }[this.tool];
@@ -430,6 +433,8 @@ export class Editor2D {
       return;
     }
     if (k === 'r' && this.selection?.type === 'equipment') { this.rotateEquipment(this.selection.id, 90); return; }
+    if (k === 'r' && this.selection?.type === 'stair') { this.rotateStair(this.selection.id, 90); return; }
+    if (k === 'f' && this.selection?.type === 'stair') { this.flipStair(this.selection.id); return; }
     if (k === 'f' && this.tool === 'wall') { this.edgeSide *= -1; this.invalidate(); this.hooks.onToast('Côté du mur inversé'); return; }
     if (k === 'v') this.hooks.requestTool?.('select');
     if (k === 'm') this.hooks.requestTool?.('wall');
@@ -467,6 +472,9 @@ export class Editor2D {
     if (eq) return eq;
     for (const b of L.balconies || []) {
       if (G.pointInPolygon(w, balconyGeometry(b).poly)) return { type: 'balcony', id: b.id };
+    }
+    for (const { stair, layout } of levelStairs(this.project, this.levelIndex)) {
+      if (G.pointInPolygon(w, layout.footprint)) return { type: 'stair', id: stair.id };
     }
     for (const tr of this.terraces()) {
       if (tr.gross.some((pc) => G.pointInPolygon(w, pc.outer) && !pc.holes.some((h) => G.pointInPolygon(w, h)))) return { type: 'terrace', id: tr.key };
@@ -549,6 +557,147 @@ export class Editor2D {
     ctx.textAlign = 'left';
     ctx.fillText(`${rot.toFixed(1).replace('.', ',')}°`, r[0] + 12, r[1] + 4);
     ctx.restore();
+  }
+
+  // ─── Escaliers ─────────────────────────────────────────────────────────────
+  // Premier clic : départ (bas de la première marche) ; second clic : sens de la montée.
+  stairDirection(start, w) {
+    let d = G.sub(w, start);
+    if (G.len(d) < 1e-6) return [0, -1];
+    if (!this.keys.shift) {
+      const a = Math.round(Math.atan2(d[1], d[0]) / (Math.PI / 2)) * (Math.PI / 2);
+      d = [Math.cos(a), Math.sin(a)];
+    }
+    return G.norm(d);
+  }
+
+  stairClick(w) {
+    const p = this.snapGrid(w);
+    if (!this.state.stairStart) {
+      this.state.stairStart = p;
+      this.invalidate();
+      return;
+    }
+    const start = this.state.stairStart;
+    const dir = this.stairDirection(start, w);
+    this.state = {};
+    const id = M.uid('st');
+    const levelId = this.levelId;
+    this.store.commit('Poser un escalier', (pr) => {
+      const L = pr.levels.find((l) => l.id === levelId);
+      L.stairs = L.stairs || [];
+      L.stairs.push({ id, type: this.stairType, x: start[0], y: start[1], dir, width: 0.9, turn: 1 });
+    });
+    this.select({ type: 'stair', id });
+    if (this.levelIndex === this.project.levels.length - 1) {
+      this.hooks.onToast("Pas d'étage au-dessus : l'escalier monte d'une hauteur d'étage, mais aucune trémie n'est percée. Ajoutez le niveau suivant.", 'warn');
+    }
+  }
+
+  rotateStair(id, delta) {
+    const levelId = this.levelId;
+    this.store.commit('Pivoter un escalier', (pr) => {
+      const st = (pr.levels.find((l) => l.id === levelId).stairs || []).find((x) => x.id === id);
+      if (!st) return;
+      const a = (delta * Math.PI) / 180, c = Math.cos(a), sn = Math.sin(a);
+      st.dir = [st.dir[0] * c - st.dir[1] * sn, st.dir[0] * sn + st.dir[1] * c].map((v) => Math.round(v * 1e9) / 1e9);
+    });
+  }
+
+  flipStair(id) {
+    const levelId = this.levelId;
+    this.store.commit('Inverser le virage', (pr) => {
+      const st = (pr.levels.find((l) => l.id === levelId).stairs || []).find((x) => x.id === id);
+      if (st) st.turn = st.turn === -1 ? 1 : -1;
+    });
+  }
+
+  drawStairSymbol(layout, { selected = false, preview = false } = {}) {
+    const ctx = this.ctx;
+    ctx.save();
+    this.pathPoly(layout.footprint);
+    ctx.fillStyle = preview ? 'rgba(232,103,42,0.18)' : selected ? 'rgba(232,103,42,0.14)' : 'rgba(176,138,98,0.14)';
+    ctx.fill();
+    ctx.strokeStyle = selected || preview ? ACCENT : INK;
+    ctx.lineWidth = selected ? 2 : 1.3;
+    ctx.stroke();
+    ctx.lineWidth = 0.9;
+    ctx.beginPath();
+    for (const [a, b] of layout.treadLines) { const p = this.toScreen(a), q = this.toScreen(b); ctx.moveTo(p[0], p[1]); ctx.lineTo(q[0], q[1]); }
+    ctx.stroke();
+    // ligne de foulée et flèche de montée
+    const pts = layout.path.map((p) => this.toScreen(p));
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    pts.forEach((p, i) => (i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])));
+    ctx.stroke();
+    const e = pts[pts.length - 1], f = pts[pts.length - 2];
+    const d = G.norm(G.sub(e, f)), n = G.perp(d);
+    ctx.beginPath();
+    ctx.moveTo(e[0] + d[0] * 6, e[1] + d[1] * 6);
+    ctx.lineTo(e[0] - d[0] * 6 + n[0] * 5, e[1] - d[1] * 6 + n[1] * 5);
+    ctx.lineTo(e[0] - d[0] * 6 - n[0] * 5, e[1] - d[1] * 6 - n[1] * 5);
+    ctx.closePath();
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.fill();
+    const s0 = pts[0];
+    ctx.beginPath(); ctx.arc(s0[0], s0[1], 3, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+
+  drawStairs() {
+    const ctx = this.ctx;
+    // trémies percées dans ce plancher par l'escalier du dessous
+    for (const t of levelTremies(this.project, this.levelIndex)) {
+      ctx.save();
+      this.pathPoly(t.poly);
+      ctx.fillStyle = 'rgba(230,233,235,0.9)';
+      ctx.fill();
+      ctx.strokeStyle = INK;
+      ctx.lineWidth = 1.4;
+      ctx.stroke();
+      // croix du vide, limitée au contour (une trémie de quart tournant est en L)
+      const xs = t.poly.map((p) => this.toScreen(p));
+      const bx0 = Math.min(...xs.map((q) => q[0])), bx1 = Math.max(...xs.map((q) => q[0]));
+      const by0 = Math.min(...xs.map((q) => q[1])), by1 = Math.max(...xs.map((q) => q[1]));
+      ctx.save();
+      this.pathPoly(t.poly);
+      ctx.clip();
+      ctx.lineWidth = 0.8;
+      ctx.beginPath();
+      ctx.moveTo(bx0, by0); ctx.lineTo(bx1, by1);
+      ctx.moveTo(bx1, by0); ctx.lineTo(bx0, by1);
+      ctx.stroke();
+      ctx.restore();
+      const c = this.toScreen(G.interiorPoint(t.poly));
+      ctx.font = '500 11px "Instrument Sans", system-ui, sans-serif';
+      ctx.fillStyle = INK;
+      ctx.textAlign = 'center';
+      ctx.fillText('Trémie', c[0], c[1] - 4);
+      ctx.restore();
+    }
+    for (const { stair, layout } of levelStairs(this.project, this.levelIndex)) {
+      this.drawStairSymbol(layout, { selected: this.selection?.type === 'stair' && this.selection.id === stair.id });
+    }
+    if (this.tool === 'stair' && this.mouse) {
+      const start = this.state.stairStart;
+      const p = this.snapGrid(this.mouse.w);
+      if (start) {
+        const dir = this.stairDirection(start, this.mouse.w);
+        const layout = stairLayout({ type: this.stairType, x: start[0], y: start[1], dir, width: 0.9, turn: 1 }, this.level.height, this.project.settings.slabThickness);
+        this.drawStairSymbol(layout, { preview: true });
+        const i = layout.info;
+        const at = this.toScreen(p);
+        ctx.font = '500 12px "Instrument Sans", system-ui, sans-serif';
+        ctx.fillStyle = ACCENT;
+        ctx.textAlign = 'left';
+        ctx.fillText(`${i.risers} marches de ${(i.riser * 100).toFixed(1).replace('.', ',')} cm · giron ${(i.going * 100).toFixed(0)} cm`, at[0] + 14, at[1] - 10);
+      } else {
+        const q = this.toScreen(p);
+        ctx.strokeStyle = ACCENT;
+        ctx.beginPath(); ctx.arc(q[0], q[1], 5, 0, Math.PI * 2); ctx.stroke();
+      }
+    }
   }
 
   // ─── Terrasses et balcons ──────────────────────────────────────────────────
@@ -729,6 +878,10 @@ export class Editor2D {
       const wall = L.walls.find((x) => x.id === hit.id);
       this.store.beginGesture('Déplacer un mur');
       this.drag = { kind: 'wall', id: hit.id, start: w, a: L.nodes[wall.a].slice(), b: L.nodes[wall.b].slice(), wa: wall.a, wb: wall.b };
+    } else if (hit.type === 'stair') {
+      const st = (L.stairs || []).find((x) => x.id === hit.id);
+      this.store.beginGesture('Déplacer un escalier');
+      this.drag = { kind: 'stair', id: hit.id, start: w, x: st.x, y: st.y };
     } else if (hit.type === 'balcony') {
       const b = (L.balconies || []).find((x) => x.id === hit.id);
       this.store.beginGesture('Déplacer un balcon');
@@ -783,6 +936,12 @@ export class Editor2D {
         lv.nodes[d.wa] = G.add(d.a, G.mul(n, off));
         lv.nodes[d.wb] = G.add(d.b, G.mul(n, off));
         M.clampOpenings(lv);
+      });
+    } else if (d.kind === 'stair') {
+      const p = this.snapGrid([d.x + w[0] - d.start[0], d.y + w[1] - d.start[1]]);
+      this.store.live(() => {
+        const st = (this.level.stairs || []).find((x) => x.id === d.id);
+        if (st) { st.x = p[0]; st.y = p[1]; }
       });
     } else if (d.kind === 'balcony') {
       const grid = DEFAULTS.gridStep;
@@ -840,7 +999,7 @@ export class Editor2D {
   deleteSelection() {
     const sel = this.selection;
     if (!sel) return;
-    const labels = { wall: 'Mur supprimé', node: 'Angle supprimé', opening: 'Ouverture supprimée', roofitem: 'Ouverture de toiture supprimée', equipment: 'Équipement supprimé', balcony: 'Balcon supprimé', terrace: '', room: '' };
+    const labels = { wall: 'Mur supprimé', node: 'Angle supprimé', opening: 'Ouverture supprimée', roofitem: 'Ouverture de toiture supprimée', equipment: 'Équipement supprimé', balcony: 'Balcon supprimé', stair: 'Escalier supprimé', terrace: '', room: '' };
     if (sel.type === 'room') { this.hooks.onToast('Une pièce disparaît quand on supprime un de ses murs.'); return; }
     if (sel.type === 'terrace') { this.hooks.onToast('La terrasse suit les murs : elle disparaît si l’étage recouvre toute la surface du dessous.'); return; }
     this.store.commit(labels[sel.type], () => {
@@ -853,6 +1012,7 @@ export class Editor2D {
       }
       if (sel.type === 'equipment') L.equipment = (L.equipment || []).filter((x) => x.id !== sel.id);
       if (sel.type === 'balcony') L.balconies = (L.balconies || []).filter((x) => x.id !== sel.id);
+      if (sel.type === 'stair') L.stairs = (L.stairs || []).filter((x) => x.id !== sel.id);
       if (sel.type === 'roofitem') {
         const body = this.project.bodies.find((b) => b.id === sel.bodyId);
         if (body) body.roofItems = body.roofItems.filter((it) => it.id !== sel.id);
@@ -1148,7 +1308,7 @@ export class Editor2D {
     const preset = ROOF_OPENINGS[this.roofOpeningType] || ROOF_OPENINGS.skylight;
     const base = { id, type: this.roofOpeningType, kind: preset.kind, level: levelId, x: w[0], y: w[1] };
     if (preset.kind === 'dormer') {
-      return { ...base, width: preset.width, wallHeight: preset.wallHeight, pitch: preset.pitch, depth: preset.depth, setback: preset.setback, winHeight: preset.winHeight, winSill: preset.winSill };
+      return { ...base, ref: 'floor', width: preset.width, eave: preset.eave, pitch: preset.pitch, depth: preset.depth, setback: preset.setback, winHeight: preset.winHeight, winSill: preset.winSill };
     }
     return { ...base, width: preset.width, height: preset.height, sill: preset.sill };
   }
@@ -1190,6 +1350,7 @@ export class Editor2D {
       align2: ['Repère 1 : cliquez un angle sur le plan.', 'Cliquez le même angle sur l’étage inférieur (en gris).', 'Repère 2 : cliquez un second angle sur le plan, éloigné du premier.', 'Cliquez ce second angle sur l’étage inférieur.'][(this.state.points?.length || 0) % 4],
       movePlan: 'Glissez le plan pour le positionner.',
       balcony: 'Survolez une façade puis cliquez : le balcon se pose côté extérieur.',
+      stair: this.state?.stairStart ? 'Cliquez dans le sens de la montée. Maj : angle libre.' : 'Cliquez le départ de l’escalier (bas de la première marche).',
       planAdjust: "Glissez l'image pour la déplacer, la poignée ronde pour la tourner. Flèches : 1 cm, Maj + flèches : 10 cm.",
       equipment: `Cliquez dans une pièce pour poser : ${EQUIPMENT_TYPES[this.equipmentType]?.label || 'équipement'}. R : pivoter.`,
       skylight: this.hover?.type === 'skylightPreview' && this.hover.ok
@@ -1225,6 +1386,7 @@ export class Editor2D {
     this.atticInfo = M.isAttic(L) ? atticContext(this.project, this.levelIndex) : null;
     if (this.atticInfo?.size) this.drawLowZones(rooms);
     this.drawBalconies();
+    this.drawStairs();
     for (const it of L.equipment || []) {
       const selected = this.selection?.type === 'equipment' && this.selection.id === it.id;
       drawEquipmentSymbol(this, it, { selected });

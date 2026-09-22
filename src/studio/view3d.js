@@ -6,7 +6,7 @@ import { buildElements } from './build.js';
 import { colorsOf, GLASS_OPACITY } from './catalog.js';
 import { EQUIPMENT_MATERIALS } from './equipment-models.js';
 
-const IFC_HINT = { terrace: 'IfcSlab', balcony: 'IfcSlab', wall: 'IfcWall', slab: 'IfcSlab', roof: 'IfcRoof', gable: 'IfcWall', door: 'IfcDoor', window: 'IfcWindow', skylight: 'IfcWindow', dormer: 'IfcRoof', ceiling: 'IfcCovering' };
+const IFC_HINT = { stair: 'IfcStair', tremieRail: 'IfcRailing', terrace: 'IfcSlab', balcony: 'IfcSlab', wall: 'IfcWall', slab: 'IfcSlab', roof: 'IfcRoof', gable: 'IfcWall', door: 'IfcDoor', window: 'IfcWindow', skylight: 'IfcWindow', dormer: 'IfcRoof', ceiling: 'IfcCovering' };
 
 const materialCache = new Map();
 function material(key, opts = {}) {
@@ -72,6 +72,7 @@ export function buildObject3D(project, options = {}) {
     if (el.walls) parts.push({ mesh: el.walls, key: 'exterior' });
     if (el.slabMesh) parts.push({ mesh: el.slabMesh, key: el.mode === 'roof' ? 'slab' : 'balcony' });
     for (const rp of el.railParts || []) parts.push({ mesh: rp.mesh, key: rp.key, opacity: rp.key === 'window' ? GLASS_OPACITY : 1 });
+    if (el.kind === 'stair') for (const sp of el.parts) parts.push({ mesh: sp.mesh, key: sp.key === 'rail' ? 'railing' : 'stair' });
     if (el.roofMesh) parts.push({ mesh: el.roofMesh, key: 'roof' });
     if (el.frame) parts.push({ mesh: el.frame, key: 'frame' });
     const panelKey = el.kind === 'skylight' || el.kind === 'dormer' ? 'window' : el.kind;

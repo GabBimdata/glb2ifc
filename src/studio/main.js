@@ -7,6 +7,7 @@ import { View3D, exportGlb } from './view3d.js';
 import { exportIfc } from './ifc-export.js';
 import * as B from './build.js';
 import { autoAlignPlan, applyAlignment, referenceWalls } from './plan-align.js';
+import { STAIR_TYPES, stairLayout } from './stairs.js';
 import { EQUIPMENT_TYPES, EQUIPMENT_GROUPS } from './equipment-catalog.js';
 import { equipmentIcon } from './equipment-plan.js';
 import * as IO from './io.js';
@@ -403,6 +404,7 @@ function stepBody(id) {
             <option value="attic" ${M.isAttic(L) ? 'selected' : ''}>Sous toiture (combles aménagés)</option>
           </select></label>
         ${M.isAttic(L) ? atticPanel(L) : ''}
+        ${stairPanel(L)}
         <label class="field"><span class="field-label">Hauteur d'étage de « ${esc(L.name)} » (sol à sol)</span><span class="unit" data-unit="m"><input type="text" inputmode="decimal" value="${fmt(L.height)}" data-field="level-height" /></span></label>
         <label class="field"><span class="field-label">Épaisseur des planchers</span><span class="unit" data-unit="m"><input type="text" inputmode="decimal" value="${fmt(p.settings.slabThickness)}" data-field="slab" /></span></label>
         <div class="row">
@@ -469,6 +471,23 @@ function aboveCeiling(s) {
   const zPlafond = M.levelElevation(store.project, level.id) + (body.elevation || 0)
     + (M.isAttic(level) ? (level.attic.ceilingHeight ?? 2.5) : M.bodyHeight(store.project, level, body) - (body.ceilingThickness || 0.15));
   return s.info.sillZ >= zPlafond - 0.02;
+}
+
+// Escaliers qui partent de ce niveau
+function stairPanel(L) {
+  const idx = editor.levelIndex;
+  const above = store.project.levels[idx + 1];
+  const icon = (type) => type === 'quarter'
+    ? '<svg viewBox="0 0 100 30" aria-hidden="true"><path d="M30 4h24v22H30M54 4h16v22H54M30 9h24M30 14h24M30 19h24M54 4v22" fill="none" stroke="#1f2a30" stroke-width="1.2"/><path d="M36 26V8h26" fill="none" stroke="#e8672a" stroke-width="1.6"/></svg>'
+    : '<svg viewBox="0 0 100 30" aria-hidden="true"><rect x="20" y="9" width="60" height="12" fill="none" stroke="#1f2a30" stroke-width="1.2"/><path d="M28 9v12M36 9v12M44 9v12M52 9v12M60 9v12M68 9v12" stroke="#1f2a30" stroke-width="1"/><path d="M22 15h54" stroke="#e8672a" stroke-width="1.6"/></svg>';
+  return `
+    <section style="margin-top:14px">
+      <span class="field-label">Escaliers</span>
+      <div class="grid2">${Object.entries(STAIR_TYPES).map(([k, label]) => `
+        <button class="tile ${editor.tool === 'stair' && editor.stairType === k ? 'on' : ''}" data-stair-type="${k}">${icon(k)}<span>${esc(label)}</span></button>`).join('')}</div>
+      <p class="sub">Cliquez le départ, puis le sens de la montée. Les marches se calculent sur la hauteur d'étage (${fmt(L.height)} m) et la trémie se perce dans le plancher de ${esc(above?.name || "l'étage du dessus")}.</p>
+      ${above ? '' : '<p class="note">Aucun étage au-dessus : ajoutez-en un pour que l\'escalier y arrive.</p>'}
+    </section>`;
 }
 
 // Réglages et bilan d'un étage sous toiture
@@ -599,6 +618,10 @@ function findSelection() {
     const item = (L.balconies || []).find((x) => x.id === sel.id);
     return item ? { ...sel, item } : null;
   }
+  if (sel.type === 'stair') {
+    const item = (L.stairs || []).find((x) => x.id === sel.id);
+    return item ? { ...sel, item, layout: stairLayout(item, L.height, store.project.settings.slabThickness) } : null;
+  }
   if (sel.type === 'terrace') {
     const tr = B.levelTerraces(store.project, editor.levelIndex).find((x) => x.key === sel.id);
     return tr ? { ...sel, terrace: tr } : null;
@@ -716,6 +739,29 @@ function renderInspector() {
       <h2>Angle</h2><p class="sub">Point de jonction des murs</p>
       <div class="grid2">${numField('X', 'node-x', s.point[0])}${numField('Y', 'node-y', -s.point[1])}</div>
       <section><button class="btn danger block" data-act="delete-selection">Supprimer l'angle et ses murs</button></section>`;
+  } else if (s.type === 'stair') {
+    const st = s.item, i = s.layout.info;
+    const above = store.project.levels[editor.levelIndex + 1];
+    el.innerHTML = `
+      <h2>Escalier ${st.type === 'quarter' ? 'quart tournant' : 'droit'}</h2>
+      <p class="sub">De ${esc(L.name)} à ${esc(above?.name || "l'étage du dessus (à créer)")}, ${fmt(L.height)} m à monter</p>
+      <div class="stat"><span>Marches</span><b>${i.risers} hauteurs de ${fmt(i.riser * 100, 1)} cm</b></div>
+      <div class="stat"><span>Giron</span><b>${fmt(i.going * 100, 1)} cm</b></div>
+      <div class="stat"><span>Confort (2 h + g)</span><b>${fmt(i.blondel * 100, 1)} cm</b></div>
+      <div class="stat"><span>Emprise au sol</span><b>${fmt(i.run[0])} × ${fmt(i.run[1])} m</b></div>
+      <section>
+        <label class="field"><span class="field-label">Forme</span>
+          <select data-prop="stair-type">${Object.entries(STAIR_TYPES).map(([k, v]) => `<option value="${k}" ${k === st.type ? 'selected' : ''}>${esc(v)}</option>`).join('')}</select></label>
+        ${numField('Largeur', 'stair-width', st.width)}
+        ${st.type === 'quarter' ? numField('Marches avant le palier', 'stair-flight1', i.flights[0], '') : ''}
+        <div class="row">
+          <button class="btn" data-act="stair-rotate">Pivoter <kbd>R</kbd></button>
+          ${st.type === 'quarter' ? '<button class="btn" data-act="stair-flip">Virer de l\'autre côté <kbd>F</kbd></button>' : ''}
+        </div>
+        ${st.width < 0.8 ? '<p class="note">Largeur inférieure à 0,80 m : passage étroit pour un escalier principal.</p>' : ''}
+        <p class="sub">Glissez l'escalier pour le déplacer. La trémie et son garde-corps suivent.</p>
+      </section>
+      <section><button class="btn danger block" data-act="delete-selection">Supprimer <kbd>Suppr</kbd></button></section>`;
   } else if (s.type === 'balcony') {
     const b = s.item;
     const wall = L.walls.find((w2) => w2.id === b.wallId);
@@ -765,20 +811,26 @@ function renderInspector() {
   } else if (s.type === 'roofitem' && ROOF_OPENINGS[s.item.type]?.kind === 'dormer') {
     const it = s.item;
     const preset = ROOF_OPENINGS[it.type];
+    const fv = s.info?.floorValues || { eave: it.eave ?? preset.eave, winSill: it.winSill ?? preset.winSill, winHeight: it.winHeight ?? preset.winHeight };
     el.innerHTML = `
-      <h2>${esc(preset.label)}</h2><p class="sub">Sur la toiture de ${esc(s.body.name)}</p>
+      <h2>${esc(preset.label)}</h2><p class="sub">Sur la toiture de ${esc(s.body.name)}. Hauteurs mesurées depuis le plancher.</p>
       <div class="grid2">
         ${numField('Largeur', 'sky-width', it.width ?? preset.width)}
-        ${numField('Hauteur de façade', 'sky-wallheight', it.wallHeight ?? preset.wallHeight)}
+        ${numField("Hauteur d'égout", 'sky-eave', fv.eave)}
       </div>
       <div class="grid2">
         ${preset.dormer === 'shed' ? numField('Profondeur', 'sky-depth', it.depth ?? preset.depth) : numField('Pente du toit', 'sky-pitch', it.pitch ?? preset.pitch, '°')}
         ${numField('Retrait depuis l\'égout', 'sky-setback', it.setback ?? preset.setback)}
       </div>
       <div class="grid2">
-        ${numField('Hauteur de baie', 'sky-winheight', it.winHeight ?? preset.winHeight)}
-        ${numField('Allège de la baie', 'sky-winsill', it.winSill ?? preset.winSill)}
+        ${numField('Hauteur de baie', 'sky-winheight', fv.winHeight)}
+        ${numField('Allège de la baie', 'sky-winsill', fv.winSill)}
       </div>
+      ${fv.reduced ? `<p class="note">La baie est limitée à ${fmt(fv.windowHeight)} m par la hauteur d'égout : remontez l'égout pour obtenir ${fmt(fv.winHeight)} m.</p>` : ''}
+      ${fv.raised ? `<p class="note">${fv.flush
+        ? `L'allège ne peut pas descendre sous le haut de la jambette : elle est à ${fmt(fv.winSill)} m.`
+        : `Lucarne en retrait : la couverture passe devant, l'allège est remontée à ${fmt(fv.winSill)} m pour rester visible. Ramenez le retrait à ${fmt(store.project.bodies.find((b) => b.id === s.body.id)?.roof?.overhang ?? 0.4)} m pour poser la lucarne à l'aplomb de la façade.`}</p>` : ''}
+      <p class="sub">${fv.flush ? "À l'aplomb de la façade : l'égout est interrompu devant la lucarne." : 'En retrait dans la pente : la couverture passe devant la lucarne.'}</p>
       ${s.info?.ok ? '' : `<p class="note">Lucarne non construite : ${esc(s.info?.reason || 'hors toiture')}. Ajustez ses dimensions ou sa position.</p>`}
       <section><button class="btn danger block" data-act="delete-selection">Supprimer <kbd>Suppr</kbd></button></section>`;
   } else if (s.type === 'roofitem') {
@@ -810,7 +862,20 @@ function applyProp(prop, raw) {
   const value = parseNum(raw);
   const levelId = L.id;
   const lv = (pr) => pr.levels.find((l) => l.id === levelId);
-  const needNum = !['wall-type', 'room-name', 'room-body', 'bal-railing', 'ter-mode', 'ter-railing'].includes(prop);
+  const needNum = !['wall-type', 'room-name', 'room-body', 'bal-railing', 'ter-mode', 'ter-railing', 'stair-type'].includes(prop);
+  if (prop.startsWith('stair-')) {
+    const key = prop.slice(6);
+    if (key !== 'type' && !(value > 0)) { toast('Valeur invalide.', 'warn'); renderInspector(); return; }
+    store.commit("Modifier l'escalier", (pr) => {
+      const st = (pr.levels.find((l) => l.id === L.id).stairs || []).find((x) => x.id === s.id);
+      if (!st) return false;
+      if (key === 'type') st.type = raw;
+      if (key === 'width') st.width = Math.max(0.6, Math.min(2.5, value));
+      if (key === 'flight1') st.flight1 = Math.max(1, Math.round(value));
+      return true;
+    });
+    return;
+  }
   if (prop.startsWith('bal-')) {
     const key = prop.slice(4);
     const text = ['railing'].includes(key);
@@ -854,7 +919,12 @@ function applyProp(prop, raw) {
       if (prop === 'sky-width') it.width = Math.max(0.3, value);
       if (prop === 'sky-height') it.height = Math.max(0.3, value);
       if (prop === 'sky-sill') it.sill = value;
-      if (prop === 'sky-wallheight') it.wallHeight = Math.max(0.6, value);
+      if (['sky-eave', 'sky-winsill', 'sky-winheight'].includes(prop) && it.ref !== 'floor') {
+        const fv = s.info?.floorValues;
+        if (fv) { it.eave = fv.eave; it.winSill = fv.winSill; it.winHeight = fv.winHeight; }
+        it.ref = 'floor';
+      }
+      if (prop === 'sky-eave') it.eave = Math.max(0.8, value);
       if (prop === 'sky-pitch') it.pitch = Math.min(70, Math.max(5, value));
       if (prop === 'sky-depth') it.depth = Math.max(0.6, value);
       if (prop === 'sky-setback') it.setback = Math.max(0, value);
@@ -1264,6 +1334,7 @@ document.addEventListener('click', (e) => {
   if (d.opening) { editor.openingType = d.opening; setTool('opening'); return; }
   if (d.room) { setTool('select'); editor.select({ type: 'room', id: d.room }); renderSteps(); return; }
   if (d.roomName) { applyProp('room-name', d.roomName); return; }
+  if (d.stairType) { editor.stairType = d.stairType; setTool('stair'); return; }
   if (d.equipmentType) { editor.equipmentType = d.equipmentType; ui.step = 'equipment'; setTool('equipment'); return; }
   if (d.roofopening) { editor.roofOpeningType = d.roofopening; setTool('skylight'); return; }
   if (d.roof) {
@@ -1294,6 +1365,8 @@ document.addEventListener('click', (e) => {
     'tool-align2': () => setTool('align2'),
     'tool-skylight': () => setTool('skylight'),
     'tool-balcony': () => setTool('balcony'),
+    'stair-rotate': () => { if (editor.selection?.type === 'stair') editor.rotateStair(editor.selection.id, 90); },
+    'stair-flip': () => { if (editor.selection?.type === 'stair') editor.flipStair(editor.selection.id); },
     'balcony-window': () => {
       const sel = findSelection();
       if (!sel?.item) return;

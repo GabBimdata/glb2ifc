@@ -4,6 +4,7 @@ import * as G from './geometry.js';
 import { WALL_TYPES, OPENING_TYPES, ROOF_OPENINGS, BALCONY } from './catalog.js';
 import { EQUIPMENT_TYPES } from './equipment-catalog.js';
 import { equipmentParts, placeEquipment } from './equipment-models.js';
+import { stairLayout } from './stairs.js';
 import { levelElevation, wallHeight, levelFaces, bodyById, bodyHeight, bodyOutlines, bodyTopLevelIndex, isAttic, roofBaseHeight } from './model.js';
 
 export { triangulate } from './geometry.js';
@@ -356,31 +357,63 @@ export function roofOpenings(project, level, body) {
 
       if (preset.kind === 'dormer') {
         if (slope < 0.01) { invalid('une lucarne nécessite un pan incliné'); continue; }
-        const h = item.wallHeight ?? preset.wallHeight;
-        const ws = item.winSill ?? preset.winSill;
-        if (![h, ws, item.winHeight ?? preset.winHeight, item.pitch ?? preset.pitch, item.setback ?? preset.setback].every(Number.isFinite)
-          || width <= 0.54 || ws < 0 || h - ws <= 0.27 || (item.winHeight ?? preset.winHeight) <= 0.12
-          || (item.pitch ?? preset.pitch) < 0 || (item.pitch ?? preset.pitch) >= 85
-          || (item.setback ?? preset.setback) < 0
+        const pitch = item.pitch ?? preset.pitch;
+        const setback = item.setback ?? preset.setback;
+        if (![pitch, setback].every(Number.isFinite) || width <= 0.54 || pitch < 0 || pitch >= 85 || setback < 0
           || (preset.dormer === 'shed' && (!Number.isFinite(item.depth ?? preset.depth) || (item.depth ?? preset.depth) <= 0))) { invalid('dimensions de lucarne invalides'); continue; }
         // repère du pan : U vers le haut de la pente, V le long de l'égout
         const U = u, V = v;
         const us = facePoly.map((p) => G.dot(G.sub(p, anchor), U));
         const uMin = Math.min(...us);
-        const uFront = uMin + (item.setback ?? preset.setback);
+        const uFront = uMin + setback;
         const origin = G.add(anchor, G.mul(U, uFront));
         const toWorld = (p) => G.add(G.add(origin, G.mul(U, p[0])), G.mul(V, p[1]));
         const zOrigin = zAt(origin);
+
+        // Cotes mesurées depuis le plancher (comme une fenêtre de toit), converties dans le
+        // repère de la lucarne, dont l'origine est posée sur le dessus de la couverture.
+        const dz = zOrigin - floorZ;
+        const legacy = item.ref !== 'floor';
+        // projet antérieur : on garde la taille de la lucarne (égout), et la baie reprend
+        // des valeurs courantes, puisque c'est précisément l'ancienne allège qui était fausse
+        const eave = legacy ? (item.wallHeight ?? preset.wallHeight) + dz : (item.eave ?? preset.eave);
+        const sillFloor = legacy ? preset.winSill : (item.winSill ?? preset.winSill);
+        const winHeight = legacy ? preset.winHeight : (item.winHeight ?? preset.winHeight);
+        if (![eave, sillFloor, winHeight].every(Number.isFinite) || sillFloor < 0 || winHeight <= 0.12 || eave - sillFloor <= 0.3) {
+          invalid('dimensions de lucarne invalides'); continue;
+        }
+        const hWLocal = Math.max(0.8, eave - dz);
+        // Façade de la lucarne à l'aplomb du mur (ou en avant) : la couverture et l'égout sont
+        // interrompus devant elle, la baie peut descendre jusqu'à la jambette.
+        // Lucarne en retrait dans la pente : la couverture passe devant, la baie doit la
+        // dépasser d'au moins 15 cm (solin), sinon elle serait masquée.
+        const overhang = body.roof?.overhang ?? 0.4;
+        const flush = setback <= overhang + 0.05;
+        const minSill = flush ? -tv + 0.05 : 0.15;
+        const sillLocal = Math.max(minSill, sillFloor - dz);
         const d = G.buildDormer({
           type: preset.dormer,
-          width: item.width ?? preset.width,
-          wallHeight: item.wallHeight ?? preset.wallHeight,
-          pitch: item.pitch ?? preset.pitch,
+          width,
+          wallHeight: hWLocal,
+          pitch,
           depth: item.depth ?? preset.depth,
           slope, baseDrop: tv,
-          window: { height: item.winHeight ?? preset.winHeight, sill: item.winSill ?? preset.winSill },
+          window: { height: winHeight, sill: sillLocal },
         });
-        const holeWorld = d.hole.map(toWorld);
+        const floorValues = {
+          eave: dz + hWLocal,
+          winSill: dz + sillLocal,
+          winHeight,
+          windowHeight: d.window.height, // hauteur réellement logée dans la façade
+          reduced: d.window.height < winHeight - 1e-3,
+          raised: dz + sillLocal > sillFloor + 1e-3,
+          flush,
+        };
+        // égout interrompu : le percement va jusqu'au bord du pan devant la lucarne
+        const hole = flush
+          ? d.hole.map(([hu, hv]) => [Math.abs(hu) < 1e-9 ? -setback + 1e-3 : hu, hv])
+          : d.hole;
+        const holeWorld = hole.map(toWorld);
         const ok2 = G.fitTranslation(holeWorld, facePoly, [0, 0], 0) !== null;
         const map = (mesh) => ({
           positions: mesh.positions.map((q) => { const w2 = toWorld([q[0], q[1]]); return [w2[0], w2[1], zOrigin + q[2]]; }),
@@ -396,7 +429,7 @@ export function roofOpenings(project, level, body) {
           groups, origin, zOrigin,
           reason: ok2 ? null : 'la lucarne dépasse le pan (rive ou faîtage)',
           ceilingFaces: d.ceilingFaces.map((f) => ({ poly: f.poly.map(toWorld), zAt: (p) => zOrigin + f.zAt([G.dot(G.sub(p, origin), U), G.dot(G.sub(p, origin), V)]) })),
-          sillZ: zOrigin + (item.winSill ?? preset.winSill), floorZ, body,
+          sillZ: floorZ + floorValues.winSill, floorZ, body, floorValues,
           hostKey: `roof-${body.id}-${k}-${face.part}`,
         });
         continue;
@@ -491,6 +524,21 @@ export function atticContext(project, levelIndex) {
   return map;
 }
 
+// Escaliers d'un niveau, mis en plan et en volume (hauteurs depuis son plancher)
+export function levelStairs(project, levelIndex) {
+  const level = project.levels[levelIndex];
+  const slabT = project.settings.slabThickness;
+  return (level.stairs || []).map((st) => ({ stair: st, layout: stairLayout(st, level.height, slabT) }));
+}
+
+// Trémies percées dans le plancher d'un niveau par les escaliers de l'étage du dessous
+export function levelTremies(project, levelIndex) {
+  if (levelIndex <= 0) return [];
+  return levelStairs(project, levelIndex - 1)
+    .filter((s) => s.layout.tremie)
+    .map((s) => ({ stair: s.stair, poly: s.layout.tremie, arrival: s.layout.arrival }));
+}
+
 /**
  * Construit la liste des éléments du bâtiment.
  * Chaque pièce appartient à un corps de bâtiment (altitude du sol, hauteur des murs, toiture propres).
@@ -540,19 +588,54 @@ export function buildElements(project, options = {}) {
       }
     }
 
-    // Planchers, un par corps et par contour fermé
+    // Planchers, un par corps et par contour fermé, percés des trémies d'escalier
+    const tremies = levelTremies(project, li);
     for (const body of present) {
       const outlines = bodyOutlines(project, level, body.id, li === 0 ? 1 : -1);
       const zf = floorOf(body);
       outlines.forEach((outline, k) => {
         if (!outline || outline.length < 3) return;
+        const holes = tremies.map((t) => t.poly).filter((t) => t.some((q) => G.pointInPolygon(q, outline)));
+        const pieces = holes.length ? G.polygonDifference(outline, holes).pieces : [{ outer: outline, holes: [] }];
+        if (!pieces.length) return;
         elements.push({
           kind: 'slab', level, levelIndex: li, body,
           name: `Plancher ${body.name} ${level.name}${outlines.length > 1 ? ` ${k + 1}` : ''}`,
-          profile: outline, z0: zf - slabT, depth: slabT,
-          mesh: extrude(outline, zf - slabT, zf),
+          profile: outline, pieces, z0: zf - slabT, depth: slabT,
+          mesh: mergeMeshes(pieces.map((pc) => extrudeWithHoles(pc.outer, pc.holes, zf - slabT, zf))),
           key: `slab-${level.id}-${body.id}-${k}`,
         });
+      });
+    }
+
+    // Garde-corps autour des trémies, sur tous les bords sauf celui où l'on arrive
+    tremies.forEach((t, i) => {
+      const railParts = [];
+      const c = G.polygonCentroid(t.poly);
+      const m0 = G.mul(G.add(t.arrival[0], t.arrival[1]), 0.5);
+      for (let k = 0; k < t.poly.length; k++) {
+        const p = t.poly[k], q = t.poly[(k + 1) % t.poly.length];
+        const m = G.mul(G.add(p, q), 0.5);
+        if (G.projectOnSegment(m, t.arrival[0], t.arrival[1]).d < 1e-6 || G.dist(m, m0) < 1e-6) continue;
+        const outward = G.norm(G.sub(m, c));
+        let n = G.perp(G.norm(G.sub(q, p)));
+        if (G.dot(n, outward) < 0) n = G.mul(n, -1);
+        railParts.push(...railingParts(p, q, z, 1.0, 'bars', n));
+      }
+      elements.push({
+        kind: 'tremieRail', level, levelIndex: li, body: bodyById(project, mainId), railParts,
+        name: `Garde-corps de trémie ${level.name}${tremies.length > 1 ? ` ${i + 1}` : ''}`,
+        key: `tremie-${level.id}-${t.stair.id}`,
+      });
+    });
+
+    // Escaliers qui partent de ce niveau
+    for (const { stair, layout } of levelStairs(project, li)) {
+      elements.push({
+        kind: 'stair', level, levelIndex: li, body: bodyById(project, mainId), stair, layout,
+        name: `Escalier ${stair.type === 'quarter' ? 'quart tournant' : 'droit'}`,
+        parts: layout.parts.map((p) => ({ key: p.key, mesh: { positions: p.mesh.positions.map(([x, y, zz]) => [x, y, z + zz]), triangles: p.mesh.triangles } })),
+        key: `stair-${stair.id}`,
       });
     }
 
@@ -721,7 +804,9 @@ export function buildElements(project, options = {}) {
       if (cctx) {
         // faux plafond horizontal, limité à la zone où les rampants sont plus hauts
         bodyOutlines(project, level, body.id, -1).forEach((outline, k) => {
-          const holes = cctx.openings.filter((o) => o.ok && o.preset.kind === 'skylight').map((o) => o.poly);
+          // pas de faux plafond sous une fenêtre de toit ni dans le volume d'une lucarne,
+          // qui reste ouvert jusqu'à son propre toit (sinon le plafond le traverse)
+          const holes = cctx.openings.filter((o) => o.ok && (o.preset.kind === 'skylight' || o.preset.kind === 'dormer')).map((o) => o.poly);
           const cells = G.subtractConvexHoles(outline, holes).flatMap((p) => G.cellsUnderRoof(p, cctx.ceilingZ, cctx.ceilingZ + ep, cctx.faces));
           if (!cells.length) return;
           elements.push({

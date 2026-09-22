@@ -183,6 +183,7 @@ export function exportIfc(project) {
       else if (type === 'length') v = `IFCLENGTHMEASURE(${num(value)})`;
       else if (type === 'ratio') v = `IFCPOSITIVERATIOMEASURE(${num(value)})`;
       else if (type === 'area') v = `IFCAREAMEASURE(${num(value)})`;
+      else if (type === 'count') v = `IFCCOUNTMEASURE(${Math.round(value)})`;
       return w.add(`IFCPROPERTYSINGLEVALUE(${stepString(name)},$,${v},$)`);
     });
     const pset = w.add(`IFCPROPERTYSET(${guid(`pset-${key}`)},${oh},${stepString(psetName)},$,(${items.join(',')}))`);
@@ -261,8 +262,9 @@ export function exportIfc(project) {
       if (el.wallType.material) linkMaterial(el.wallType.material, ent);
     } else if (el.kind === 'slab') {
       const pl = placement(st.placement);
-      const solid = styled(extrusion(profilePolyline(el.profile), el.depth, -el.depth), 'slab', el.body);
-      const ent = w.add(`IFCSLAB(${guid(key)},${oh},${stepString(el.name)},$,$,${pl},${shape([solid])},$,.FLOOR.)`);
+      const pieces = el.pieces || [{ outer: el.profile, holes: [] }];
+      const solids = pieces.map((pc) => styled(extrusion(profileWithVoids(pc.outer, pc.holes), el.depth, el.z0 - st.z), 'slab', el.body));
+      const ent = w.add(`IFCSLAB(${guid(key)},${oh},${stepString(el.name)},$,$,${pl},${shape(solids)},$,.FLOOR.)`);
       contained[el.level.id].push(noteBody(el, ent));
       props(key, ent, 'Pset_SlabCommon', [['IsExternal', 'bool', false], ['LoadBearing', 'bool', true]]);
       linkMaterial('Béton', ent);
@@ -398,6 +400,57 @@ export function exportIfc(project) {
         spacesByStorey[el.level.id].push(sp);
         quantities(`space-${key}`, sp, 'Qto_SpaceBaseQuantities', [['NetFloorArea', 'area', el.area]]);
       }
+    } else if (el.kind === 'stair') {
+      // IfcStair regroupe ses volées (avec leurs marches et limons), son palier et sa main courante
+      const pl = placement(st.placement);
+      const info = el.layout.info;
+      const mergeKey = (keys) => {
+        const m = { positions: [], triangles: [] };
+        for (const p of el.parts.filter((x) => keys.includes(x.key))) {
+          const off = m.positions.length;
+          m.positions.push(...p.mesh.positions);
+          for (const t of p.mesh.triangles) m.triangles.push([t[0] + off, t[1] + off, t[2] + off]);
+        }
+        return m.triangles.length ? m : null;
+      };
+      const quarter = el.stair.type === 'quarter';
+      const stair = w.add(`IFCSTAIR(${guid(key)},${oh},${stepString(el.name)},$,$,${pl},$,$,${quarter ? '.QUARTER_TURN_STAIR.' : '.STRAIGHT_RUN_STAIR.'})`);
+      const children = [];
+      const flightMesh = mergeKey(['tread', 'stringer']);
+      if (flightMesh) {
+        const fl = w.add(`IFCSTAIRFLIGHT(${guid(`flight-${key}`)},${oh},${stepString('Volées')},$,$,${pl},${shape([styled(faceSet(flightMesh, st.z), 'stair', el.body)], 'Tessellation')},$,${info.risers},${info.treads},${num(info.riser)},${num(info.going)},.STRAIGHT.)`);
+        children.push(fl);
+      }
+      const landingMesh = mergeKey(['landing']);
+      if (landingMesh) {
+        children.push(w.add(`IFCSLAB(${guid(`landing-${key}`)},${oh},'Palier',$,$,${pl},${shape([styled(faceSet(landingMesh, st.z), 'stair', el.body)], 'Tessellation')},$,.LANDING.)`));
+      }
+      const railMesh = mergeKey(['rail']);
+      if (railMesh) {
+        children.push(w.add(`IFCRAILING(${guid(`handrail-${key}`)},${oh},'Main courante',$,$,${pl},${shape([styled(faceSet(railMesh, st.z), 'railing', el.body)], 'Tessellation')},$,.HANDRAIL.)`));
+      }
+      w.add(`IFCRELAGGREGATES(${guid(`rel-${key}`)},${oh},$,$,${stair},(${children.join(',')}))`);
+      contained[el.level.id].push(noteBody(el, stair));
+      props(key, stair, 'Pset_StairCommon', [
+        ['NumberOfRiser', 'count', info.risers],
+        ['NumberOfTreads', 'count', info.treads],
+        ['RiserHeight', 'length', info.riser],
+        ['TreadLength', 'length', info.going],
+      ]);
+      linkMaterial('Bois', stair);
+    } else if (el.kind === 'tremieRail') {
+      if (!el.railParts.length) continue;
+      const pl = placement(st.placement);
+      const m = { positions: [], triangles: [] };
+      for (const rp of el.railParts) {
+        const off = m.positions.length;
+        m.positions.push(...rp.mesh.positions);
+        for (const t of rp.mesh.triangles) m.triangles.push([t[0] + off, t[1] + off, t[2] + off]);
+      }
+      const rail = w.add(`IFCRAILING(${guid(key)},${oh},${stepString(el.name)},$,$,${pl},${shape([styled(faceSet(m, st.z), 'railing', el.body)], 'Tessellation')},$,.GUARDRAIL.)`);
+      contained[el.level.id].push(noteBody(el, rail));
+      props(key, rail, 'Pset_RailingCommon', [['IsExternal', 'bool', false], ['Height', 'length', 1.0]]);
+      linkMaterial('Métal', rail);
     } else if (el.kind === 'gable') {
       const pl = placement(st.placement);
       const item = styled(faceSet(el.mesh, st.z), 'gable', el.body);
