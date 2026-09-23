@@ -46,9 +46,9 @@ export const ROOF_OPENINGS = {
   // Lucarnes : égout (eave) et allège (winSill) sont mesurés depuis le plancher de l'étage,
   // comme pour une fenêtre de toit. wallHeight ne sert qu'à relire les projets antérieurs,
   // où la façade était mesurée depuis le dessus de la couverture.
-  dormerGable: { label: 'Jacobine deux pans', kind: 'dormer', dormer: 'gable', width: 1.6, eave: 2.4, pitch: 40, setback: 0.4, winHeight: 1.2, winSill: 0.95, wallHeight: 1.5 },
-  dormerHip: { label: 'Jacobine à croupe', kind: 'dormer', dormer: 'hip', width: 1.6, eave: 2.4, pitch: 40, setback: 0.4, winHeight: 1.2, winSill: 0.95, wallHeight: 1.5 },
-  dormerShed: { label: 'Chien-assis', kind: 'dormer', dormer: 'shed', width: 2.2, eave: 2.3, pitch: 15, depth: 2, setback: 0.4, winHeight: 1.1, winSill: 0.95, wallHeight: 1.4 },
+  dormerGable: { label: 'Jacobine deux pans', kind: 'dormer', dormer: 'gable', width: 1.6, eave: 2.5, pitch: 40, setback: 0.4, winHeight: 1.2, winSill: 0.95, wallHeight: 1.5 },
+  dormerHip: { label: 'Jacobine à croupe', kind: 'dormer', dormer: 'hip', width: 1.6, eave: 2.5, pitch: 40, setback: 0.4, winHeight: 1.2, winSill: 0.95, wallHeight: 1.5 },
+  dormerShed: { label: 'Chien-assis', kind: 'dormer', dormer: 'shed', width: 2.2, eave: 2.4, pitch: 15, depth: 2, setback: 0.4, winHeight: 1.1, winSill: 0.95, wallHeight: 1.4 },
 };
 
 export const ROOM_NAMES = [

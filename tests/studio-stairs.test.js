@@ -208,3 +208,40 @@ test('IFC distinguishes a winding flight from two straight flights and a landing
   assert.match(flights[1], /,10,9,0\.2,0\.23,\.STRAIGHT\.\)/);
   assert.match(landingIfc, /IFCSLAB\([^\n]*\.LANDING\./);
 });
+
+// ── Main courante côté jour et poteaux ──────────────────────────────────────
+import { stairLayout as layoutRails } from '../src/studio/stairs.js';
+
+const railPieces = (L) => L.parts.filter((p) => p.key === 'rail');
+// distance d'une pièce au coin intérieur du virage (pivot), dans le repère du plan
+const nearPoint = (mesh, p, tol) => mesh.positions.some((q) => Math.hypot(q[0] - p[0], q[1] - p[1]) < tol);
+
+for (const type of ['quarter', 'winder']) {
+  test(`${type}: the handrail runs on the inner side, with a newel at the pivot`, () => {
+    const st = { type, x: 0, y: 0, dir: [1, 0], width: 0.9, turn: 1 };
+    const L = layoutRails(st, 2.8, 0.2);
+    const u1 = L.info.flights[0] * L.info.going;
+    // repère : U = +x, V = perp(U) = +y (virage à droite) ; pivot au coin intérieur (u1, w/2)
+    const pivot = [u1, 0.45];
+    const tall = railPieces(L).filter((p) => Math.max(...p.mesh.positions.map((q) => q[2])) > 1.5 && nearPoint(p.mesh, pivot, 0.12));
+    assert.ok(tall.length >= 1, 'poteau au pivot');
+    // aucune main courante le long des bords extérieurs (contre les murs) : y = -0.45 pour la volée 1
+    const outerFlight1 = railPieces(L).filter((p) => p.mesh.positions.every((q) => q[1] < -0.35) && p.mesh.positions.some((q) => q[0] > 0.5 && q[0] < u1 - 0.2));
+    assert.equal(outerFlight1.length, 0, 'pas de main courante côté mur');
+  });
+}
+
+test('the handrail side can be switched to the walls or both sides', () => {
+  const base = { type: 'quarter', x: 0, y: 0, dir: [1, 0], width: 0.9, turn: 1 };
+  const inner = railPieces(layoutRails(base, 2.8, 0.2)).length;
+  const both = railPieces(layoutRails({ ...base, rail: 'both' }, 2.8, 0.2)).length;
+  const outer = layoutRails({ ...base, rail: 'outer' }, 2.8, 0.2);
+  assert.ok(both > inner);
+  assert.ok(railPieces(outer).some((p) => p.mesh.positions.every((q) => q[1] < -0.35)), 'main courante côté mur sur demande');
+});
+
+test('a straight stair has a starting newel at the foot of its handrail', () => {
+  const L = layoutRails({ type: 'straight', x: 0, y: 0, dir: [1, 0], width: 0.9 }, 2.8, 0.2);
+  // poteau de 9 × 9 cm centré au pied de la main courante
+  assert.ok(railPieces(L).some((p) => nearPoint(p.mesh, [0.045, 0.405], 0.08) && Math.max(...p.mesh.positions.map((q) => q[2])) > 1.0));
+});

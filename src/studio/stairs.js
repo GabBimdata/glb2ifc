@@ -11,6 +11,17 @@ export const STAIR_TYPES = {
 
 export const isTurningStair = (stair) => stair.type === 'quarter' || stair.type === 'winder';
 
+// Côté de la main courante. Dans un escalier tournant logé dans un angle, les bords
+// extérieurs longent les murs : la main courante va côté intérieur (le jour).
+// Pour un escalier droit, « inner » est le côté vers lequel pointe `turn` (F pour changer).
+export const STAIR_RAILS = { inner: 'Côté jour', outer: 'Côté mur', both: 'Des deux côtés' };
+const railSides = (stair) => {
+  const r = stair.rail || 'inner';
+  return r === 'both' ? [-1, 1] : r === 'outer' ? [-1] : [1];
+};
+
+const NEWEL = 0.09; // section des poteaux (départ, pivot, arrivée)
+
 export const STAIR_LIMITS = { flight: 100, winders: 8 };
 const count = (value, fallback, min = 0, max = STAIR_LIMITS.flight) =>
   Number.isFinite(value) ? Math.min(max, Math.max(min, Math.round(value))) : fallback;
@@ -87,7 +98,7 @@ function profilePrism(profile, t0, t1, place) {
  * start : [u, v] milieu du bord de départ ; axis : direction de montée (vecteur unité u/v) ;
  * treads : nombre de marches ; z0 : hauteur du sol de départ de la volée.
  */
-function flight({ start, axis, width, treads, z0, riser, going, railSide }) {
+function flight({ start, axis, width, treads, z0, riser, going, railSide, rails }) {
   const side = [-axis[1], axis[0]]; // perpendiculaire
   const at = (s, t) => [start[0] + axis[0] * s + side[0] * t, start[1] + axis[1] * s + side[1] * t];
   const parts = [];
@@ -114,25 +125,29 @@ function flight({ start, axis, width, treads, z0, riser, going, railSide }) {
       parts.push({ key: 'stringer', mesh: profilePrism(profile, t, t + 0.04, ([s, z], tt) => { const q = at(s, tt); return [q[0], q[1], z]; }) });
     }
   }
-  // main courante du côté libre
-  if (railSide && treads > 0) {
-    const t = railSide > 0 ? w2 - 0.03 : -w2 + 0.03;
+  // mains courantes : sur le ou les côtés demandés, balustres tous les 11 cm maximum
+  const sides = rails || (railSide ? [railSide] : []);
+  if (treads > 0) for (const sd of sides) {
+    const t = sd > 0 ? w2 - NEWEL / 2 : -w2 + NEWEL / 2;
     const h = STAIR_DEFAULTS.handrail;
     const rail = (s) => z0 + riser + s * slope + h;
-    const profile = [[0, rail(0) - 0.05], [0, rail(0)], [run, rail(run)], [run, rail(run) - 0.05]];
-    parts.push({ key: 'rail', mesh: profilePrism(profile, t - 0.025, t + 0.025, ([s, z], tt) => { const q = at(s, tt); return [q[0], q[1], z]; }) });
-    for (const s of [0.05, run - 0.05]) {
-      const q0 = at(s - 0.02, t - 0.02), q1 = at(s + 0.02, t + 0.02);
-      const zBase = z0 + Math.max(0, Math.ceil(s / going)) * riser;
-      parts.push({ key: 'rail', mesh: boxUV(Math.min(q0[0], q1[0]), Math.max(q0[0], q1[0]), Math.min(q0[1], q1[1]), Math.max(q0[1], q1[1]), zBase, rail(s)) });
+    const place = ([s, z], tt) => { const q = at(s, tt); return [q[0], q[1], z]; };
+    parts.push({ key: 'rail', mesh: profilePrism([[0, rail(0) - 0.05], [0, rail(0)], [run, rail(run)], [run, rail(run) - 0.05]], t - 0.03, t + 0.03, place) });
+    const n = Math.max(1, Math.ceil(run / 0.13));
+    for (let i = 1; i < n; i++) {
+      const s0 = (run * i) / n;
+      const step = Math.min(treads - 1, Math.floor(s0 / going));
+      const zb = z0 + (step + 1) * riser;
+      const q0 = at(s0 - 0.01, t - 0.01), q1 = at(s0 + 0.01, t + 0.01);
+      parts.push({ key: 'rail', mesh: boxUV(Math.min(q0[0], q1[0]), Math.max(q0[0], q1[0]), Math.min(q0[1], q1[1]), Math.max(q0[1], q1[1]), zb, rail(s0) - 0.05) });
     }
   }
-  return { parts, run };
+  return { parts, run, at, sides };
 }
 
 // Quart de carré partagé par des rayons autour du coin intérieur. Le rayon
 // rencontre le contour carré, pas un cercle : aucune encoche au coin extérieur.
-function winder({ u, width, steps, z0, riser }) {
+function winder({ u, width, steps, z0, riser, outerRail = false }) {
   const w2 = width / 2;
   const pivot = [u, w2];
   const corner = [u + width, -w2];
@@ -161,12 +176,12 @@ function winder({ u, width, steps, z0, riser }) {
     if (b - a < 1e-9) continue;
     const p = at(a), q = at(b), len = G.dist(p, q), d = G.norm(G.sub(q, p)), n = G.perp(d);
     const place = ([s, z], t) => [p[0] + d[0] * s + n[0] * t, p[1] + d[1] * s + n[1] * t, z];
-    for (const [key, offset, depth, thickness] of [['stringer', 0.1, 0.3, 0.04], ['rail', STAIR_DEFAULTS.handrail, 0.05, 0.05]]) {
+    for (const [key, offset, depth, thickness] of [['stringer', 0.1, 0.3, 0.04], ...(outerRail ? [['rail', STAIR_DEFAULTS.handrail, 0.05, 0.05]] : [])]) {
       const za = railBase(a) + offset, zb = railBase(b) + offset;
       parts.push({ key, mesh: profilePrism([[0, za - depth], [0, za], [len, zb], [len, zb - depth]], 0.005, 0.005 + thickness, place) });
     }
   }
-  for (const a of [0, Math.PI / 4, Math.PI / 2]) {
+  for (const a of outerRail ? [0, Math.PI / 4, Math.PI / 2] : []) {
     const p = at(a);
     const x = Math.min(u + width - 0.03, Math.max(u + 0.03, p[0]));
     const y = Math.min(w2 - 0.03, Math.max(-w2 + 0.03, p[1]));
@@ -178,6 +193,12 @@ function winder({ u, width, steps, z0, riser }) {
     return [u + w2 * Math.sin(a), w2 - w2 * Math.cos(a)];
   });
   return { parts, lines, path };
+}
+
+// Poteau carré centré sur [u, v], de z0 à z1 (départ, pivot, arrivée)
+function newel([u, v], z0, z1) {
+  const h = NEWEL / 2;
+  return { key: 'rail', mesh: boxUV(u - h, u + h, v - h, v + h, z0, z1) };
 }
 
 /**
@@ -212,24 +233,36 @@ export function stairLayout(stair, height, slabT = 0.2) {
 
   if (isTurningStair(stair)) {
     const [k1, k2] = flights;
-    const f1 = flight({ start: [0, 0], axis: [1, 0], width, treads: k1, z0: 0, riser, going, railSide: -1 });
+    // côté +1 = intérieur du virage pour les deux volées ; -1 = extérieur (murs)
+    const sides = railSides(stair);
+    const inner = sides.includes(1), outer = sides.includes(-1);
+    const f1 = flight({ start: [0, 0], axis: [1, 0], width, treads: k1, z0: 0, riser, going, rails: sides });
     const u1 = f1.run;
     const zTurn = (k1 + turnSteps) * riser;
-    const f2 = flight({ start: [u1 + w2, w2], axis: [0, 1], width, treads: k2, z0: zTurn, riser, going, railSide: -1 });
+    const f2 = flight({ start: [u1 + w2, w2], axis: [0, 1], width, treads: k2, z0: zTurn, riser, going, rails: sides });
+    const h = STAIR_DEFAULTS.handrail;
+    // poteau de départ, au pied de chaque main courante
+    for (const sd of sides) parts.push(newel([NEWEL / 2, sd * (w2 - NEWEL / 2)], 0, riser + h + 0.12));
+    // poteau au pivot : là où les deux mains courantes intérieures se rejoignent
+    if (inner) parts.push(newel([u1 + NEWEL / 2, w2 - NEWEL / 2], 0, zTurn + riser + h + 0.12));
+    // poteau d'arrivée
+    for (const sd of sides) parts.push(newel([u1 + w2 - sd * (w2 - NEWEL / 2), w2 + f2.run - NEWEL / 2], zTurn, zTurn + (k2 + 1) * riser + h + 0.05));
     parts.push(...f1.parts.map((p) => ({ ...p, flight: 0 })), ...f2.parts.map((p) => ({ ...p, flight: 1 })));
     let turnPath;
     if (stair.type === 'winder') {
-      const fan = winder({ u: u1, width, steps: turnSteps, z0: k1 * riser, riser });
+      const fan = winder({ u: u1, width, steps: turnSteps, z0: k1 * riser, riser, outerRail: outer });
       parts.push(...fan.parts);
       treadLines.push(...fan.lines);
       turnPath = fan.path;
       info.winderGoing = Math.PI * width / (4 * turnSteps); // ligne de foulée au milieu
     } else {
       parts.push({ key: 'landing', mesh: boxUV(u1, u1 + width, -w2, w2, zTurn - 0.2, zTurn) });
-      const h = STAIR_DEFAULTS.handrail;
-      parts.push({ key: 'rail', mesh: boxUV(u1, u1 + width, -w2 + 0.005, -w2 + 0.055, zTurn + h - 0.05, zTurn + h) });
-      parts.push({ key: 'rail', mesh: boxUV(u1 + width - 0.055, u1 + width - 0.005, -w2, w2, zTurn + h - 0.05, zTurn + h) });
-      parts.push({ key: 'rail', mesh: boxUV(u1 + width - 0.05, u1 + width - 0.01, -w2 + 0.01, -w2 + 0.05, zTurn - 0.2, zTurn + h) });
+      // garde-corps du palier, seulement sur ses bords extérieurs si on les a demandés
+      if (outer) {
+        parts.push({ key: 'rail', mesh: boxUV(u1, u1 + width, -w2 + 0.005, -w2 + 0.055, zTurn + h - 0.05, zTurn + h) });
+        parts.push({ key: 'rail', mesh: boxUV(u1 + width - 0.055, u1 + width - 0.005, -w2, w2, zTurn + h - 0.05, zTurn + h) });
+        parts.push(newel([u1 + width - NEWEL / 2, -w2 + NEWEL / 2], zTurn - 0.2, zTurn + h + 0.05));
+      }
       treadLines.push([[u1, -w2], [u1, w2]], [[u1, w2], [u1 + width, w2]]);
       turnPath = [[u1, 0], [u1 + w2, 0], [u1 + w2, w2]];
     }
@@ -256,9 +289,15 @@ export function stairLayout(stair, height, slabT = 0.2) {
     info.flights = [k1, k2];
     info.run = [u1 + width, v2end + w2];
   } else {
-    const f = flight({ start: [0, 0], axis: [1, 0], width, treads: treadsTotal, z0: 0, riser, going, railSide: 1 });
+    const sides = railSides(stair);
+    const f = flight({ start: [0, 0], axis: [1, 0], width, treads: treadsTotal, z0: 0, riser, going, rails: sides });
     parts.push(...f.parts.map((p) => ({ ...p, flight: 0 })));
     const L = f.run;
+    const h = STAIR_DEFAULTS.handrail;
+    for (const sd of sides) {
+      parts.push(newel([NEWEL / 2, sd * (w2 - NEWEL / 2)], 0, riser + h + 0.12)); // poteau de départ
+      parts.push(newel([L - NEWEL / 2, sd * (w2 - NEWEL / 2)], (treadsTotal) * riser, (treadsTotal + 1) * riser + h + 0.05)); // arrivée
+    }
     footprint = [[0, -w2], [L, -w2], [L, w2], [0, w2]];
     for (let i = 1; i <= treadsTotal; i++) treadLines.push([[i * going, -w2], [i * going, w2]]);
     path = [[going / 2, 0], [L - going / 2, 0]];

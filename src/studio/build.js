@@ -409,12 +409,26 @@ export function roofOpenings(project, level, body) {
           raised: dz + sillLocal > sillFloor + 1e-3,
           flush,
         };
-        // égout interrompu : le percement va jusqu'au bord du pan devant la lucarne
+        // la lucarne doit tenir sur le pan (emprise de sa façade et de ses joues)…
+        const ok2 = G.fitTranslation(d.hole.map(toWorld), facePoly, [0, 0], 0) !== null;
+        // …et, à l'aplomb de la façade, le percement traverse le bord du pan : l'égout et sa
+        // rive s'interrompent devant la lucarne au lieu de laisser une bande de couverture
         const hole = flush
-          ? d.hole.map(([hu, hv]) => [Math.abs(hu) < 1e-9 ? -setback + 1e-3 : hu, hv])
+          ? d.hole.map(([hu, hv]) => [Math.abs(hu) < 1e-9 ? -setback - 0.05 : hu, hv])
           : d.hole;
-        const holeWorld = hole.map(toWorld);
-        const ok2 = G.fitTranslation(holeWorld, facePoly, [0, 0], 0) !== null;
+        const cutPoly = hole.map(toWorld);
+        // emprise comptée (surfaces, IFC, plan) : le percement limité au pan
+        let holeWorld = cutPoly;
+        {
+          const c = G.polygonCentroid(facePoly);
+          for (let i = 0; i < facePoly.length && holeWorld.length >= 3; i++) {
+            const p0 = facePoly[i], p1 = facePoly[(i + 1) % facePoly.length];
+            let n = G.perp(G.norm(G.sub(p1, p0)));
+            if (G.dot(G.sub(c, p0), n) < 0) n = G.mul(n, -1);
+            holeWorld = G.clipHalfPlane(holeWorld, p0, n, 0, true);
+          }
+          holeWorld = G.cleanPolygon(holeWorld);
+        }
         const map = (mesh) => ({
           positions: mesh.positions.map((q) => { const w2 = toWorld([q[0], q[1]]); return [w2[0], w2[1], zOrigin + q[2]]; }),
           triangles: mesh.triangles,
@@ -424,7 +438,7 @@ export function roofOpenings(project, level, body) {
           (groups[part.kind] ||= []).push(map(part.mesh));
         }
         out.push({
-          item, preset, dormer: d, poly: holeWorld, u: U, v: V, zAt, tv, ok: ok2, clamped: false,
+          item, preset, dormer: d, poly: holeWorld, cutPoly, u: U, v: V, zAt, tv, ok: ok2, clamped: false,
           outlineIndex: k, partIndex: face.part,
           groups, origin, zOrigin,
           reason: ok2 ? null : 'la lucarne dépasse le pan (rive ou faîtage)',
@@ -858,7 +872,7 @@ export function buildElements(project, options = {}) {
         else if (o.clamped) warnings.push(`${level.name} : fenêtre de toit ${o.item.id} recalée à ${(o.sillZ - o.floorZ).toFixed(2)} m d'allège.`);
       }
       outlines.forEach((outline, k) => {
-        const holes = openings.filter((o) => o.ok && o.outlineIndex === k).map((o) => o.poly);
+        const holes = openings.filter((o) => o.ok && o.outlineIndex === k).map((o) => o.cutPoly || o.poly); // tracé de coupe : peut déborder du pan (égout interrompu)
         const roof = G.buildRoof(outline, { ...body.roof, baseZ, wallThickness: thickness, thicknessAt, holes });
         if (roof.warning) warnings.push(`${body.name} : ${roof.warning}`);
         roof.parts.forEach((part, i) => {

@@ -492,6 +492,24 @@ export function slopedPrism(polyXY, zFn, dz0, dz1) {
 }
 
 // Solide fermé à partir d'une liste de faces supérieures : on duplique vers le bas.
+// Partie d'un segment à l'intérieur d'un polygone convexe (Cyrus-Beck), ou null
+function clipSegmentToConvex(a, b, poly) {
+  const c = polygonCentroid(poly);
+  let t0 = 0, t1 = 1;
+  const d = sub(b, a);
+  for (let i = 0; i < poly.length; i++) {
+    const p = poly[i], q = poly[(i + 1) % poly.length];
+    let n = perp(norm(sub(q, p)));
+    if (dot(sub(c, p), n) < 0) n = mul(n, -1);
+    const num = dot(sub(a, p), n), den = dot(d, n);
+    if (Math.abs(den) < 1e-12) { if (num < -1e-9) return null; continue; }
+    const t = -num / den;
+    if (den > 0) t0 = Math.max(t0, t); else t1 = Math.min(t1, t);
+    if (t0 > t1 - 1e-9) return null;
+  }
+  return [add(a, mul(d, t0)), add(a, mul(d, t1))];
+}
+
 function shellFromTopFaces(topFaces, outline, zOfTop, thicknessV, holes = []) {
   const positions = [];
   const triangles = [];
@@ -521,7 +539,12 @@ function shellFromTopFaces(topFaces, outline, zOfTop, thicknessV, holes = []) {
     }
     for (const h of mine) {
       for (let i = 0; i < h.length; i++) {
-        const a = h[i], b = h[(i + 1) % h.length];
+        // tableau du percement, limité au pan : un percement qui déborde du toit
+        // (lucarne à l'aplomb de la façade) ne laisse pas de planche flotter dans le vide
+        const seg = clipSegmentToConvex(h[i], h[(i + 1) % h.length], xy);
+        if (!seg) continue;
+        const [a, b] = seg;
+        if (distToBoundary(mul(add(a, b), 0.5), xy) < 1e-6) continue;
         const k = positions.length;
         positions.push([a[0], a[1], zAt(a)], [b[0], b[1], zAt(b)], [b[0], b[1], zAt(b) - thicknessV], [a[0], a[1], zAt(a) - thicknessV]);
         triangles.push([k, k + 1, k + 2], [k, k + 2, k + 3]);
@@ -538,6 +561,13 @@ function shellFromTopFaces(topFaces, outline, zOfTop, thicknessV, holes = []) {
     const L2 = dot(ab, ab);
     if (L2 < 1e-12) continue;
     const breaks = [{ t: 0, z: null }, { t: 1, z: null }];
+    // la rive s'interrompt au droit d'un percement qui la traverse
+    for (const h of holes || []) {
+      for (let j = 0; j < h.length; j++) {
+        const hit = segmentIntersection(a, b, h[j], h[(j + 1) % h.length]);
+        if (hit && hit.t > 1e-6 && hit.t < 1 - 1e-6 && hit.u >= -1e-9 && hit.u <= 1 + 1e-9) breaks.push({ t: hit.t, z: null });
+      }
+    }
     for (const v of vertices) {
       const t = dot(sub([v[0], v[1]], a), ab) / L2;
       if (t <= 1e-6 || t >= 1 - 1e-6) continue;
@@ -554,6 +584,8 @@ function shellFromTopFaces(topFaces, outline, zOfTop, thicknessV, holes = []) {
       return { p, z };
     };
     for (let k = 0; k + 1 < breaks.length; k++) {
+      const mid = add(a, mul(ab, (breaks[k].t + breaks[k + 1].t) / 2));
+      if ((holes || []).some((h) => pointInPolygon(mid, h) && distToBoundary(mid, h) > 1e-6)) continue;
       const p0 = at(breaks[k]), p1 = at(breaks[k + 1]);
       const base = positions.length;
       positions.push(
@@ -982,7 +1014,8 @@ export function buildDormer(opts) {
 
   // — joues —
   const shedTan = Math.max(0.05, s - hW / Math.max(0.6, opts.depth ?? 2));
-  const eaveZ = type === 'shed' ? (p) => hW + p[0] * shedTan : () => hW;
+  // les joues s'arrêtent sous la couverture de la lucarne (épaisseur tr), sans la traverser
+  const eaveZ = type === 'shed' ? (p) => hW + p[0] * shedTan - tr : () => hW - tr;
   for (const side of [-1, 1]) {
     const uMax = type === 'shed' ? hW / Math.max(0.01, s - shedTan) : hW / s;
     const profile = [];
@@ -994,11 +1027,12 @@ export function buildDormer(opts) {
   }
 
   // — façade, avec sa baie —
+  // le pignon suit la sous-face de la couverture : il ne dépasse plus du toit de la lucarne
   const top = type === 'gable'
-    ? [[-w2, hW], [0, hR], [w2, hW]]
-    : [[-w2, hW], [w2, hW]];
+    ? [[-w2, hW - tr], [0, hR - tr], [w2, hW - tr]]
+    : [[-w2, hW - tr], [w2, hW - tr]];
   const win = opts.window || { height: 1.0, sill: 0.5 };
-  const wh = Math.min(win.height, hW - win.sill - 0.15);
+  const wh = Math.min(win.height, hW - tr - win.sill - 0.15);
   const ww = Math.max(0.3, w - 2 * t - 0.3);
   const z0 = win.sill, z1 = win.sill + wh;
   const pieces = [

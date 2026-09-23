@@ -7,7 +7,7 @@ import { View3D, exportGlb } from './view3d.js';
 import { exportIfc } from './ifc-export.js';
 import * as B from './build.js';
 import { autoAlignPlan, applyAlignment, referenceWalls } from './plan-align.js';
-import { STAIR_TYPES, STAIR_LIMITS, isTurningStair, stairLayout } from './stairs.js';
+import { STAIR_TYPES, STAIR_LIMITS, STAIR_RAILS, isTurningStair, stairLayout } from './stairs.js';
 import { EQUIPMENT_TYPES, EQUIPMENT_GROUPS } from './equipment-catalog.js';
 import { equipmentIcon } from './equipment-plan.js';
 import * as IO from './io.js';
@@ -761,6 +761,8 @@ function renderInspector() {
         <label class="field"><span class="field-label">Forme</span>
           <select data-prop="stair-type">${Object.entries(STAIR_TYPES).map(([k, v]) => `<option value="${k}" ${k === st.type ? 'selected' : ''}>${esc(v)}</option>`).join('')}</select></label>
         ${numField('Largeur', 'stair-width', i.width)}
+        <label class="field"><span class="field-label">Main courante</span>
+          <select data-prop="stair-rail">${Object.entries(STAIR_RAILS).map(([k, v]) => `<option value="${k}" ${k === (st.rail || 'inner') ? 'selected' : ''}>${esc(isTurningStair(st) ? v : { inner: 'Un côté (F pour changer)', outer: "L'autre côté", both: 'Des deux côtés' }[k])}</option>`).join('')}</select></label>
         ${turning ? `<div class="grid2">
           ${stairCountField('Marches avant le virage', 'flight1', i.flights[0])}
           ${stairCountField('Marches après le virage', 'flight2', i.flights[1])}
@@ -878,11 +880,14 @@ function applyProp(prop, raw) {
   const value = parseNum(raw);
   const levelId = L.id;
   const lv = (pr) => pr.levels.find((l) => l.id === levelId);
-  const needNum = !['wall-type', 'room-name', 'room-body', 'bal-railing', 'ter-mode', 'ter-railing', 'stair-type'].includes(prop);
+  const needNum = !['wall-type', 'room-name', 'room-body', 'bal-railing', 'ter-mode', 'ter-railing', 'stair-type', 'stair-rail'].includes(prop);
   if (prop.startsWith('stair-')) {
     const key = prop.slice(6);
     const flightCount = key === 'flight1' || key === 'flight2';
-    if (key === 'type' ? !Object.hasOwn(STAIR_TYPES, raw) : (!Number.isFinite(value) || (flightCount ? value < 0 : value <= 0))) {
+    const invalid = key === 'type' ? !Object.hasOwn(STAIR_TYPES, raw)
+      : key === 'rail' ? !Object.hasOwn(STAIR_RAILS, raw)
+        : (!Number.isFinite(value) || (flightCount ? value < 0 : value <= 0));
+    if (invalid) {
       toast('Valeur invalide.', 'warn'); renderInspector(); return;
     }
     store.commit("Modifier l'escalier", (pr) => {
@@ -890,6 +895,7 @@ function applyProp(prop, raw) {
       if (!st) return false;
       if (key === 'type') st.type = raw;
       if (key === 'width') st.width = Math.max(0.6, Math.min(2.5, value));
+      if (key === 'rail') st.rail = STAIR_RAILS[raw] ? raw : 'inner';
       if (flightCount || key === 'winderSteps') {
         // Figer les deux valeurs affichées avant de modifier celle demandée.
         [st.flight1, st.flight2] = s.layout.info.flights;

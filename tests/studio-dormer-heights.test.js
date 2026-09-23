@@ -26,7 +26,7 @@ function attic(item) {
 }
 
 test('dormer window sill and eave are measured from the attic floor', () => {
-  const { o, z } = attic({ ref: 'floor', eave: 2.4, winSill: 0.95, winHeight: 1.2 });
+  const { o, z } = attic({ ref: 'floor', eave: 2.5, winSill: 0.95, winHeight: 1.2 });
   assert.ok(o.ok);
   const frame = z('frame');
   assert.ok(Math.abs(Math.min(...frame) - 0.95) < 1e-6, `allège à ${Math.min(...frame)}`);
@@ -42,7 +42,7 @@ test('an older project keeps its dormer size but gets a sensible window', () => 
 });
 
 test('a window too tall for the dormer is reported, not silently cut', () => {
-  const { o } = attic({ ref: 'floor', eave: 2.4, winSill: 0.95, winHeight: 1.6 });
+  const { o } = attic({ ref: 'floor', eave: 2.5, winSill: 0.95, winHeight: 1.6 });
   assert.equal(o.floorValues.reduced, true);
   assert.ok(o.floorValues.windowHeight < 1.6);
 });
@@ -62,7 +62,7 @@ function atticProject(item) {
     const d = M.duplicateLevelData(pr.levels[0], { walls: true, partitions: true, openings: true, rooms: true });
     d.attic.enabled = true;
     pr.levels.push(d);
-    pr.bodies[0].roofItems = [{ id: 'j', type: 'dormerGable', kind: 'dormer', level: d.id, x: 5, y: 1, ref: 'floor', eave: 2.4, winSill: 0.95, winHeight: 1.2, ...item }];
+    pr.bodies[0].roofItems = [{ id: 'j', type: 'dormerGable', kind: 'dormer', level: d.id, x: 5, y: 1, ref: 'floor', eave: 2.5, winSill: 0.95, winHeight: 1.2, ...item }];
   });
   return store.project;
 }
@@ -96,5 +96,27 @@ test('the false ceiling never enters a dormer', () => {
   for (const c of ceil) for (const t of c.mesh.triangles) {
     const P = t.map((i) => c.mesh.positions[i]);
     assert.ok(!inside([(P[0][0] + P[1][0] + P[2][0]) / 3, (P[0][1] + P[1][1] + P[2][1]) / 3]), 'faux plafond dans la lucarne');
+  }
+});
+
+test('the dormer façade and cheeks stay under the dormer covering', () => {
+  const d = G.buildDormer({ type: 'gable', width: 1.6, wallHeight: 1.3, pitch: 40, slope: Math.tan((35 * Math.PI) / 180), baseDrop: 0.3, window: { height: 1, sill: 0 } });
+  // dessus de la couverture de la lucarne : faîtage au centre, rive à la hauteur d'égout (1,30)
+  const ridge = Math.max(...d.parts.filter((p) => p.kind === 'roof').flatMap((p) => p.mesh.positions.map((q) => q[2])));
+  const top = (kind) => Math.max(...d.parts.filter((p) => p.kind === kind).flatMap((p) => p.mesh.positions.map((q) => q[2])));
+  assert.ok(top('front') <= ridge - 0.1, `pignon à ${top('front')} sous un faîtage à ${ridge}`);
+  assert.ok(top('cheek') <= 1.3 - 0.1, `joues à ${top('cheek')} sous une rive à 1,30`);
+});
+
+test('in front of a flush dormer the eave fascia is interrupted', () => {
+  const pr = atticProject({});
+  const o = roofOpenings(pr, pr.levels[1], pr.bodies[0])[0];
+  const roof = buildElements(pr).elements.filter((e) => e.kind === 'roof');
+  // aucun triangle de couverture (rive comprise) dans la bande devant la façade de la lucarne
+  for (const r of roof) for (const t of r.mesh.triangles) {
+    const P = t.map((i) => r.mesh.positions[i]);
+    const g = [(P[0][0] + P[1][0] + P[2][0]) / 3, (P[0][1] + P[1][1] + P[2][1]) / 3];
+    const du = G.dot(G.sub(g, o.origin), o.u), dv = G.dot(G.sub(g, o.origin), o.v);
+    assert.ok(!(du < -0.03 && du > -0.45 && Math.abs(dv) < 0.7), 'rive ou couverture devant la lucarne');
   }
 });
