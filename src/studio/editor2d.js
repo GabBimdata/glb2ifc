@@ -5,7 +5,7 @@ import { WALL_TYPES, OPENING_TYPES, DEFAULTS } from './catalog.js';
 import { loadImage } from './io.js';
 import { roofOpenings, levelTerraces, balconyGeometry, atticContext, levelStairs, levelTremies } from './build.js';
 import { stairLayout } from './stairs.js';
-import { SKYLIGHT, ROOF_OPENINGS, BALCONY } from './catalog.js';
+import { SKYLIGHT, ROOF_OPENINGS, BALCONY, SITE_SURFACES, SITE_DEFAULTS } from './catalog.js';
 import { EQUIPMENT_TYPES } from './equipment-catalog.js';
 import { drawEquipmentSymbol } from './equipment-plan.js';
 
@@ -44,6 +44,9 @@ export class Editor2D {
     this.planScaleUnlocked = false;
     this.equipmentType = 'wc';
     this.stairType = 'straight';
+    this.siteMode = 'boundary';   // 'boundary' ou un type de surface (SITE_SURFACES)
+    this.treeKind = 'deciduous';
+    this.parkingRotation = 0;
     this.equipmentRotation = 0;
     this.selection = null;
     this.hover = null;
@@ -330,6 +333,10 @@ export class Editor2D {
       equipment: () => this.equipmentClick(w),
       balcony: () => this.balconyClick(w),
       stair: () => this.stairClick(w),
+      sitePoly: () => this.sitePolyClick(w, s),
+      hedge: () => this.sitePolyClick(w, s),
+      parking: () => this.parkingClick(w),
+      tree: () => this.treeClick(w),
       movePlan: () => { if (this.level.plan) { this.store.beginGesture('Déplacer le plan'); this.drag = { kind: 'plan', start: w, x: this.level.plan.x, y: this.level.plan.y }; } },
       planAdjust: () => this.planAdjustDown(w, s),
     }[this.tool];
@@ -383,6 +390,7 @@ export class Editor2D {
 
   onDouble() {
     if (this.tool === 'wall') this.finishWall();
+    if (this.tool === 'sitePoly' || this.tool === 'hedge') this.finishSitePoly();
   }
 
   onKey(e, down) {
@@ -413,6 +421,10 @@ export class Editor2D {
       }
       if (e.key === 'Enter') { this.finishWall(); return; }
     }
+    if ((this.tool === 'sitePoly' || this.tool === 'hedge') && this.state.sitePts?.length) {
+      if (e.key === 'Enter') { this.finishSitePoly(); e.preventDefault(); return; }
+      if (e.key === 'Backspace') { this.state.sitePts.pop(); this.invalidate(); e.preventDefault(); return; }
+    }
     if (e.key === 'Escape') {
       if (this.typed) { this.typed = null; this.hooks.onTyped?.(null); return; }
       if (this.tool === 'wall' && this.state.points?.length) { this.finishWall(); return; }
@@ -434,6 +446,8 @@ export class Editor2D {
     }
     if (k === 'r' && this.selection?.type === 'equipment') { this.rotateEquipment(this.selection.id, 90); return; }
     if (k === 'r' && this.selection?.type === 'stair') { this.rotateStair(this.selection.id, 90); return; }
+    if (k === 'r' && this.tool === 'parking') { this.parkingRotation = (this.parkingRotation + 90) % 360; this.invalidate(); return; }
+    if (k === 'r' && this.selection?.type === 'parking') { this.rotateParking(this.selection.id, e.shiftKey ? 15 : 90); return; }
     if (k === 'f' && this.selection?.type === 'stair') { this.flipStair(this.selection.id); return; }
     if (k === 'f' && this.tool === 'wall') { this.edgeSide *= -1; this.invalidate(); this.hooks.onToast('Côté du mur inversé'); return; }
     if (k === 'v') this.hooks.requestTool?.('select');
@@ -476,6 +490,9 @@ export class Editor2D {
     for (const { stair, layout } of levelStairs(this.project, this.levelIndex)) {
       if (G.pointInPolygon(w, layout.footprint)) return { type: 'stair', id: stair.id };
     }
+    const siteHit = this.siteAt(w);
+    if (siteHit && siteHit.type !== 'siteSurface' && siteHit.type !== 'siteBoundary') return siteHit;
+    if (siteHit?.type === 'siteSurface' && !M.levelFaces(L).rooms.some((r) => r.room && G.pointInPolygon(w, r.face.poly))) return siteHit;
     for (const tr of this.terraces()) {
       if (tr.gross.some((pc) => G.pointInPolygon(w, pc.outer) && !pc.holes.some((h) => G.pointInPolygon(w, h)))) return { type: 'terrace', id: tr.key };
     }
@@ -483,6 +500,7 @@ export class Editor2D {
     for (const r of rooms) {
       if (r.room && G.pointInPolygon(w, r.face.poly)) return { type: 'room', id: r.room.id };
     }
+    if (siteHit) return siteHit; // parcelle (bord) ou surface sous le bâtiment
     return null;
   }
 
@@ -557,6 +575,259 @@ export class Editor2D {
     ctx.textAlign = 'left';
     ctx.fillText(`${rot.toFixed(1).replace('.', ',')}°`, r[0] + 12, r[1] + 4);
     ctx.restore();
+  }
+
+  // ─── Abords (rez-de-chaussée) ──────────────────────────────────────────────
+  get site() { return this.project.site; }
+
+  siteAt(w) {
+    if (this.levelIndex !== 0 || !this.site) return null;
+    const S = this.site;
+    for (const t of [...(S.trees || [])].reverse()) {
+      if (G.dist(w, [t.x, t.y]) < Math.max(0.5, (t.diameter || 4) * 0.25)) return { type: 'tree', id: t.id };
+    }
+    for (const pk of [...(S.parkings || [])].reverse()) {
+      if (G.pointInPolygon(w, this.parkingPoly(pk))) return { type: 'parking', id: pk.id };
+    }
+    for (const hg of [...(S.hedges || [])].reverse()) {
+      const pts = hg.points || [];
+      for (let i = 0; i + 1 < pts.length; i++) {
+        if (G.projectOnSegment(w, pts[i], pts[i + 1]).d < (hg.width || 0.8) / 2 + this.px(4)) return { type: 'hedge', id: hg.id };
+      }
+    }
+    for (const sf of [...(S.surfaces || [])].reverse()) {
+      if (sf.poly?.length >= 3 && G.pointInPolygon(w, sf.poly)) return { type: 'siteSurface', id: sf.id };
+    }
+    const b = S.boundary || [];
+    for (let i = 0; i < b.length && b.length >= 3; i++) {
+      if (G.projectOnSegment(w, b[i], b[(i + 1) % b.length]).d < this.px(6)) return { type: 'siteBoundary', id: 'boundary' };
+    }
+    return null;
+  }
+
+  parkingPoly(pk) {
+    const w = pk.width || SITE_DEFAULTS.parking.width, d = pk.depth || SITE_DEFAULTS.parking.depth;
+    const a = ((pk.rotation || 0) * Math.PI) / 180;
+    const u = [Math.cos(a), Math.sin(a)], n = G.perp(u);
+    return [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([sx, sy]) => [pk.x + u[0] * sx * w / 2 + n[0] * sy * d / 2, pk.y + u[1] * sx * w / 2 + n[1] * sy * d / 2]);
+  }
+
+  // aimantation : angles du bâtiment, sommets des abords, puis grille
+  siteSnap(w) {
+    const tol = this.px(10);
+    const cands = [...Object.values(this.level.nodes)];
+    for (const o of M.levelFaces(this.level).outlines) cands.push(...o);
+    const S = this.site;
+    cands.push(...(S.boundary || []));
+    for (const sf of S.surfaces || []) cands.push(...(sf.poly || []));
+    for (const hg of S.hedges || []) cands.push(...(hg.points || []));
+    let best = null;
+    for (const c of cands) { const d = G.dist(w, c); if (d < tol && (!best || d < best.d)) best = { p: c.slice(), d }; }
+    return best ? best.p : this.snapGrid(w);
+  }
+
+  sitePolyClick(w) {
+    if (this.levelIndex !== 0) { this.hooks.onToast('Les abords se dessinent sur le rez-de-chaussée.', 'warn'); return; }
+    const p = this.siteSnap(w);
+    const pts = (this.state.sitePts ||= []);
+    if (this.tool === 'sitePoly' && pts.length >= 3 && G.dist(p, pts[0]) < this.px(10)) { this.finishSitePoly(); return; }
+    if (pts.length && G.dist(p, pts[pts.length - 1]) < 1e-6) return;
+    pts.push(p);
+    this.invalidate();
+  }
+
+  finishSitePoly() {
+    const pts = this.state.sitePts || [];
+    const hedge = this.tool === 'hedge';
+    if (pts.length < (hedge ? 2 : 3)) { this.hooks.onToast(hedge ? 'Une haie a besoin d’au moins deux points.' : 'Un contour a besoin d’au moins trois points.', 'warn'); return; }
+    const mode = this.siteMode;
+    this.state = {};
+    const id = M.uid('ab');
+    this.store.commit(hedge ? 'Tracer une haie' : mode === 'boundary' ? 'Tracer la parcelle' : `Tracer : ${SITE_SURFACES[mode]?.label || 'surface'}`, (pr) => {
+      pr.site = pr.site || M.emptySite();
+      if (hedge) pr.site.hedges.push({ id, points: pts, height: SITE_DEFAULTS.hedge.height, width: SITE_DEFAULTS.hedge.width });
+      else if (mode === 'boundary') pr.site.boundary = pts;
+      else pr.site.surfaces.push({ id, type: mode, poly: G.polygonArea(pts) > 0 ? pts : pts.slice().reverse() });
+    });
+    this.select(hedge ? { type: 'hedge', id } : mode === 'boundary' ? { type: 'siteBoundary', id: 'boundary' } : { type: 'siteSurface', id });
+    if (!hedge && mode === 'boundary') this.hooks.requestTool?.('select');
+  }
+
+  parkingClick(w) {
+    if (this.levelIndex !== 0) { this.hooks.onToast('Les abords se dessinent sur le rez-de-chaussée.', 'warn'); return; }
+    const p = this.snapGrid(w);
+    const id = M.uid('pk');
+    this.store.commit('Poser une place de stationnement', (pr) => {
+      pr.site.parkings.push({ id, x: p[0], y: p[1], rotation: this.parkingRotation, ...SITE_DEFAULTS.parking });
+    });
+  }
+
+  rotateParking(id, delta) {
+    this.store.commit('Pivoter une place', (pr) => {
+      const pk = pr.site.parkings.find((x) => x.id === id);
+      if (pk) pk.rotation = (((pk.rotation || 0) + delta) % 360 + 360) % 360;
+    });
+  }
+
+  treeClick(w) {
+    if (this.levelIndex !== 0) { this.hooks.onToast('Les abords se dessinent sur le rez-de-chaussée.', 'warn'); return; }
+    const p = this.snapGrid(w);
+    const id = M.uid('tr');
+    this.store.commit('Planter un arbre', (pr) => {
+      pr.site.trees.push({ id, x: p[0], y: p[1], ...SITE_DEFAULTS.tree, kind: this.treeKind, height: this.treeKind === 'conifer' ? 9 : 7, diameter: this.treeKind === 'conifer' ? 3 : 4 });
+    });
+  }
+
+  // Sous le bâtiment : parcelle, surfaces, places, haies
+  drawSiteBelow() {
+    if (this.levelIndex !== 0 || !this.site) return;
+    const ctx = this.ctx, S = this.site;
+    const b = S.boundary || [];
+    if (b.length >= 3) {
+      this.pathPoly(b);
+      ctx.fillStyle = 'rgba(160,178,130,0.10)';
+      ctx.fill();
+    }
+    for (const sf of S.surfaces || []) {
+      if (!sf.poly || sf.poly.length < 3) continue;
+      const cat = SITE_SURFACES[sf.type] || SITE_SURFACES.path;
+      const sel = this.selection?.type === 'siteSurface' && this.selection.id === sf.id;
+      ctx.save();
+      this.pathPoly(sf.poly);
+      ctx.globalAlpha = 0.55;
+      ctx.fillStyle = cat.color;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = sel ? ACCENT : 'rgba(40,48,52,0.55)';
+      ctx.lineWidth = sel ? 2 : 1;
+      ctx.stroke();
+      if (this.view.zoom > 10) {
+        const c = this.toScreen(G.interiorPoint(sf.poly));
+        ctx.font = '500 11px "Instrument Sans", system-ui, sans-serif';
+        ctx.fillStyle = sf.type === 'road' ? '#f3f3f0' : '#23302a';
+        ctx.textAlign = 'center';
+        ctx.fillText(cat.label.replace(/ \(.*\)/, ''), c[0], c[1]);
+      }
+      ctx.restore();
+    }
+    for (const pk of S.parkings || []) {
+      const poly = this.parkingPoly(pk);
+      const sel = this.selection?.type === 'parking' && this.selection.id === pk.id;
+      ctx.save();
+      this.pathPoly(poly);
+      ctx.fillStyle = sel ? 'rgba(232,103,42,0.16)' : 'rgba(255,255,255,0.18)';
+      ctx.fill();
+      // marquage : deux côtés et le fond ; l'entrée est côté +y local
+      const q = poly.map((pt) => this.toScreen(pt));
+      ctx.strokeStyle = sel ? ACCENT : '#3a4247';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(q[3][0], q[3][1]); ctx.lineTo(q[0][0], q[0][1]); ctx.lineTo(q[1][0], q[1][1]); ctx.lineTo(q[2][0], q[2][1]);
+      ctx.stroke();
+      const c = this.toScreen([pk.x, pk.y]);
+      ctx.font = `600 ${Math.max(10, Math.min(22, 0.9 * this.view.zoom))}px "Instrument Sans", system-ui, sans-serif`;
+      ctx.fillStyle = sel ? ACCENT : '#3a4247';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('P', c[0], c[1]);
+      ctx.restore();
+    }
+    for (const hg of S.hedges || []) {
+      const pts = hg.points || [];
+      if (pts.length < 2) continue;
+      const sel = this.selection?.type === 'hedge' && this.selection.id === hg.id;
+      ctx.save();
+      ctx.strokeStyle = sel ? ACCENT : 'rgba(79,122,60,0.85)';
+      ctx.lineWidth = Math.max(3, (hg.width || 0.8) * this.view.zoom);
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      pts.forEach((pt, i) => { const q = this.toScreen(pt); if (i) ctx.lineTo(q[0], q[1]); else ctx.moveTo(q[0], q[1]); });
+      ctx.stroke();
+      ctx.restore();
+    }
+    if (b.length >= 3) {
+      const sel = this.selection?.type === 'siteBoundary';
+      ctx.save();
+      this.pathPoly(b);
+      ctx.setLineDash([10, 4, 2, 4]); // limite de parcelle : trait mixte
+      ctx.strokeStyle = sel ? ACCENT : '#2f5d3a';
+      ctx.lineWidth = sel ? 2.4 : 1.6;
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  // Au-dessus : les houppiers des arbres
+  drawSiteTrees() {
+    if (this.levelIndex !== 0 || !this.site) return;
+    const ctx = this.ctx;
+    for (const t of this.site.trees || []) {
+      const c = this.toScreen([t.x, t.y]);
+      const r = ((t.diameter || 4) / 2) * this.view.zoom;
+      const sel = this.selection?.type === 'tree' && this.selection.id === t.id;
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(c[0], c[1], r, 0, Math.PI * 2);
+      ctx.fillStyle = (t.kind || 'deciduous') === 'conifer' ? 'rgba(63,100,64,0.28)' : 'rgba(95,138,69,0.25)';
+      ctx.fill();
+      ctx.strokeStyle = sel ? ACCENT : 'rgba(47,93,58,0.9)';
+      ctx.lineWidth = sel ? 2 : 1.2;
+      if ((t.kind || 'deciduous') === 'conifer') {
+        // conifère : étoile de branches
+        ctx.stroke();
+        ctx.beginPath();
+        for (let i = 0; i < 8; i++) { const a = (i / 8) * Math.PI * 2; ctx.moveTo(c[0], c[1]); ctx.lineTo(c[0] + Math.cos(a) * r, c[1] + Math.sin(a) * r); }
+        ctx.stroke();
+      } else {
+        ctx.setLineDash([Math.max(3, r / 5), Math.max(2, r / 8)]);
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+      ctx.beginPath(); ctx.arc(c[0], c[1], 2.5, 0, Math.PI * 2); ctx.fillStyle = '#6b5440'; ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  drawSiteTool() {
+    const ctx = this.ctx;
+    const m = this.mouse;
+    if ((this.tool === 'sitePoly' || this.tool === 'hedge') && m) {
+      const pts = this.state.sitePts || [];
+      const next = this.siteSnap(m.w);
+      const all = [...pts, next];
+      ctx.save();
+      ctx.strokeStyle = ACCENT;
+      ctx.lineWidth = this.tool === 'hedge' ? Math.max(3, SITE_DEFAULTS.hedge.width * this.view.zoom) : 1.8;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      all.forEach((pt, i) => { const q = this.toScreen(pt); if (i) ctx.lineTo(q[0], q[1]); else ctx.moveTo(q[0], q[1]); });
+      if (this.tool === 'sitePoly' && pts.length >= 2) { const q = this.toScreen(pts[0]); ctx.setLineDash([4, 4]); ctx.lineTo(q[0], q[1]); }
+      ctx.globalAlpha = this.tool === 'hedge' ? 0.5 : 1;
+      ctx.stroke();
+      ctx.restore();
+      for (const pt of all) { const q = this.toScreen(pt); ctx.fillStyle = ACCENT; ctx.fillRect(q[0] - 3, q[1] - 3, 6, 6); }
+      if (this.tool === 'sitePoly' && pts.length >= 3 && G.dist(next, pts[0]) < this.px(10)) {
+        const q = this.toScreen(pts[0]);
+        ctx.strokeStyle = ACCENT; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(q[0], q[1], 8, 0, Math.PI * 2); ctx.stroke();
+      }
+    } else if (this.tool === 'parking' && m) {
+      const p = this.snapGrid(m.w);
+      const poly = this.parkingPoly({ x: p[0], y: p[1], rotation: this.parkingRotation, ...SITE_DEFAULTS.parking });
+      this.pathPoly(poly);
+      ctx.fillStyle = 'rgba(232,103,42,0.18)';
+      ctx.fill();
+      ctx.strokeStyle = ACCENT;
+      ctx.stroke();
+    } else if (this.tool === 'tree' && m) {
+      const p = this.toScreen(this.snapGrid(m.w));
+      ctx.beginPath();
+      ctx.arc(p[0], p[1], (this.treeKind === 'conifer' ? 1.5 : 2) * this.view.zoom, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(232,103,42,0.15)';
+      ctx.fill();
+      ctx.strokeStyle = ACCENT;
+      ctx.stroke();
+    }
   }
 
   // ─── Escaliers ─────────────────────────────────────────────────────────────
@@ -878,6 +1149,9 @@ export class Editor2D {
       const wall = L.walls.find((x) => x.id === hit.id);
       this.store.beginGesture('Déplacer un mur');
       this.drag = { kind: 'wall', id: hit.id, start: w, a: L.nodes[wall.a].slice(), b: L.nodes[wall.b].slice(), wa: wall.a, wb: wall.b };
+    } else if (['tree', 'parking', 'hedge', 'siteSurface', 'siteBoundary'].includes(hit.type)) {
+      this.store.beginGesture('Déplacer un élément des abords');
+      this.drag = { kind: 'site', hit, start: w, snapshot: JSON.parse(JSON.stringify(this.project.site)) };
     } else if (hit.type === 'stair') {
       const st = (L.stairs || []).find((x) => x.id === hit.id);
       this.store.beginGesture('Déplacer un escalier');
@@ -936,6 +1210,18 @@ export class Editor2D {
         lv.nodes[d.wa] = G.add(d.a, G.mul(n, off));
         lv.nodes[d.wb] = G.add(d.b, G.mul(n, off));
         M.clampOpenings(lv);
+      });
+    } else if (d.kind === 'site') {
+      const g = DEFAULTS.gridStep;
+      const dx = Math.round((w[0] - d.start[0]) / g) * g, dy = Math.round((w[1] - d.start[1]) / g) * g;
+      const shift = (pts) => pts.map((p) => [p[0] + dx, p[1] + dy]);
+      this.store.live(() => {
+        const S = this.project.site, S0 = d.snapshot, id = d.hit.id;
+        if (d.hit.type === 'tree') { const t = S.trees.find((x) => x.id === id), t0 = S0.trees.find((x) => x.id === id); if (t) { t.x = t0.x + dx; t.y = t0.y + dy; } }
+        if (d.hit.type === 'parking') { const t = S.parkings.find((x) => x.id === id), t0 = S0.parkings.find((x) => x.id === id); if (t) { t.x = t0.x + dx; t.y = t0.y + dy; } }
+        if (d.hit.type === 'hedge') { const t = S.hedges.find((x) => x.id === id), t0 = S0.hedges.find((x) => x.id === id); if (t) t.points = shift(t0.points); }
+        if (d.hit.type === 'siteSurface') { const t = S.surfaces.find((x) => x.id === id), t0 = S0.surfaces.find((x) => x.id === id); if (t) t.poly = shift(t0.poly); }
+        if (d.hit.type === 'siteBoundary') S.boundary = shift(S0.boundary);
       });
     } else if (d.kind === 'stair') {
       const p = this.snapGrid([d.x + w[0] - d.start[0], d.y + w[1] - d.start[1]]);
@@ -999,7 +1285,7 @@ export class Editor2D {
   deleteSelection() {
     const sel = this.selection;
     if (!sel) return;
-    const labels = { wall: 'Mur supprimé', node: 'Angle supprimé', opening: 'Ouverture supprimée', roofitem: 'Ouverture de toiture supprimée', equipment: 'Équipement supprimé', balcony: 'Balcon supprimé', stair: 'Escalier supprimé', terrace: '', room: '' };
+    const labels = { wall: 'Mur supprimé', node: 'Angle supprimé', opening: 'Ouverture supprimée', roofitem: 'Ouverture de toiture supprimée', equipment: 'Équipement supprimé', balcony: 'Balcon supprimé', stair: 'Escalier supprimé', tree: 'Arbre supprimé', parking: 'Place supprimée', hedge: 'Haie supprimée', siteSurface: 'Surface supprimée', siteBoundary: 'Parcelle supprimée', terrace: '', room: '' };
     if (sel.type === 'room') { this.hooks.onToast('Une pièce disparaît quand on supprime un de ses murs.'); return; }
     if (sel.type === 'terrace') { this.hooks.onToast('La terrasse suit les murs : elle disparaît si l’étage recouvre toute la surface du dessous.'); return; }
     this.store.commit(labels[sel.type], () => {
@@ -1013,6 +1299,14 @@ export class Editor2D {
       if (sel.type === 'equipment') L.equipment = (L.equipment || []).filter((x) => x.id !== sel.id);
       if (sel.type === 'balcony') L.balconies = (L.balconies || []).filter((x) => x.id !== sel.id);
       if (sel.type === 'stair') L.stairs = (L.stairs || []).filter((x) => x.id !== sel.id);
+      const S = this.project.site;
+      if (S) {
+        if (sel.type === 'tree') S.trees = S.trees.filter((x) => x.id !== sel.id);
+        if (sel.type === 'parking') S.parkings = S.parkings.filter((x) => x.id !== sel.id);
+        if (sel.type === 'hedge') S.hedges = S.hedges.filter((x) => x.id !== sel.id);
+        if (sel.type === 'siteSurface') S.surfaces = S.surfaces.filter((x) => x.id !== sel.id);
+        if (sel.type === 'siteBoundary') S.boundary = [];
+      }
       if (sel.type === 'roofitem') {
         const body = this.project.bodies.find((b) => b.id === sel.bodyId);
         if (body) body.roofItems = body.roofItems.filter((it) => it.id !== sel.id);
@@ -1350,6 +1644,10 @@ export class Editor2D {
       align2: ['Repère 1 : cliquez un angle sur le plan.', 'Cliquez le même angle sur l’étage inférieur (en gris).', 'Repère 2 : cliquez un second angle sur le plan, éloigné du premier.', 'Cliquez ce second angle sur l’étage inférieur.'][(this.state.points?.length || 0) % 4],
       movePlan: 'Glissez le plan pour le positionner.',
       balcony: 'Survolez une façade puis cliquez : le balcon se pose côté extérieur.',
+      sitePoly: 'Cliquez les sommets ; cliquez le premier point, double-cliquez ou Entrée pour fermer. Retour arrière : annuler le dernier point.',
+      hedge: 'Cliquez les points de la haie ; double-clic ou Entrée pour terminer.',
+      parking: 'Cliquez pour poser une place (2,50 × 5,00 m). R : pivoter de 90°.',
+      tree: 'Cliquez pour planter.',
       stair: this.state?.stairStart ? 'Cliquez dans le sens de la montée. Maj : angle libre.' : 'Cliquez le départ de l’escalier (bas de la première marche).',
       planAdjust: "Glissez l'image pour la déplacer, la poignée ronde pour la tourner. Flèches : 1 cm, Maj + flèches : 10 cm.",
       equipment: `Cliquez dans une pièce pour poser : ${EQUIPMENT_TYPES[this.equipmentType]?.label || 'équipement'}. R : pivoter.`,
@@ -1381,12 +1679,14 @@ export class Editor2D {
 
     const { rooms } = M.levelFaces(L);
     const polys = G.computeWallPolygons(L);
+    this.drawSiteBelow();
     this.drawTerraces();
     for (const r of rooms) this.drawRoomFill(r);
     this.atticInfo = M.isAttic(L) ? atticContext(this.project, this.levelIndex) : null;
     if (this.atticInfo?.size) this.drawLowZones(rooms);
     this.drawBalconies();
     this.drawStairs();
+    this.drawSiteTrees();
     for (const it of L.equipment || []) {
       const selected = this.selection?.type === 'equipment' && this.selection.id === it.id;
       drawEquipmentSymbol(this, it, { selected });
@@ -1413,6 +1713,7 @@ export class Editor2D {
       this.drawPlanFrame();
     }
     this.drawTool(L);
+    this.drawSiteTool();
   }
 
   pathPoly(poly) {

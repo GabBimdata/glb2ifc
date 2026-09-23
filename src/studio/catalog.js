@@ -38,6 +38,24 @@ export const RAILING_TYPES = {
 };
 export const BALCONY = { label: 'Balcon en saillie', width: 3.0, depth: 1.2, thickness: 0.18, railing: 'bars', railingHeight: 1.0 };
 
+// Abords : surfaces tracées sur la parcelle, stationnement, végétation
+export const SITE_SURFACES = {
+  road: { label: 'Voirie (enrobé)', color: '#5d6266', thickness: 0.08, ifc: 'slab', objectType: 'Voirie' },
+  path: { label: 'Allée (gravier)', color: '#cdbd9e', thickness: 0.05, ifc: 'slab', objectType: 'Allée' },
+  paving: { label: 'Dallage', color: '#b9ada0', thickness: 0.06, ifc: 'slab', objectType: 'Dallage' },
+  lawn: { label: 'Pelouse', color: '#86a85e', thickness: 0.02, ifc: 'geo', objectType: 'Pelouse' },
+  bed: { label: 'Massif planté', color: '#5e7c42', thickness: 0.04, ifc: 'geo', objectType: 'Massif planté' },
+};
+export const SITE_DEFAULTS = {
+  terrainColor: '#c3cbaa',
+  terrainDepth: 0.3,
+  groundOffset: -0.05, // terrain fini 5 cm sous le plancher du rez-de-chaussée (seuil)
+  parking: { width: 2.5, depth: 5.0 },
+  tree: { diameter: 4, height: 7, kind: 'deciduous' },
+  hedge: { height: 1.6, width: 0.8 },
+};
+export const TREE_KINDS = { deciduous: 'Feuillu', conifer: 'Conifère' };
+
 export const SKYLIGHT = { label: 'Fenêtre de toit', width: 0.78, height: 1.18, sill: 1.1 };
 
 // Ouvertures de toiture : fenêtre de toit et lucarnes

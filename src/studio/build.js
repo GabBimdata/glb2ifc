@@ -1,7 +1,7 @@
 // Smelt Studio — transforme le modèle sémantique en éléments constructifs avec géométrie.
 // Coordonnées : plan (x, y vers le bas) + z vertical, en mètres.
 import * as G from './geometry.js';
-import { WALL_TYPES, OPENING_TYPES, ROOF_OPENINGS, BALCONY } from './catalog.js';
+import { WALL_TYPES, OPENING_TYPES, ROOF_OPENINGS, BALCONY, SITE_SURFACES, SITE_DEFAULTS } from './catalog.js';
 import { EQUIPMENT_TYPES } from './equipment-catalog.js';
 import { equipmentParts, placeEquipment } from './equipment-models.js';
 import { STAIR_TYPES, stairLayout } from './stairs.js';
@@ -562,6 +562,153 @@ export function levelTremies(project, levelIndex) {
     .map((s) => ({ stair: s.stair, poly: s.layout.tremie, arrival: s.layout.arrival }));
 }
 
+// ─── Abords ───────────────────────────────────────────────────────────────────
+
+// Solide de révolution autour d'un axe vertical : profil [[rayon, z]...] du bas vers le haut
+function lathe(cx, cy, profile, seg = 14) {
+  const positions = [], triangles = [];
+  const rings = profile.map(([r, z]) => {
+    const start = positions.length;
+    if (r < 1e-6) { positions.push([cx, cy, z]); return { start, n: 1 }; }
+    for (let i = 0; i < seg; i++) {
+      const a = (i / seg) * Math.PI * 2;
+      positions.push([cx + r * Math.cos(a), cy + r * Math.sin(a), z]);
+    }
+    return { start, n: seg };
+  });
+  for (let k = 0; k + 1 < rings.length; k++) {
+    const A = rings[k], B = rings[k + 1];
+    for (let i = 0; i < seg; i++) {
+      const j = (i + 1) % seg;
+      const a0 = A.start + (A.n === 1 ? 0 : i), a1 = A.start + (A.n === 1 ? 0 : j);
+      const b0 = B.start + (B.n === 1 ? 0 : i), b1 = B.start + (B.n === 1 ? 0 : j);
+      if (A.n > 1) triangles.push([a0, a1, b1]);
+      if (B.n > 1 || A.n > 1) triangles.push([a0, b1, b0]);
+    }
+  }
+  // fonds plats si le profil commence ou finit sur un anneau
+  const cap = (R, up) => {
+    if (R.n === 1) return;
+    const c = positions.length;
+    const z = positions[R.start][2];
+    positions.push([cx, cy, z]);
+    for (let i = 0; i < seg; i++) {
+      const j = (i + 1) % seg;
+      triangles.push(up ? [c, R.start + i, R.start + j] : [c, R.start + j, R.start + i]);
+    }
+  };
+  cap(rings[0], false);
+  cap(rings[rings.length - 1], true);
+  return { positions, triangles: triangles.filter(([a, b, c]) => a !== b && b !== c && a !== c) };
+}
+
+function treeParts(t, z0) {
+  const d = t.diameter || SITE_DEFAULTS.tree.diameter;
+  const h = t.height || SITE_DEFAULTS.tree.height;
+  const trunkR = Math.max(0.08, Math.min(0.25, d * 0.04));
+  if ((t.kind || 'deciduous') === 'conifer') {
+    const base = z0 + h * 0.18;
+    return [
+      { key: 'trunk', mesh: lathe(t.x, t.y, [[trunkR, z0], [trunkR * 0.8, base + 0.2]]) },
+      { key: 'foliage', mesh: lathe(t.x, t.y, [[d / 2, base], [d * 0.36, base + (h - base + z0) * 0.35], [d * 0.18, base + (h - base + z0) * 0.7], [0, z0 + h]]) },
+    ];
+  }
+  const r = d / 2;
+  const c = z0 + h - r * 0.9; // centre du houppier
+  const crown = [];
+  for (let i = 0; i <= 8; i++) {
+    const a = -Math.PI / 2 + (i / 8) * Math.PI;
+    crown.push([Math.max(0, r * Math.cos(a)), c + r * 0.9 * Math.sin(a)]);
+  }
+  crown[0][0] = 0; crown[crown.length - 1][0] = 0;
+  return [
+    { key: 'trunk', mesh: lathe(t.x, t.y, [[trunkR, z0], [trunkR * 0.75, c - r * 0.5]]) },
+    { key: 'foliage', mesh: lathe(t.x, t.y, crown) },
+  ];
+}
+
+/**
+ * Éléments des abords : terrain de la parcelle, surfaces, places de stationnement,
+ * arbres et haies. Tout est posé au niveau du terrain fini (5 cm sous le plancher du RDC).
+ */
+export function siteElements(project) {
+  const site = project.site;
+  if (!site) return [];
+  const level = project.levels[0];
+  const z = levelElevation(project, level.id) + SITE_DEFAULTS.groundOffset;
+  const out = [];
+  const colors = { ...Object.fromEntries(Object.entries(SITE_SURFACES).map(([k, v]) => [k, v.color])) };
+  if (site.boundary?.length >= 3) {
+    out.push({
+      kind: 'terrain', level, levelIndex: 0, name: 'Terrain', poly: site.boundary,
+      area: Math.abs(G.polygonArea(site.boundary)), z0: z - SITE_DEFAULTS.terrainDepth, depth: SITE_DEFAULTS.terrainDepth,
+      siteParts: [{ key: 'terrain', color: SITE_DEFAULTS.terrainColor, mesh: extrude(site.boundary, z - SITE_DEFAULTS.terrainDepth, z) }],
+      key: 'site-terrain',
+    });
+  }
+  const tops = [];
+  for (const sf of site.surfaces || []) {
+    if (!sf.poly || sf.poly.length < 3) continue;
+    const cat = SITE_SURFACES[sf.type] || SITE_SURFACES.path;
+    const top = z + cat.thickness;
+    tops.push({ poly: sf.poly, top });
+    out.push({
+      kind: 'siteSurface', level, levelIndex: 0, name: cat.label, surface: sf, category: cat, poly: sf.poly,
+      area: Math.abs(G.polygonArea(sf.poly)), z0: z - 0.01, depth: cat.thickness + 0.01,
+      siteParts: [{ key: sf.type, color: colors[sf.type], mesh: extrude(sf.poly, z - 0.01, top) }],
+      key: `site-surface-${sf.id}`,
+    });
+  }
+  const groundAt = (p) => Math.max(z, ...tops.filter((t) => G.pointInPolygon(p, t.poly)).map((t) => t.top));
+  for (const pk of site.parkings || []) {
+    const w = pk.width || SITE_DEFAULTS.parking.width, d = pk.depth || SITE_DEFAULTS.parking.depth;
+    const a = ((pk.rotation || 0) * Math.PI) / 180;
+    const u = [Math.cos(a), Math.sin(a)], n = G.perp(u);
+    const corner = (sx, sy) => [pk.x + u[0] * sx * w / 2 + n[0] * sy * d / 2, pk.y + u[1] * sx * w / 2 + n[1] * sy * d / 2];
+    const poly = [corner(-1, -1), corner(1, -1), corner(1, 1), corner(-1, 1)];
+    const zt = groundAt([pk.x, pk.y]) + 0.004;
+    // marquage au sol : les deux côtés et le fond, ouvert côté allée (y > 0)
+    const lines = [
+      orientedBox(G.add([pk.x, pk.y], G.mul(u, -w / 2)), n, d, 0.1, zt - 0.004, zt),
+      orientedBox(G.add([pk.x, pk.y], G.mul(u, w / 2)), n, d, 0.1, zt - 0.004, zt),
+      orientedBox(G.add([pk.x, pk.y], G.mul(n, -d / 2)), u, w, 0.1, zt - 0.004, zt),
+    ];
+    out.push({
+      kind: 'parking', level, levelIndex: 0, name: 'Place de stationnement', parking: pk, poly,
+      area: w * d, z0: zt, top: zt,
+      siteParts: [{ key: 'marking', color: '#f4f4f0', mesh: mergeMeshes(lines) }],
+      key: `site-parking-${pk.id}`,
+    });
+  }
+  for (const t of site.trees || []) {
+    const zb = groundAt([t.x, t.y]);
+    out.push({
+      kind: 'tree', level, levelIndex: 0, name: (t.kind || 'deciduous') === 'conifer' ? 'Conifère' : 'Arbre', tree: t,
+      siteParts: treeParts(t, zb).map((p) => ({ ...p, color: p.key === 'trunk' ? '#6b5440' : ((t.kind || 'deciduous') === 'conifer' ? '#3f6440' : '#5f8a45') })),
+      key: `site-tree-${t.id}`,
+    });
+  }
+  for (const hg of site.hedges || []) {
+    const pts = hg.points || [];
+    if (pts.length < 2) continue;
+    const h = hg.height || SITE_DEFAULTS.hedge.height, w = hg.width || SITE_DEFAULTS.hedge.width;
+    const boxes = [];
+    for (let i = 0; i + 1 < pts.length; i++) {
+      const p = pts[i], q = pts[i + 1];
+      const L = G.dist(p, q);
+      if (L < 1e-3) continue;
+      boxes.push(orientedBox(G.mul(G.add(p, q), 0.5), G.norm(G.sub(q, p)), L + w * 0.9, w, groundAt(p), groundAt(p) + h));
+    }
+    out.push({
+      kind: 'hedge', level, levelIndex: 0, name: 'Haie', hedge: hg,
+      length: pts.slice(1).reduce((a, p, i) => a + G.dist(pts[i], p), 0),
+      siteParts: [{ key: 'hedge', color: '#4f7a3c', mesh: mergeMeshes(boxes) }],
+      key: `site-hedge-${hg.id}`,
+    });
+  }
+  return out;
+}
+
 /**
  * Construit la liste des éléments du bâtiment.
  * Chaque pièce appartient à un corps de bâtiment (altitude du sol, hauteur des murs, toiture propres).
@@ -949,5 +1096,6 @@ export function buildElements(project, options = {}) {
     }
   });
 
+  elements.push(...siteElements(project)); // abords, au niveau du terrain
   return { elements, warnings };
 }

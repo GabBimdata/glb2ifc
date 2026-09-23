@@ -31,8 +31,14 @@ export function newProject(name = 'Nouveau projet') {
     name,
     settings: { slabThickness: DEFAULTS.slabThickness },
     levels: [newLevel('Rez-de-chaussée')],
+    site: emptySite(),
     assets: {},
   };
+}
+
+// Abords du projet : parcelle, surfaces, stationnement, végétation (au niveau du terrain)
+export function emptySite() {
+  return { boundary: [], surfaces: [], parkings: [], trees: [], hedges: [] };
 }
 
 export function newLevel(name, height = DEFAULTS.levelHeight) {
@@ -525,6 +531,9 @@ export function validateProject(data) {
   }
   data.assets = data.assets || {};
   data.colors = data.colors || {};
+  data.site = { ...emptySite(), ...(data.site || {}) };
+  for (const k of ['surfaces', 'parkings', 'trees', 'hedges']) if (!Array.isArray(data.site[k])) data.site[k] = [];
+  if (!Array.isArray(data.site.boundary)) data.site.boundary = [];
   if (!Array.isArray(data.bodies) || !data.bodies.length) {
     const main = newBody('Bâtiment principal', data.roof);
     data.bodies = [main];

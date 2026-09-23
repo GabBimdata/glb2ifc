@@ -111,7 +111,8 @@ export function exportIfc(project) {
   const bldPl = placement(sitePl);
   const building = w.add(`IFCBUILDING(${guid('building')},${oh},${stepString(project.name)},$,$,${bldPl},$,$,.ELEMENT.,$,$,$)`);
   w.add(`IFCRELAGGREGATES(${guid('rel-project-site')},${oh},$,$,${projectId},(${site}))`);
-  w.add(`IFCRELAGGREGATES(${guid('rel-site-building')},${oh},$,$,${site},(${building}))`);
+  const siteContained = [];  // terrain, surfaces, végétation
+  const siteSpaces = [];     // places de stationnement (espaces extérieurs de la parcelle)
 
   // Styles de surface
   const styles = {};
@@ -228,7 +229,6 @@ export function exportIfc(project) {
     props(`storey-${level.id}`, st, 'Pset_BuildingStoreyCommon', [['EntranceLevel', 'bool', i === 0], ['AboveGround', 'bool', true]]);
   });
 
-  const roofParts = [];
   const roofEntities = {};
 
   const noteBody = (el, entity) => {
@@ -328,10 +328,13 @@ export function exportIfc(project) {
       let item;
       if (el.profile) item = styled(extrusion(profilePolyline(el.profile), el.depth, el.z0 - st.z), 'roof', el.body);
       else item = styled(faceSet(el.mesh, st.z), 'roof', el.body);
-      const ent = w.add(`IFCSLAB(${guid(key)},${oh},${stepString(el.name)},$,$,${pl},${shape([item], el.profile ? 'SweptSolid' : 'Tessellation')},$,.ROOF.)`);
-      noteBody(el, ent);
+      // La géométrie est portée directement par l'IfcRoof (et non par des IfcSlab .ROOF.
+      // regroupés) : les visionneuses l'identifient alors comme une toiture.
+      const typeEnum = { gable: '.GABLE_ROOF.', hip: '.HIP_ROOF.', shed: '.SHED_ROOF.', flat: '.FLAT_ROOF.' }[el.body?.roof?.type] || '.NOTDEFINED.';
+      const ent = w.add(`IFCROOF(${guid(key)},${oh},${stepString(el.name)},$,$,${pl},${shape([item], el.profile ? 'SweptSolid' : 'Tessellation')},$,${typeEnum})`);
+      contained[el.level.id].push(noteBody(el, ent));
+      linkMaterial('Couverture', ent);
       roofEntities[el.key] = ent;
-      roofParts.push({ ent, level: el.level, body: el.body });
     } else if (el.kind === 'skylight') {
       const host = roofEntities[el.hostKey];
       const pl = placement(st.placement);
@@ -353,7 +356,8 @@ export function exportIfc(project) {
       const opening = w.add(`IFCOPENINGELEMENT(${guid(`void-${key}`)},${oh},'Percement de lucarne',$,$,${pl},${shape([voidSolid])},$,.OPENING.)`);
       if (host) w.add(`IFCRELVOIDSELEMENT(${guid(`relvoid-${key}`)},${oh},$,$,${host},${opening})`);
       const walls = w.add(`IFCWALL(${guid(`walls-${key}`)},${oh},${stepString(`${el.name} — joues et façade`)},$,$,${pl},${shape([styled(faceSet(el.walls, st.z), 'exterior', el.body)], 'Tessellation')},$,.STANDARD.)`);
-      const cover = w.add(`IFCSLAB(${guid(`roof-${key}`)},${oh},${stepString(`${el.name} — couverture`)},$,$,${pl},${shape([styled(faceSet(el.roofMesh, st.z), 'roof', el.body)], 'Tessellation')},$,.ROOF.)`);
+      const dormerRoofType = { dormerGable: '.GABLE_ROOF.', dormerHip: '.HIP_ROOF.', dormerShed: '.SHED_ROOF.' }[el.roofOpening?.item?.type] || '.NOTDEFINED.';
+      const cover = w.add(`IFCROOF(${guid(`roof-${key}`)},${oh},${stepString(`${el.name} — couverture`)},$,$,${pl},${shape([styled(faceSet(el.roofMesh, st.z), 'roof', el.body)], 'Tessellation')},$,${dormerRoofType})`);
       const frame = styled(faceSet(el.frame, st.z), 'frame', el.body);
       const panel = styled(faceSet(el.panel, st.z), 'window', el.body, IFC_GLASS_TRANSPARENCY);
       const win = w.add(`IFCWINDOW(${guid(key)},${oh},${stepString(`${el.name} — baie`)},$,$,${pl},${shape([frame, panel], 'Tessellation')},$,${num(el.window.height)},${num(el.window.width)},.WINDOW.,.SINGLE_PANEL.,$)`);
@@ -367,10 +371,15 @@ export function exportIfc(project) {
       const isRoof = el.kind === 'terrace' && el.mode === 'roof';
       const solids = el.pieces.map((pc) => styled(extrusion(profileWithVoids(pc.outer, pc.holes), el.depth, el.z0 - st.z), isRoof ? 'slab' : 'balcony', el.body));
       const label = el.kind === 'balcony' ? 'Balcon' : isRoof ? 'Toiture-terrasse' : 'Terrasse';
-      const slab = w.add(`IFCSLAB(${guid(key)},${oh},${stepString(el.name)},$,${stepString(label)},${pl},${shape(solids)},$,${isRoof ? '.ROOF.' : '.FLOOR.'})`);
+      // une toiture-terrasse est une toiture (IfcRoof), une terrasse ou un balcon une dalle
+      const slab = isRoof
+        ? w.add(`IFCROOF(${guid(key)},${oh},${stepString(el.name)},$,${stepString(label)},${pl},${shape(solids)},$,.FLAT_ROOF.)`)
+        : w.add(`IFCSLAB(${guid(key)},${oh},${stepString(el.name)},$,${stepString(label)},${pl},${shape(solids)},$,.FLOOR.)`);
       contained[el.level.id].push(noteBody(el, slab));
-      props(key, slab, 'Pset_SlabCommon', [['IsExternal', 'bool', true], ['LoadBearing', 'bool', true], ['Reference', 'label', label]]);
-      linkMaterial('Béton', slab);
+      props(key, slab, isRoof ? 'Pset_RoofCommon' : 'Pset_SlabCommon', isRoof
+        ? [['IsExternal', 'bool', true], ['Reference', 'label', label]]
+        : [['IsExternal', 'bool', true], ['LoadBearing', 'bool', true], ['Reference', 'label', label]]);
+      linkMaterial(isRoof ? 'Couverture' : 'Béton', slab);
       if (el.railParts?.length) {
         const byKey = new Map();
         for (const rp of el.railParts) {
@@ -399,6 +408,45 @@ export function exportIfc(project) {
         const sp = w.add(`IFCSPACE(${guid(`space-${key}`)},${oh},${stepString(label)},$,$,${pl},${shape(spaceSolids)},${stepString(label)},.ELEMENT.,.EXTERNAL.,$)`);
         spacesByStorey[el.level.id].push(sp);
         quantities(`space-${key}`, sp, 'Qto_SpaceBaseQuantities', [['NetFloorArea', 'area', el.area]]);
+      }
+    } else if (['terrain', 'siteSurface', 'parking', 'tree', 'hedge'].includes(el.kind)) {
+      // Abords : posés dans l'IfcSite, hors du bâtiment
+      const pl = placement(sitePl);
+      const color = (k) => el.siteParts.find((p) => p.key === k)?.color || '#999999';
+      if (el.kind === 'terrain') {
+        const solid = extrusion(profilePolyline(el.poly), el.depth, el.z0);
+        w.add(`IFCSTYLEDITEM(${solid},(${styleFor('site-terrain', color('terrain'), 0)}),$)`);
+        const ent = w.add(`IFCGEOGRAPHICELEMENT(${guid(key)},${oh},'Terrain',$,$,${pl},${shape([solid])},$,.TERRAIN.)`);
+        siteContained.push(ent);
+        quantities(key, ent, 'Qto_SiteBaseQuantities', [['GrossArea', 'area', el.area]]);
+      } else if (el.kind === 'siteSurface') {
+        const cat = el.category;
+        const solid = extrusion(profilePolyline(el.poly), el.depth, el.z0);
+        w.add(`IFCSTYLEDITEM(${solid},(${styleFor(`site-${el.surface.type}`, color(el.surface.type), 0)}),$)`);
+        const ent = cat.ifc === 'slab'
+          ? w.add(`IFCSLAB(${guid(key)},${oh},${stepString(cat.label)},$,${stepString(cat.objectType)},${pl},${shape([solid])},$,.USERDEFINED.)`)
+          : w.add(`IFCGEOGRAPHICELEMENT(${guid(key)},${oh},${stepString(cat.label)},$,${stepString(cat.objectType)},${pl},${shape([solid])},$,.USERDEFINED.)`);
+        siteContained.push(ent);
+        quantities(key, ent, cat.ifc === 'slab' ? 'Qto_SlabBaseQuantities' : 'Qto_SiteBaseQuantities', [[cat.ifc === 'slab' ? 'NetArea' : 'GrossArea', 'area', el.area]]);
+      } else if (el.kind === 'parking') {
+        // place de stationnement : un espace extérieur de type PARKING, avec son marquage
+        const vol = extrusion(profilePolyline(el.poly), 2.0, el.top);
+        const sp = w.add(`IFCSPACE(${guid(key)},${oh},${stepString(`P${siteSpaces.length + 1}`)},$,$,${pl},${shape([vol])},'Place de stationnement',.ELEMENT.,.PARKING.,$)`);
+        siteSpaces.push(sp);
+        quantities(key, sp, 'Qto_SpaceBaseQuantities', [['NetFloorArea', 'area', el.area]]);
+        const mark = w.add(`IFCBUILDINGELEMENTPROXY(${guid(`mark-${key}`)},${oh},'Marquage au sol',$,'Marquage',${pl},${shape([faceSet(el.siteParts[0].mesh, 0)], 'Tessellation')},$,.NOTDEFINED.)`);
+        siteContained.push(mark);
+      } else {
+        const items = el.siteParts.map((p) => {
+          const it = faceSet(p.mesh, 0);
+          w.add(`IFCSTYLEDITEM(${it},(${styleFor(`site-${p.key}`, p.color, 0)}),$)`);
+          return it;
+        });
+        const label = el.kind === 'hedge' ? 'Haie' : el.name;
+        const ent = w.add(`IFCGEOGRAPHICELEMENT(${guid(key)},${oh},${stepString(label)},$,${stepString(el.kind === 'hedge' ? 'Haie' : 'Arbre')},${pl},${shape(items, 'Tessellation')},$,.USERDEFINED.)`);
+        siteContained.push(ent);
+        if (el.kind === 'tree') props(key, ent, 'Smelt_Vegetation', [['Hauteur', 'length', el.tree.height || 7], ['DiametreHouppier', 'length', el.tree.diameter || 4], ['Essence', 'label', el.name]]);
+        else props(key, ent, 'Smelt_Vegetation', [['Hauteur', 'length', el.hedge.height || 1.6], ['Longueur', 'length', el.length]]);
       }
     } else if (el.kind === 'stair') {
       // IfcStair regroupe ses volées (avec leurs marches et limons), son palier et sa main courante
@@ -555,22 +603,9 @@ export function exportIfc(project) {
     }
   }
 
-  const roofGroups = new Map();
-  for (const r of roofParts) {
-    const id = r.body?.id || 'main';
-    if (!roofGroups.has(id)) roofGroups.set(id, { body: r.body, level: r.level, parts: [] });
-    roofGroups.get(id).parts.push(r.ent);
-  }
-  for (const [id, group] of roofGroups) {
-    const st = storeys[group.level.id];
-    const pl = placement(st.placement);
-    const type = group.body?.roof?.type;
-    const typeEnum = { gable: '.GABLE_ROOF.', hip: '.HIP_ROOF.', shed: '.SHED_ROOF.', flat: '.FLAT_ROOF.' }[type] || '.NOTDEFINED.';
-    const name = multiBody && group.body ? `Toiture ${group.body.name}` : 'Toiture';
-    const roof = w.add(`IFCROOF(${guid(`roof-${id}`)},${oh},${stepString(name)},$,$,${pl},$,$,${typeEnum})`);
-    w.add(`IFCRELAGGREGATES(${guid(`rel-roof-${id}`)},${oh},$,$,${roof},(${group.parts.join(',')}))`);
-    contained[group.level.id].push(roof);
-    linkMaterial('Couverture', roof);
+  w.add(`IFCRELAGGREGATES(${guid('rel-site-building')},${oh},$,$,${site},(${[building, ...siteSpaces].join(',')}))`);
+  if (siteContained.length) {
+    w.add(`IFCRELCONTAINEDINSPATIALSTRUCTURE(${guid('contain-site')},${oh},$,$,(${siteContained.join(',')}),${site})`);
   }
 
   // Corps de bâtiment : une IfcZone par corps (espaces) et un groupe pour les ouvrages

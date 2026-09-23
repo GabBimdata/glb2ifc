@@ -6,7 +6,7 @@ import { buildElements } from './build.js';
 import { colorsOf, GLASS_OPACITY } from './catalog.js';
 import { EQUIPMENT_MATERIALS } from './equipment-models.js';
 
-const IFC_HINT = { stair: 'IfcStair', tremieRail: 'IfcRailing', terrace: 'IfcSlab', balcony: 'IfcSlab', wall: 'IfcWall', slab: 'IfcSlab', roof: 'IfcRoof', gable: 'IfcWall', door: 'IfcDoor', window: 'IfcWindow', skylight: 'IfcWindow', dormer: 'IfcRoof', ceiling: 'IfcCovering' };
+const IFC_HINT = { terrain: 'IfcGeographicElement', siteSurface: 'IfcSlab', tree: 'IfcGeographicElement', hedge: 'IfcGeographicElement', parking: 'IfcBuildingElementProxy', stair: 'IfcStair', tremieRail: 'IfcRailing', terrace: 'IfcSlab', balcony: 'IfcSlab', wall: 'IfcWall', slab: 'IfcSlab', roof: 'IfcRoof', gable: 'IfcWall', door: 'IfcDoor', window: 'IfcWindow', skylight: 'IfcWindow', dormer: 'IfcRoof', ceiling: 'IfcCovering' };
 
 const materialCache = new Map();
 function material(key, opts = {}) {
@@ -71,6 +71,7 @@ export function buildObject3D(project, options = {}) {
     if (el.mesh) parts.push({ mesh: el.mesh, key: el.kind === 'wall' ? (el.wallType.category || 'interior') : el.kind });
     if (el.walls) parts.push({ mesh: el.walls, key: 'exterior' });
     if (el.slabMesh) parts.push({ mesh: el.slabMesh, key: el.mode === 'roof' ? 'slab' : 'balcony' });
+    for (const sp of el.siteParts || []) parts.push({ mesh: sp.mesh, key: `site-${sp.key}`, color: sp.color });
     for (const rp of el.railParts || []) parts.push({ mesh: rp.mesh, key: rp.key, opacity: rp.key === 'window' ? GLASS_OPACITY : 1 });
     if (el.kind === 'stair') for (const sp of el.parts) parts.push({ mesh: sp.mesh, key: sp.key === 'rail' ? 'railing' : 'stair' });
     if (el.roofMesh) parts.push({ mesh: el.roofMesh, key: 'roof' });
@@ -83,7 +84,7 @@ export function buildObject3D(project, options = {}) {
     for (const part of parts) {
       if (!part.mesh.triangles.length) continue;
       const geom = toGeometry(part.mesh);
-      const m = new THREE.Mesh(geom, material(part.key, { opacity: part.opacity, highlight, color: colorsOf(project, el.body)[part.key] }));
+      const m = new THREE.Mesh(geom, material(part.key, { opacity: part.opacity, highlight, color: part.color || colorsOf(project, el.body)[part.key] }));
       m.name = el.name;
       // les métadonnées doivent être portées par le nœud du maillage : c'est là que les
       // lecteurs glTF vont chercher les extras

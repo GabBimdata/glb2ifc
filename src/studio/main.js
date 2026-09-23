@@ -1,7 +1,7 @@
 // Smelt Studio — point d'entrée de l'interface.
 import * as M from './model.js';
 import * as G from './geometry.js';
-import { WALL_TYPES, OPENING_TYPES, ROOM_NAMES, ROOF_TYPES, ROOF_OPENINGS, COLOR_LABELS, colorsOf, BALCONY, RAILING_TYPES } from './catalog.js';
+import { WALL_TYPES, OPENING_TYPES, ROOM_NAMES, ROOF_TYPES, ROOF_OPENINGS, COLOR_LABELS, colorsOf, BALCONY, RAILING_TYPES, SITE_SURFACES, SITE_DEFAULTS, TREE_KINDS } from './catalog.js';
 import { Editor2D } from './editor2d.js';
 import { View3D, exportGlb } from './view3d.js';
 import { exportIfc } from './ifc-export.js';
@@ -203,6 +203,7 @@ const STEPS = [
   { id: 'bodies', title: 'Corps de bâtiment', tool: 'select' },
   { id: 'levels', title: 'Gérer les étages', tool: 'select' },
   { id: 'roof', title: 'Couvrir', tool: 'select' },
+  { id: 'site', title: 'Aménager les abords', tool: 'select' },
   { id: 'export', title: 'Exporter', tool: 'select' },
 ];
 
@@ -224,12 +225,14 @@ function stepDone(id) {
     case 'equipment': return (L.equipment || []).length > 0;
     case 'levels': return p.levels.length > 1;
     case 'roof': return p.bodies.some((b) => b.roof.enabled) && p.levels[p.levels.length - 1].walls.length > 0;
+    case 'site': return (p.site?.boundary?.length || 0) >= 3 || ['surfaces', 'parkings', 'trees', 'hedges'].some((k) => p.site?.[k]?.length);
     case 'export': return ui.exported;
     default: return false;
   }
 }
 
 function goStep(id) {
+  if (id === 'site' && editor.levelIndex !== 0) switchLevel(store.project.levels[0].id);
   ui.step = id;
   const step = STEPS.find((s) => s.id === id);
   if (id === 'scale') {
@@ -368,6 +371,31 @@ function stepBody(id) {
           <li><kbd>Suppr</kbd> : supprimer l'élément sélectionné.</li>
         </ul>
         ${count ? `<p class="ok">${count} équipement${count > 1 ? 's' : ''} sur ce niveau.</p>` : ''}`;
+    }
+    case 'site': {
+      const S = store.project.site;
+      const area = S.boundary.length >= 3 ? Math.abs(G.polygonArea(S.boundary)) : 0;
+      const tile = (attrs, on, icon, label, small = '') => `
+        <button class="tile ${on ? 'on' : ''}" ${attrs}>${icon}<span>${esc(label)}</span>${small ? `<small>${small}</small>` : ''}</button>`;
+      const sw = (c) => `<svg viewBox="0 0 100 30" aria-hidden="true"><rect x="28" y="5" width="44" height="20" rx="3" fill="${c}" stroke="#1f2a30" stroke-width="1"/></svg>`;
+      const treeIcon = (conifer) => conifer
+        ? '<svg viewBox="0 0 100 30" aria-hidden="true"><circle cx="50" cy="15" r="12" fill="#e2ead9" stroke="#2f5d3a"/><path d="M50 3v24M38 15h24M42 7l16 16M58 7 42 23" stroke="#2f5d3a"/></svg>'
+        : '<svg viewBox="0 0 100 30" aria-hidden="true"><circle cx="50" cy="15" r="12" fill="#e2ead9" stroke="#2f5d3a" stroke-dasharray="4 2"/><circle cx="50" cy="15" r="1.8" fill="#6b5440"/></svg>';
+      return `
+        <p>Les abords se dessinent sur le rez-de-chaussée. Tracer au clic, fermer en cliquant le premier point ou avec Entrée.</p>
+        <span class="field-label">Parcelle</span>
+        ${area ? `<div class="stat"><span>Surface de la parcelle</span><b>${fmt(area, 0)} m²</b></div>` : ''}
+        <div class="row"><button class="btn ${area ? '' : 'primary'} ${editor.tool === 'sitePoly' && editor.siteMode === 'boundary' ? 'on' : ''}" data-site-tool="boundary">${area ? 'Retracer la parcelle' : 'Tracer la parcelle'}</button></div>
+        <span class="field-label">Surfaces</span>
+        <div class="grid2">${Object.entries(SITE_SURFACES).map(([k, c]) => tile(`data-site-tool="${k}"`, editor.tool === 'sitePoly' && editor.siteMode === k, sw(c.color), c.label)).join('')}</div>
+        <span class="field-label">Stationnement et végétation</span>
+        <div class="grid2">
+          ${tile('data-site-tool="parking"', editor.tool === 'parking', '<svg viewBox="0 0 100 30" aria-hidden="true"><path d="M38 27V3h24v24" fill="none" stroke="#1f2a30" stroke-width="2"/><text x="50" y="20" font-size="12" text-anchor="middle" font-weight="600" fill="#1f2a30">P</text></svg>', 'Place de stationnement', '2,50 × 5,00 m')}
+          ${tile('data-site-tool="tree-deciduous"', editor.tool === 'tree' && editor.treeKind === 'deciduous', treeIcon(false), 'Arbre feuillu')}
+          ${tile('data-site-tool="tree-conifer"', editor.tool === 'tree' && editor.treeKind === 'conifer', treeIcon(true), 'Conifère')}
+          ${tile('data-site-tool="hedge"', editor.tool === 'hedge', '<svg viewBox="0 0 100 30" aria-hidden="true"><path d="M20 20 45 10 80 18" fill="none" stroke="#4f7a3c" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/></svg>', 'Haie')}
+        </div>
+        <p class="sub">${S.surfaces.length} surface(s), ${S.parkings.length} place(s), ${S.trees.length} arbre(s), ${S.hedges.length} haie(s).</p>`;
     }
     case 'bodies': {
       const sel = editor.selection?.type === 'room' ? L.rooms.find((r) => r.id === editor.selection.id) : null;
@@ -621,6 +649,13 @@ function findSelection() {
     const item = (L.balconies || []).find((x) => x.id === sel.id);
     return item ? { ...sel, item } : null;
   }
+  if (['tree', 'parking', 'hedge', 'siteSurface'].includes(sel.type)) {
+    const S = store.project.site;
+    const list = { tree: S.trees, parking: S.parkings, hedge: S.hedges, siteSurface: S.surfaces }[sel.type];
+    const item = list.find((x) => x.id === sel.id);
+    return item ? { ...sel, item } : null;
+  }
+  if (sel.type === 'siteBoundary') return store.project.site.boundary.length >= 3 ? { ...sel, item: store.project.site.boundary } : null;
   if (sel.type === 'stair') {
     const item = (L.stairs || []).find((x) => x.id === sel.id);
     return item ? { ...sel, item, layout: stairLayout(item, L.height, store.project.settings.slabThickness) } : null;
@@ -745,6 +780,47 @@ function renderInspector() {
       <h2>Angle</h2><p class="sub">Point de jonction des murs</p>
       <div class="grid2">${numField('X', 'node-x', s.point[0])}${numField('Y', 'node-y', -s.point[1])}</div>
       <section><button class="btn danger block" data-act="delete-selection">Supprimer l'angle et ses murs</button></section>`;
+  } else if (s.type === 'siteBoundary') {
+    const b = s.item;
+    const per = b.reduce((a, p, i) => a + G.dist(p, b[(i + 1) % b.length]), 0);
+    el.innerHTML = `
+      <h2>Parcelle</h2><p class="sub">Terrain du projet (IfcSite)</p>
+      <div class="stat"><span>Surface</span><b>${fmt(Math.abs(G.polygonArea(b)), 0)} m²</b></div>
+      <div class="stat"><span>Périmètre</span><b>${fmt(per, 1)} m</b></div>
+      <p class="sub">Glissez le bord de la parcelle pour la déplacer.</p>
+      <div class="row"><button class="btn" data-site-tool="boundary">Retracer</button></div>
+      <section><button class="btn danger block" data-act="delete-selection">Supprimer <kbd>Suppr</kbd></button></section>`;
+  } else if (s.type === 'siteSurface') {
+    const sf = s.item;
+    el.innerHTML = `
+      <h2>${esc(SITE_SURFACES[sf.type]?.label || 'Surface')}</h2><p class="sub">${fmt(Math.abs(G.polygonArea(sf.poly)), 1)} m²</p>
+      <label class="field"><span class="field-label">Type</span>
+        <select data-prop="site-type">${Object.entries(SITE_SURFACES).map(([k, c]) => `<option value="${k}" ${k === sf.type ? 'selected' : ''}>${esc(c.label)}</option>`).join('')}</select></label>
+      <p class="sub">Glissez la surface pour la déplacer.</p>
+      <section><button class="btn danger block" data-act="delete-selection">Supprimer <kbd>Suppr</kbd></button></section>`;
+  } else if (s.type === 'parking') {
+    const pk = s.item;
+    el.innerHTML = `
+      <h2>Place de stationnement</h2><p class="sub">Espace extérieur de type PARKING</p>
+      <div class="grid2">${numField('Largeur', 'site-width', pk.width)}${numField('Longueur', 'site-depth', pk.depth)}</div>
+      ${numField('Orientation', 'site-rotation', pk.rotation || 0, '°')}
+      <p class="sub"><kbd>R</kbd> : pivoter de 90°, <kbd>Maj</kbd>+<kbd>R</kbd> : de 15°.</p>
+      <section><button class="btn danger block" data-act="delete-selection">Supprimer <kbd>Suppr</kbd></button></section>`;
+  } else if (s.type === 'tree') {
+    const t = s.item;
+    el.innerHTML = `
+      <h2>${esc(TREE_KINDS[t.kind || 'deciduous'])}</h2><p class="sub">Élément végétal (IfcGeographicElement)</p>
+      <label class="field"><span class="field-label">Essence</span>
+        <select data-prop="site-kind">${Object.entries(TREE_KINDS).map(([k, v]) => `<option value="${k}" ${k === (t.kind || 'deciduous') ? 'selected' : ''}>${esc(v)}</option>`).join('')}</select></label>
+      <div class="grid2">${numField('Hauteur', 'site-height', t.height)}${numField('Diamètre du houppier', 'site-diameter', t.diameter)}</div>
+      <section><button class="btn danger block" data-act="delete-selection">Supprimer <kbd>Suppr</kbd></button></section>`;
+  } else if (s.type === 'hedge') {
+    const hg = s.item;
+    const len = hg.points.slice(1).reduce((a, p, i) => a + G.dist(hg.points[i], p), 0);
+    el.innerHTML = `
+      <h2>Haie</h2><p class="sub">${fmt(len, 1)} m de long</p>
+      <div class="grid2">${numField('Hauteur', 'site-height', hg.height)}${numField('Épaisseur', 'site-width', hg.width)}</div>
+      <section><button class="btn danger block" data-act="delete-selection">Supprimer <kbd>Suppr</kbd></button></section>`;
   } else if (s.type === 'stair') {
     const st = s.item, i = s.layout.info;
     const turning = isTurningStair(st);
@@ -880,7 +956,24 @@ function applyProp(prop, raw) {
   const value = parseNum(raw);
   const levelId = L.id;
   const lv = (pr) => pr.levels.find((l) => l.id === levelId);
-  const needNum = !['wall-type', 'room-name', 'room-body', 'bal-railing', 'ter-mode', 'ter-railing', 'stair-type', 'stair-rail'].includes(prop);
+  const needNum = !['wall-type', 'room-name', 'room-body', 'bal-railing', 'ter-mode', 'ter-railing', 'stair-type', 'stair-rail', 'site-type', 'site-kind'].includes(prop);
+  if (prop.startsWith('site-')) {
+    const key = prop.slice(5);
+    const text = key === 'type' || key === 'kind';
+    if (!text && !(key === 'rotation' ? Number.isFinite(value) : value > 0)) { toast('Valeur invalide.', 'warn'); renderInspector(); return; }
+    store.commit('Modifier les abords', (pr) => {
+      const S = pr.site;
+      const list = { tree: S.trees, parking: S.parkings, hedge: S.hedges, siteSurface: S.surfaces }[s.type];
+      const it = list?.find((x) => x.id === s.id);
+      if (!it) return false;
+      if (key === 'type' && SITE_SURFACES[raw]) it.type = raw;
+      else if (key === 'kind' && TREE_KINDS[raw]) it.kind = raw;
+      else if (key === 'rotation') it.rotation = ((value % 360) + 360) % 360;
+      else if (!text) it[key] = value;
+      return true;
+    });
+    return;
+  }
   if (prop.startsWith('stair-')) {
     const key = prop.slice(6);
     const flightCount = key === 'flight1' || key === 'flight2';
@@ -1305,14 +1398,23 @@ function loadProject(data) {
 }
 
 async function newProjectFlow() {
-  const ok = await modal({
+  const hasWork = store.project.levels.some((l) => l.walls.length || l.plan) || (store.project.site?.surfaces?.length);
+  const choice = await modal({
     title: 'Commencer un nouveau projet ?',
-    body: '<p>Le projet actuel sera remplacé. Pensez à l’enregistrer si vous souhaitez le garder.</p>',
-    actions: [{ label: 'Annuler', id: false }, { label: 'Nouveau projet', kind: 'primary', id: true, default: true }],
+    body: hasWork
+      ? `<p>« ${esc(store.project.name)} » sera remplacé par un projet vide. Enregistrez-le d'abord si vous souhaitez le garder : vous pourrez le rouvrir depuis le menu Projet.</p>`
+      : '<p>Le projet actuel est vide : il sera simplement remis à zéro.</p>',
+    actions: hasWork
+      ? [{ label: 'Annuler', id: false }, { label: 'Recommencer sans enregistrer', kind: 'ghost', id: 'discard' }, { label: 'Enregistrer puis recommencer', kind: 'primary', id: 'save', default: true }]
+      : [{ label: 'Annuler', id: false }, { label: 'Nouveau projet', kind: 'primary', id: 'discard', default: true }],
   });
-  if (!ok) return;
+  if (!choice) return;
+  if (choice === 'save') saveProjectFile();
   loadProject(M.newProject('Ma maison'));
+  store.clearHistory?.();
   ui.exported = false;
+  ui.alignBanner = null;
+  toast('Nouveau projet : importez un plan ou tracez directement vos murs.');
 }
 
 // ─── Rendu global et événements ───────────────────────────────────────────────
@@ -1364,6 +1466,17 @@ document.addEventListener('click', (e) => {
   if (d.room) { setTool('select'); editor.select({ type: 'room', id: d.room }); renderSteps(); return; }
   if (d.roomName) { applyProp('room-name', d.roomName); return; }
   if (d.stairType) { editor.stairType = d.stairType; setTool('stair'); return; }
+  if (d.siteTool) {
+    if (editor.levelIndex !== 0) switchLevel(store.project.levels[0].id);
+    const tool = d.siteTool;
+    if (tool === 'parking') setTool('parking');
+    else if (tool === 'hedge') setTool('hedge');
+    else if (tool.startsWith('tree-')) { editor.treeKind = tool.slice(5); setTool('tree'); }
+    else { editor.siteMode = tool; setTool('sitePoly'); }
+    ui.step = 'site';
+    renderSteps();
+    return;
+  }
   if (d.equipmentType) { editor.equipmentType = d.equipmentType; ui.step = 'equipment'; setTool('equipment'); return; }
   if (d.roofopening) { editor.roofOpeningType = d.roofopening; setTool('skylight'); return; }
   if (d.roof) {
@@ -1694,6 +1807,15 @@ window.addEventListener('drop', (e) => {
 $('#undoBtn').addEventListener('click', () => { const l = store.undo(); if (l) toast(`Annulé : ${l}`); });
 $('#redoBtn').addEventListener('click', () => { const l = store.redo(); if (l) toast(`Rétabli : ${l}`); });
 $('#exportTop').addEventListener('click', doExportIfc);
+// Menu Projet : nouveau, ouvrir, enregistrer
+{
+  const btn = $('#projectMenuBtn'), pop = $('#projectMenu');
+  const close = () => { pop.hidden = true; btn.setAttribute('aria-expanded', 'false'); };
+  btn.addEventListener('click', (e) => { e.stopPropagation(); pop.hidden = !pop.hidden; btn.setAttribute('aria-expanded', String(!pop.hidden)); });
+  pop.addEventListener('click', () => setTimeout(close, 0));
+  document.addEventListener('click', (e) => { if (!e.target.closest('#projectMenuWrap')) close(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
+}
 $('#fitBtn').addEventListener('click', () => editor.fit());
 $('#frame3d').addEventListener('click', () => view3d?.frame());
 $('#scopeBtn').addEventListener('click', (e) => {

@@ -136,7 +136,7 @@
     .view-pane { border-left: 1px solid var(--rule); }
     .stage[data-mode="plan"] .view-pane { border: 0; }
     #plan { display: block; touch-action: none; cursor: default; }
-    #plan[data-tool="wall"], #plan[data-tool="scale"], #plan[data-tool="measure"], #plan[data-tool="calage"], #plan[data-tool="opening"], #plan[data-tool="equipment"], #plan[data-tool="balcony"], #plan[data-tool="stair"] { cursor: crosshair; }
+    #plan[data-tool="wall"], #plan[data-tool="scale"], #plan[data-tool="measure"], #plan[data-tool="calage"], #plan[data-tool="opening"], #plan[data-tool="equipment"], #plan[data-tool="balcony"], #plan[data-tool="stair"], #plan[data-tool="sitePoly"], #plan[data-tool="hedge"], #plan[data-tool="parking"], #plan[data-tool="tree"] { cursor: crosshair; }
     #plan[data-tool="movePlan"] { cursor: move; }
     .floating { position: absolute; left: 12px; top: 12px; display: flex; gap: 2px; background: var(--paper); border: 1px solid var(--rule); border-radius: 8px; padding: 3px; box-shadow: 0 2px 8px rgba(31,42,48,.06); }
     .floating button { border: 0; background: transparent; border-radius: 5px; padding: 5px 9px; display: inline-flex; gap: 6px; align-items: center; color: var(--ink-2); }
@@ -198,6 +198,14 @@
     @media (prefers-reduced-motion: reduce) { .toast { animation: none; } }
     .busy { position: fixed; inset: 0; background: rgba(251,251,250,.7); display: grid; place-items: center; z-index: 40; font-weight: 500; }
 
+    .menu { position: relative; }
+    .menu > .btn { display: inline-flex; gap: 6px; align-items: center; }
+    .menu-pop { position: absolute; top: calc(100% + 6px); left: 0; z-index: 30; min-width: 230px; background: var(--paper); border: 1px solid var(--rule); border-radius: 8px; box-shadow: 0 10px 28px rgba(31,42,48,.16); padding: 6px; display: flex; flex-direction: column; }
+    .menu-pop[hidden] { display: none; }
+    .menu-pop button { text-align: left; background: none; border: 0; padding: 8px 10px; border-radius: 6px; font: inherit; color: var(--ink); cursor: pointer; display: flex; justify-content: space-between; gap: 12px; }
+    .menu-pop button:hover { background: var(--mist, #eef0f1); }
+    .menu-pop small { color: var(--ink-2); }
+
     @media (max-width: 1100px) {
       #app { grid-template-columns: 260px 1fr 0; }
       .inspector { display: none; }
@@ -209,6 +217,15 @@
   <div id="app">
     <header class="top">
       <div class="brand"><i></i>Smelt <span>Studio</span></div>
+      <div class="menu" id="projectMenuWrap">
+        <button class="btn ghost" id="projectMenuBtn" aria-haspopup="true" aria-expanded="false">Projet
+          <svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true"><path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.5"/></svg></button>
+        <div class="menu-pop" id="projectMenu" role="menu" hidden>
+          <button role="menuitem" data-act="new-project">Nouveau projet</button>
+          <button role="menuitem" data-act="open-project">Ouvrir un projet…</button>
+          <button role="menuitem" data-act="save-project">Enregistrer le projet <small>.smelt.json</small></button>
+        </div>
+      </div>
       <input id="projectName" class="project-name" type="text" aria-label="Nom du projet" />
       <nav class="levels" id="levelTabs" aria-label="Niveaux"></nav>
       <div class="bodybar" id="bodyBar"></div>
