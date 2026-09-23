@@ -245,8 +245,10 @@ export function stairLayout(stair, height, slabT = 0.2) {
     for (const sd of sides) parts.push(newel([NEWEL / 2, sd * (w2 - NEWEL / 2)], 0, riser + h + 0.12));
     // poteau au pivot : là où les deux mains courantes intérieures se rejoignent
     if (inner) parts.push(newel([u1 + NEWEL / 2, w2 - NEWEL / 2], 0, zTurn + riser + h + 0.12));
-    // poteau d'arrivée
-    for (const sd of sides) parts.push(newel([u1 + w2 - sd * (w2 - NEWEL / 2), w2 + f2.run - NEWEL / 2], zTurn, zTurn + (k2 + 1) * riser + h + 0.05));
+    // Poteau d'arrivée : depuis le dessous de la dernière marche (ou du palier
+    // si la deuxième volée est vide), en conservant le sommet de la main courante.
+    const arrivalBase = zTurn + k2 * riser - (k2 === 0 && stair.type === 'quarter' ? 0.2 : STAIR_DEFAULTS.tread);
+    for (const sd of sides) parts.push(newel([u1 + w2 - sd * (w2 - NEWEL / 2), w2 + f2.run - NEWEL / 2], arrivalBase, zTurn + (k2 + 1) * riser + h + 0.05));
     parts.push(...f1.parts.map((p) => ({ ...p, flight: 0 })), ...f2.parts.map((p) => ({ ...p, flight: 1 })));
     let turnPath;
     if (stair.type === 'winder') {
@@ -296,7 +298,7 @@ export function stairLayout(stair, height, slabT = 0.2) {
     const h = STAIR_DEFAULTS.handrail;
     for (const sd of sides) {
       parts.push(newel([NEWEL / 2, sd * (w2 - NEWEL / 2)], 0, riser + h + 0.12)); // poteau de départ
-      parts.push(newel([L - NEWEL / 2, sd * (w2 - NEWEL / 2)], (treadsTotal) * riser, (treadsTotal + 1) * riser + h + 0.05)); // arrivée
+      parts.push(newel([L - NEWEL / 2, sd * (w2 - NEWEL / 2)], treadsTotal * riser - STAIR_DEFAULTS.tread, (treadsTotal + 1) * riser + h + 0.05)); // arrivée : dessous de la dernière marche
     }
     footprint = [[0, -w2], [L, -w2], [L, w2], [0, w2]];
     for (let i = 1; i <= treadsTotal; i++) treadLines.push([[i * going, -w2], [i * going, w2]]);

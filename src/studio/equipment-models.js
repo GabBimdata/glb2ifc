@@ -58,7 +58,8 @@ function cylZ(cx, cy, rx, ry, z0, z1, seg = 24) {
 // Cylindre couché, axe selon y (hublot, poignée…)
 function cylY(cx, cz, r, y0, y1, seg = 24) {
   const m = cylZ(0, 0, r, r, y0, y1, seg);
-  return { positions: m.positions.map(([x, y, z]) => [cx + x, z, cz + y]), triangles: m.triangles };
+  // Swapping y/z is a reflection, so triangle winding must also be reversed.
+  return { positions: m.positions.map(([x, y, z]) => [cx + x, z, cz + y]), triangles: m.triangles.map(([a, b, c]) => [a, c, b]) };
 }
 
 // Cylindre couché, axe selon x (barre de serviette, pied de lit…)

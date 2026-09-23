@@ -80,7 +80,16 @@ export function extrude(poly, z0, z1) {
 // Prisme vertical percé (terrasse en anneau autour d'un étage plus petit)
 export function extrudeWithHoles(outer, holes, z0, z1) {
   if (!holes?.length) return extrude(outer, z0, z1);
-  const merged = G.bridgeHoles(outer, holes);
+  // The bridge only normalizes its own copies. The vertical faces must use the
+  // same winding: outer CCW, holes CW (normals pointing into the empty opening).
+  const contour = G.cleanPolygon(outer);
+  if (G.polygonArea(contour) < 0) contour.reverse();
+  const voids = holes.map((hole) => {
+    const loop = G.cleanPolygon(hole);
+    if (G.polygonArea(loop) > 0) loop.reverse();
+    return loop;
+  });
+  const merged = G.bridgeHoles(contour, voids);
   const tri = G.triangulate(merged);
   const positions = [];
   const triangles = [];
@@ -88,7 +97,7 @@ export function extrudeWithHoles(outer, holes, z0, z1) {
   for (const p of merged) positions.push([p[0], p[1], z0]);
   for (const p of merged) positions.push([p[0], p[1], z1]);
   for (const [a, b, c] of tri) triangles.push([a, c, b], [n + a, n + b, n + c]);
-  for (const loop of [outer, ...holes]) {
+  for (const loop of [contour, ...voids]) {
     for (let i = 0; i < loop.length; i++) {
       const p = loop[i], q = loop[(i + 1) % loop.length];
       const k = positions.length;

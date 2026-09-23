@@ -476,6 +476,8 @@ export function planeOf(face) {
 // Prisme suivant un plan incliné : polygone en plan, décalages verticaux bas et haut.
 export function slopedPrism(polyXY, zFn, dz0, dz1) {
   const P = cleanPolygon(polyXY);
+  // Triangulate preserves the contour winding; these faces require a CCW base.
+  if (polygonArea(P) < 0) P.reverse();
   const positions = [];
   const triangles = [];
   if (P.length < 3) return { positions, triangles };
@@ -1299,6 +1301,9 @@ export function roofHeightAt(faces, p) {
 // Prisme à fond plat et dessus défini point par point (plan par morceau)
 export function prismVarTop(poly, z0, topFn) {
   const P = cleanPolygon(poly);
+  // Roof clipping preserves the source wall's drawing direction. Normalize it
+  // before generating caps and sides so clockwise walls do not turn inside out.
+  if (polygonArea(P) < 0) P.reverse();
   const positions = [];
   const triangles = [];
   if (P.length < 3) return { positions, triangles };

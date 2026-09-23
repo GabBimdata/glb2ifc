@@ -245,3 +245,48 @@ test('a straight stair has a starting newel at the foot of its handrail', () => 
   // poteau de 9 × 9 cm centré au pied de la main courante
   assert.ok(railPieces(L).some((p) => nearPoint(p.mesh, [0.045, 0.405], 0.08) && Math.max(...p.mesh.positions.map((q) => q[2])) > 1.0));
 });
+
+test('arrival newels start at the last tread underside and keep their original top', () => {
+  // Includes the reported GLB: 0 straight treads, 3 winders, 11 straight treads,
+  // width 1 m and storey height 2.8 m, with the two mirrored stairs.
+  const configurations = [
+    { type: 'straight' },
+    ...['quarter', 'winder'].flatMap((type) => [
+      { type },
+      ...[[0, 11], [3, 9], [8, 1], [8, 0], [0, 0]].map(([flight1, flight2]) =>
+        ({ type, flight1, flight2, winderSteps: 3 })),
+    ]),
+  ];
+  for (const config of configurations) for (const rail of ['inner', 'outer', 'both']) {
+    for (const turn of [-1, 1]) for (const dir of [[1, 0], [0.6, 0.8]]) {
+      const L = stairLayout({ ...config, rail, turn, dir, x: 4, y: -3, width: 1 }, 2.8);
+      const surfaces = L.parts.filter((p) => ['tread', 'landing'].includes(p.key));
+      const last = surfaces.reduce((a, b) =>
+        Math.max(...a.mesh.positions.map((p) => p[2])) > Math.max(...b.mesh.positions.map((p) => p[2])) ? a : b);
+      const underside = Math.min(...last.mesh.positions.map((p) => p[2]));
+      const ascent = config.type === 'straight' ? dir : G.mul(G.perp(dir), turn);
+      const [a, b] = L.arrival;
+      const across = G.norm(G.sub(b, a));
+      const ends = rail === 'both' ? [0, 1] : [rail === 'outer' ? 1 : 0];
+      // On straight stairs the inner edge is the second arrival endpoint.
+      const targets = ends.map((end) => {
+        const e = config.type === 'straight' ? 1 - end : end;
+        return G.sub(G.add(e ? b : a, G.mul(across, e ? -0.045 : 0.045)), G.mul(ascent, 0.045));
+      });
+      for (const target of targets) {
+        const posts = railPieces(L).filter(({ mesh }) => {
+          if (mesh.positions.length !== 8) return false;
+          // With no second flight, the pivot shares this position but has a
+          // taller cap; it remains a separate support for the turning treads.
+          if (Math.abs(Math.max(...mesh.positions.map((p) => p[2])) - 3.75) > 1e-9) return false;
+          const center = [0, 1].map((axis) => mesh.positions.reduce((sum, p) => sum + p[axis], 0) / 8);
+          return G.dist(center, target) < 1e-8;
+        });
+        assert.equal(posts.length, 1, JSON.stringify({ config, rail, turn, dir }));
+        const zs = posts[0].mesh.positions.map((p) => p[2]);
+        assert.ok(Math.abs(Math.min(...zs) - underside) < 1e-9, 'base at the last surface underside');
+        assert.ok(Math.abs(Math.max(...zs) - 3.75) < 1e-9, 'original arrival top preserved');
+      }
+    }
+  }
+});
