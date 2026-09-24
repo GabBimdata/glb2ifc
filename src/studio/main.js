@@ -7,6 +7,7 @@ import { View3D, exportGlb } from './view3d.js';
 import { exportIfc } from './ifc-export.js';
 import * as B from './build.js';
 import { autoAlignPlan, applyAlignment, referenceWalls } from './plan-align.js';
+import { SHUTTER_MODES } from './joinery.js';
 import { STAIR_TYPES, STAIR_LIMITS, STAIR_RAILS, isTurningStair, stairLayout } from './stairs.js';
 import { EQUIPMENT_TYPES, EQUIPMENT_GROUPS } from './equipment-catalog.js';
 import { equipmentIcon } from './equipment-plan.js';
@@ -336,6 +337,8 @@ function stepBody(id) {
           <button class="tile ${editor.openingType === k ? 'on' : ''}" data-opening="${k}">${openingIcon(k)}<span>${esc(o.label)}</span><small>${fmt(o.width)} × ${fmt(o.height)} m</small></button>`).join('')}
         </div>
         <p>Survolez un mur : les distances aux angles s'affichent. Cliquez pour poser. Dimensions modifiables ensuite à droite.</p>
+        <span class="field-label">Volets battants, sur toutes les fenêtres de façade</span>
+        <div class="row">${Object.entries(SHUTTER_MODES).map(([k, v]) => `<button class="btn ghost" data-act="shutters-all" data-mode="${k}">${esc(v)}</button>`).join('')}</div>
         <span class="field-label">Balcons</span>
         <div class="grid2">
           <button class="tile ${editor.tool === 'balcony' ? 'on' : ''}" data-act="tool-balcony">
@@ -452,8 +455,7 @@ function stepBody(id) {
         <div class="grid2">${Object.entries(ROOF_TYPES).map(([k, label]) => `<button class="tile ${r.type === k ? 'on' : ''}" data-roof="${k}">${roofIcon(k)}<span>${label}</span></button>`).join('')}</div>
         ${r.type !== 'flat' ? `<label class="field"><span class="field-label">Pente : ${Math.round(r.pitch)}°</span><input type="range" min="5" max="${r.type === 'shed' ? 30 : 60}" step="1" value="${r.pitch}" data-live="roof-pitch" /></label>` : ''}
         ${r.type === 'gable' || r.type === 'hip' || r.type === 'shed' ? `<label class="check"><input type="checkbox" data-field="roof-flip" ${r.ridgeFlip ? 'checked' : ''} /> Tourner ${r.type === 'shed' ? 'la pente' : 'le faîtage'} d'un quart de tour</label>` : ''}
-        ${r.type !== 'flat' ? `<label class="check"><input type="checkbox" data-field="roof-follow" ${r.followSetbacks ? 'checked' : ''} /> Suivre les décrochés de façade</label>
-        <p class="sub">Décoché, une emprise presque rectangulaire reçoit une toiture simple. Coché, chaque avancée ou renfoncement reçoit son propre pan.</p>` : ''}
+        ${r.type === 'gable' || r.type === 'hip' ? roofShapeFields(body) : ''}
         ${r.enabled ? `<p>Point le plus haut : ${ridgeInfo(body)}</p>` : ''}
         ${r.enabled ? `<section style="margin-top:14px">
           <span class="field-label">Ouvertures de toiture</span>
@@ -553,6 +555,40 @@ function skylightList() {
   return `<table class="table" style="margin-top:8px"><tbody>${rows.join('')}</tbody></table>`;
 }
 
+// Emprise et extrémités d'une toiture à deux ou quatre pans
+function roofShapeFields(body) {
+  const r = body.roof;
+  const footprint = r.footprint || (r.followSetbacks ? 'follow' : 'auto');
+  const ends = r.ends || (r.type === 'hip' ? { min: 'hip', max: 'hip' } : { min: 'gable', max: 'gable' });
+  // repère des extrémités dans le plan : faîtage plutôt horizontal → gauche/droite, sinon haut/bas
+  const p = store.project;
+  const top = p.levels[M.bodyTopLevelIndex(p, body.id)];
+  const outline = top ? M.bodyOutlines(p, top, body.id, 1)[0] : null;
+  const axis = outline ? G.buildRoof(outline, { ...r, baseZ: 0 }).ridgeAxis : 'x';
+  const [minLabel, maxLabel] = axis === 'y' ? ['du haut', 'du bas'] : ['de gauche', 'de droite'];
+  const endSelect = (key, label) => `
+    <label><span class="field-label">Extrémité ${label}</span>
+      <select data-field="roof-end-${key}">
+        <option value="gable" ${ends[key] !== 'hip' ? 'selected' : ''}>Pignon</option>
+        <option value="hip" ${ends[key] === 'hip' ? 'selected' : ''}>Croupe</option>
+      </select></label>`;
+  const count = 2 + (ends.min === 'hip') + (ends.max === 'hip');
+  return `
+    <label class="field"><span class="field-label">Emprise de la toiture</span>
+      <select data-field="roof-footprint">
+        <option value="auto" ${footprint === 'auto' ? 'selected' : ''}>Automatique</option>
+        <option value="rect" ${footprint === 'rect' ? 'selected' : ''}>Un seul toit sur le rectangle</option>
+        <option value="follow" ${footprint === 'follow' ? 'selected' : ''}>Suivre tous les décrochés</option>
+      </select></label>
+    <p class="sub">${{
+      auto: 'Une emprise presque rectangulaire reçoit un seul toit ; une forme en L ou en T, un toit par aile.',
+      rect: "Un seul toit couvre le rectangle du bâtiment, même si un angle est occupé (garage, porche) : c'est le cas d'une maison dont le garage a sa propre toiture.",
+      follow: 'Chaque avancée ou renfoncement de façade reçoit son propre pan.',
+    }[footprint]}</p>
+    <div class="grid2">${endSelect('min', minLabel)}${endSelect('max', maxLabel)}</div>
+    <p class="sub">${count} pans : ${count === 2 ? 'deux pignons' : count === 4 ? 'deux croupes' : 'une croupe et un pignon'}.</p>`;
+}
+
 function ridgeInfo(body) {
   const p = store.project;
   const idx = M.bodyTopLevelIndex(p, body.id);
@@ -625,6 +661,25 @@ function atticRoomLine(s) {
   const el = B.buildElements(store.project).elements.find((e) => e.kind === 'space' && e.room?.id === s.room.id);
   if (el?.areaHabitable === undefined) return `${fmt(s.area, 1)} m² au sol`;
   return `${fmt(el.area, 1)} m² au sol, dont ${fmt(el.areaHabitable, 1)} m² habitables (hauteur ≥ 1,80 m)`;
+}
+
+// Menuiserie d'une ouverture : vantaux, volets battants, petits bois
+function joineryFields(o, wall) {
+  const cat = OPENING_TYPES[o.type] || {};
+  if (cat.operation === 'sectional') return '';
+  const leaves = Number.isFinite(o.leaves) ? o.leaves : (cat.leaves ?? (o.width >= 0.8 ? 2 : 1));
+  const options = o.kind === 'door' ? [1, 2] : [1, 2, 3];
+  const exterior = WALL_TYPES[wall?.type]?.category === 'exterior';
+  const glazed = o.kind === 'window' && !cat.sliding;
+  return `
+    <div class="grid2">
+      <label><span class="field-label">Vantaux</span>
+        <select data-prop="op-leaves">${options.map((n) => `<option value="${n}" ${n === leaves ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
+      ${glazed ? `<label><span class="field-label">Petits bois</span>
+        <select data-prop="op-bars"><option value="no" ${o.bars ? '' : 'selected'}>Non</option><option value="yes" ${o.bars ? 'selected' : ''}>Oui</option></select></label>` : ''}
+    </div>
+    ${glazed && exterior ? `<label class="field"><span class="field-label">Volets battants</span>
+      <select data-prop="op-shutters">${Object.entries(SHUTTER_MODES).map(([k, v]) => `<option value="${k}" ${k === (o.shutters || 'none') ? 'selected' : ''}>${esc(v)}</option>`).join('')}</select></label>` : ''}`;
 }
 
 function findSelection() {
@@ -772,6 +827,7 @@ function renderInspector() {
         ${numField('Position', 'op-offset', o.offset - o.width / 2)}
       </div>
       <p class="sub">Position : distance entre le début du mur et le bord de l'ouverture.</p>
+      ${joineryFields(o, s.wall)}
       ${o.kind === 'door' && OPENING_TYPES[o.type]?.operation !== 'sectional' ? '<div class="row"><button class="btn" data-act="op-flip-side">Inverser le côté</button><button class="btn" data-act="op-flip-hinge">Inverser le sens</button></div>' : ''}
       ${OPENING_TYPES[o.type]?.operation === 'sectional' ? '<div class="row"><button class="btn" data-act="op-flip-side">Relevage de l\'autre côté</button></div>' : ''}
       <section><button class="btn danger block" data-act="delete-selection">Supprimer <kbd>Suppr</kbd></button></section>`;
@@ -956,7 +1012,7 @@ function applyProp(prop, raw) {
   const value = parseNum(raw);
   const levelId = L.id;
   const lv = (pr) => pr.levels.find((l) => l.id === levelId);
-  const needNum = !['wall-type', 'room-name', 'room-body', 'bal-railing', 'ter-mode', 'ter-railing', 'stair-type', 'stair-rail', 'site-type', 'site-kind'].includes(prop);
+  const needNum = !['wall-type', 'room-name', 'room-body', 'bal-railing', 'ter-mode', 'ter-railing', 'stair-type', 'stair-rail', 'site-type', 'site-kind', 'op-shutters', 'op-bars'].includes(prop);
   if (prop.startsWith('site-')) {
     const key = prop.slice(5);
     const text = key === 'type' || key === 'kind';
@@ -1072,6 +1128,9 @@ function applyProp(prop, raw) {
         break;
       }
       case 'op-width': if (value < 0.2) return false; op.width = value; M.clampOpenings(level); break;
+      case 'op-leaves': op.leaves = Math.max(1, Math.min(3, Math.round(value))); break;
+      case 'op-shutters': op.shutters = SHUTTER_MODES[raw] ? raw : 'none'; break;
+      case 'op-bars': op.bars = raw === 'yes'; break;
       case 'op-height': if (value < 0.2) return false; op.height = Math.min(value, M.wallHeight(pr, level) - op.sill); break;
       case 'op-sill': if (value < 0) return false; op.sill = Math.min(value, M.wallHeight(pr, level) - 0.2); op.height = Math.min(op.height, M.wallHeight(pr, level) - op.sill); break;
       case 'op-offset': op.offset = value + op.width / 2; M.clampOpenings(level); break;
@@ -1483,6 +1542,7 @@ document.addEventListener('click', (e) => {
     editBody(roofBody().id, 'Type de toiture', (b) => {
       b.roof.type = d.roof;
       b.roof.enabled = true;
+      delete b.roof.ends; // le type choisi fixe ses extrémités (deux pignons ou deux croupes)
       if (d.roof === 'shed' && b.roof.pitch > 30) b.roof.pitch = 12;
     });
     return;
@@ -1507,6 +1567,20 @@ document.addEventListener('click', (e) => {
     'tool-align2': () => setTool('align2'),
     'tool-skylight': () => setTool('skylight'),
     'tool-balcony': () => setTool('balcony'),
+    'shutters-all': () => {
+      const mode = SHUTTER_MODES[d.mode] ? d.mode : 'none';
+      let n = 0;
+      store.commit('Volets sur toutes les fenêtres', (pr) => {
+        for (const lvl of pr.levels) for (const w of lvl.walls) {
+          if (WALL_TYPES[w.type]?.category !== 'exterior') continue;
+          for (const op of w.openings || []) {
+            if (op.kind !== 'window' || OPENING_TYPES[op.type]?.sliding) continue;
+            op.shutters = mode; n++;
+          }
+        }
+      });
+      toast(n ? `Volets ${SHUTTER_MODES[mode].toLowerCase()} sur ${n} fenêtre${n > 1 ? 's' : ''}.` : 'Aucune fenêtre de façade.');
+    },
     'stair-rotate': () => { if (editor.selection?.type === 'stair') editor.rotateStair(editor.selection.id, 90); },
     'stair-flip': () => { if (editor.selection?.type === 'stair') editor.flipStair(editor.selection.id); },
     'stair-auto': () => {
@@ -1709,8 +1783,21 @@ document.addEventListener('change', (e) => {
       if (!(v >= 0.02 && v <= 0.6)) return bad();
       editBody(activeBody().id, 'Épaisseur du plafond', (b) => { b.ceilingThickness = v; });
       break;
-    case 'roof-follow':
-      editBody(roofBody().id, 'Découpage de la toiture', (b) => { b.roof.followSetbacks = t.checked; });
+    case 'roof-footprint':
+      editBody(roofBody().id, 'Emprise de la toiture', (b) => {
+        b.roof.footprint = ['auto', 'rect', 'follow'].includes(t.value) ? t.value : 'auto';
+        b.roof.followSetbacks = b.roof.footprint === 'follow';
+      });
+      break;
+    case 'roof-end-min':
+    case 'roof-end-max':
+      editBody(roofBody().id, 'Extrémité de toiture', (b) => {
+        const ends = { ...(b.roof.ends || (b.roof.type === 'hip' ? { min: 'hip', max: 'hip' } : { min: 'gable', max: 'gable' })) };
+        ends[t.dataset.field === 'roof-end-min' ? 'min' : 'max'] = t.value === 'hip' ? 'hip' : 'gable';
+        b.roof.ends = ends;
+        // deux pignons ou deux croupes : on retombe sur les types habituels
+        if (ends.min === ends.max) b.roof.type = ends.min === 'hip' ? 'hip' : 'gable';
+      });
       break;
     case 'roof-thickness':
       if (!(v >= 0.05 && v <= 1)) return bad();

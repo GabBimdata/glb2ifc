@@ -21,13 +21,13 @@ export const WALL_TYPES = {
 };
 
 export const OPENING_TYPES = {
-  door: { label: 'Porte', kind: 'door', width: 0.9, height: 2.15, sill: 0 },
-  doorDouble: { label: 'Porte double', kind: 'door', width: 1.4, height: 2.15, sill: 0 },
+  door: { label: 'Porte', kind: 'door', width: 0.9, height: 2.15, sill: 0, leaves: 1 },
+  doorDouble: { label: 'Porte double', kind: 'door', width: 1.4, height: 2.15, sill: 0, leaves: 2 },
   garageDoor: { label: 'Porte de garage', kind: 'door', operation: 'sectional', width: 2.4, height: 2.0, sill: 0 },
-  window: { label: 'Fenêtre', kind: 'window', width: 1.2, height: 1.25, sill: 0.95 },
-  windowSmall: { label: 'Petite fenêtre', kind: 'window', width: 0.6, height: 0.75, sill: 1.35 },
-  frenchWindow: { label: 'Porte-fenêtre', kind: 'window', width: 1.4, height: 2.15, sill: 0 },
-  bay: { label: 'Baie vitrée', kind: 'window', width: 2.4, height: 2.15, sill: 0 },
+  window: { label: 'Fenêtre', kind: 'window', width: 1.2, height: 1.25, sill: 0.95, leaves: 2 },
+  windowSmall: { label: 'Petite fenêtre', kind: 'window', width: 0.6, height: 0.75, sill: 1.35, leaves: 1 },
+  frenchWindow: { label: 'Porte-fenêtre', kind: 'window', width: 1.4, height: 2.15, sill: 0, leaves: 2, french: true },
+  bay: { label: 'Baie vitrée', kind: 'window', width: 2.4, height: 2.15, sill: 0, leaves: 2, sliding: true, french: true },
 };
 
 // Balcons et terrasses
@@ -88,6 +88,8 @@ export const COLOR_LABELS = {
   slab: 'Planchers',
   balcony: 'Balcons et terrasses',
   railing: 'Garde-corps',
+  shutter: 'Volets',
+  sill: 'Appuis de fenêtre',
   stair: 'Escaliers',
   ceiling: 'Plafonds',
   roof: 'Toiture',
@@ -111,6 +113,8 @@ export const COLORS = {
   door: '#8a6a4a',
   window: '#9cc3d6',
   frame: '#f4f4f2',
+  shutter: '#5a7684',
+  sill: '#d9d2c4',
 };
 
 // Couleurs effectives : valeurs d'origine, puis celles du projet, puis celles du corps.

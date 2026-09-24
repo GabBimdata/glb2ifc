@@ -4,6 +4,7 @@ import * as G from './geometry.js';
 import { WALL_TYPES, OPENING_TYPES, ROOF_OPENINGS, BALCONY, SITE_SURFACES, SITE_DEFAULTS } from './catalog.js';
 import { EQUIPMENT_TYPES } from './equipment-catalog.js';
 import { equipmentParts, placeEquipment } from './equipment-models.js';
+import { joineryParts, placeJoinery } from './joinery.js';
 import { STAIR_TYPES, stairLayout } from './stairs.js';
 import { levelElevation, wallHeight, levelFaces, bodyById, bodyHeight, bodyOutlines, bodyTopLevelIndex, isAttic, roofBaseHeight } from './model.js';
 
@@ -728,6 +729,7 @@ export function buildElements(project, options = {}) {
     const z = levelElevation(project, level.id);
     const polys = G.computeWallPolygons(level);
     const { rooms } = levelFaces(level);
+    const roomFaces = rooms.map((r) => r.face.poly); // pour situer l'extérieur de chaque mur
 
     const bodyOfRoom = (room) => bodyById(project, room?.bodyId || mainId);
     const floorOf = (body) => z + (body.elevation || 0);
@@ -883,15 +885,43 @@ export function buildElements(project, options = {}) {
         mesh: wallMesh,
         key: `wall-${wall.id}`,
       });
+      // côté extérieur du mur : celui qui ne donne sur aucune pièce
+      const perp = G.perp(u);
+      const mid = G.mul(G.add(level.nodes[wall.a], level.nodes[wall.b]), 0.5);
+      const probe = (sgn) => G.add(mid, G.mul(perp, sgn * (wall.thickness / 2 + 0.15)));
+      const inRoom = (p) => roomFaces.some((f) => G.pointInPolygon(p, f));
+      const inP = inRoom(probe(1)), inM = inRoom(probe(-1));
+      const outward = inP === inM ? null : (inP ? G.mul(perp, -1) : perp);
       for (const op of wall.openings || []) {
         const center = G.add(a, G.mul(u, op.offset));
-        const { frame, panel } = openingMesh(op, center, u, wall.thickness, base);
         const cat = OPENING_TYPES[op.type];
+        let frame, panel, joinery = null;
+        if (cat?.operation === 'sectional') {
+          ({ frame, panel } = openingMesh(op, center, u, wall.thickness, base));
+        } else {
+          // menuiserie détaillée : dormant posé en tableau, à 12 cm du nu extérieur
+          const n = outward || perp;
+          const reveal = outward ? Math.min(0.12, Math.max(0, wall.thickness / 2 - 0.05)) : 0;
+          const off = outward ? wall.thickness / 2 - reveal - 0.035 : 0;
+          const exterior = outward ? wall.thickness / 2 - off : null;
+          const jp = joineryParts(op, {
+            leaves: Number.isFinite(op.leaves) ? op.leaves : cat?.leaves,
+            sliding: !!cat?.sliding, frenchWindow: !!cat?.french,
+            exterior, sill: op.kind === 'window', shutters: op.kind === 'window',
+          });
+          const toWorld = (x, y) => G.add(G.add(center, G.mul(u, x)), G.mul(n, off + y));
+          const mirrored = u[0] * n[1] - u[1] * n[0] < 0;
+          joinery = {};
+          for (const key of ['frame', 'glass', 'door', 'sill', 'handle', 'shutter']) {
+            if (jp[key].length) joinery[key] = mergeMeshes(placeJoinery(jp[key], toWorld, base + op.sill, mirrored));
+          }
+          joinery.leaves = jp.leaves;
+        }
         elements.push({
           kind: op.kind, level, levelIndex: li, wall, opening: op, body: bodies[0],
           name: `${cat?.label || (op.kind === 'door' ? 'Porte' : 'Fenêtre')} ${op.id.slice(-4)}`,
           center, u, z0: base + op.sill,
-          frame, panel,
+          frame, panel, joinery, exteriorSide: outward,
           voidProfile: { center, u, width: op.width, depth: wall.thickness + 0.02, z0: base + op.sill, height: op.height },
           key: `op-${op.id}`,
         });
@@ -1046,7 +1076,7 @@ export function buildElements(project, options = {}) {
             name: `${o.preset.label} ${o.item.id.slice(-4)}`,
             walls: mergeMeshes([...(o.groups.cheek || []), ...(o.groups.front || [])]),
             roofMesh: mergeMeshes(o.groups.roof || []),
-            frame: mergeMeshes(o.groups.frame || []),
+            frame: mergeMeshes([...(o.groups.frame || []), ...(o.groups.sill || [])]),
             panel: mergeMeshes(o.groups.glass || []),
             voidPoly: o.poly,
             voidZ0: Math.min(...o.poly.map((p) => o.zAt(p))) - o.tv - 0.2,

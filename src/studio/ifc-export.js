@@ -311,18 +311,38 @@ export function exportIfc(project) {
       w.add(`IFCRELVOIDSELEMENT(${guid(`relvoid-${key}`)},${oh},$,$,${host._ifc.entity},${opening})`);
       // Menuiserie
       const pl = placement(st.placement);
-      const frame = styled(faceSet(el.frame, st.z), 'frame', el.body);
-      const panel = styled(faceSet(el.panel, st.z), el.kind, el.body, el.kind === 'window' ? IFC_GLASS_TRANSPARENCY : 0);
-      const rep = shape([frame, panel], 'Tessellation');
+      let rep;
+      const J = el.joinery;
+      if (J) {
+        // menuiserie détaillée : chaque famille de pièces avec son style
+        const items = [];
+        if (J.frame) items.push(styled(faceSet(J.frame, st.z), 'frame', el.body));
+        if (J.glass) items.push(styled(faceSet(J.glass, st.z), 'window', el.body, IFC_GLASS_TRANSPARENCY));
+        if (J.door) items.push(styled(faceSet(J.door, st.z), 'door', el.body));
+        if (J.sill) items.push(styled(faceSet(J.sill, st.z), 'sill', el.body));
+        if (J.handle) items.push(styled(faceSet(J.handle, st.z), 'railing', el.body));
+        rep = shape(items, 'Tessellation');
+      } else {
+        const frame = styled(faceSet(el.frame, st.z), 'frame', el.body);
+        const panel = styled(faceSet(el.panel, st.z), el.kind, el.body, el.kind === 'window' ? IFC_GLASS_TRANSPARENCY : 0);
+        rep = shape([frame, panel], 'Tessellation');
+      }
       const o = el.opening;
       const ent = el.kind === 'door'
-        ? w.add(`IFCDOOR(${guid(key)},${oh},${stepString(el.name)},$,$,${pl},${rep},$,${num(o.height)},${num(o.width)},.DOOR.,${o.type === 'garageDoor' ? '.ROLLINGUP.' : '.SINGLE_SWING_LEFT.'},$)`)
-        : w.add(`IFCWINDOW(${guid(key)},${oh},${stepString(el.name)},$,$,${pl},${rep},$,${num(o.height)},${num(o.width)},.WINDOW.,.SINGLE_PANEL.,$)`);
+        ? w.add(`IFCDOOR(${guid(key)},${oh},${stepString(el.name)},$,$,${pl},${rep},$,${num(o.height)},${num(o.width)},.DOOR.,${o.type === 'garageDoor' ? '.ROLLINGUP.' : (J?.leaves || 1) >= 2 ? '.DOUBLE_DOOR_SINGLE_SWING.' : '.SINGLE_SWING_LEFT.'},$)`)
+        : w.add(`IFCWINDOW(${guid(key)},${oh},${stepString(el.name)},$,$,${pl},${rep},$,${num(o.height)},${num(o.width)},.WINDOW.,${['.SINGLE_PANEL.', '.SINGLE_PANEL.', '.DOUBLE_PANEL_VERTICAL.', '.TRIPLE_PANEL_VERTICAL.'][Math.min(3, J?.leaves || 1)]},$)`);
       w.add(`IFCRELFILLSELEMENT(${guid(`relfill-${key}`)},${oh},$,$,${opening},${ent})`);
       contained[el.level.id].push(noteBody(el, ent));
       const exterior = el.wall && (el.wall.type || '').startsWith('ext');
       props(key, ent, el.kind === 'door' ? 'Pset_DoorCommon' : 'Pset_WindowCommon', [['IsExternal', 'bool', !!exterior]]);
       linkMaterial(el.kind === 'door' ? 'Bois' : 'Vitrage', ent);
+      if (J?.shutter) {
+        // volets battants : protection solaire (IfcShadingDevice .SHUTTER.), à côté de la fenêtre
+        const sh = w.add(`IFCSHADINGDEVICE(${guid(`shutter-${key}`)},${oh},${stepString(`Volets ${el.name}`)},$,$,${placement(st.placement)},${shape([styled(faceSet(J.shutter, st.z), 'shutter', el.body)], 'Tessellation')},$,.SHUTTER.)`);
+        contained[el.level.id].push(noteBody(el, sh));
+        props(`shutter-${key}`, sh, 'Pset_ShadingDeviceCommon', [['IsExternal', 'bool', true], ['Reference', 'label', o.shutters === 'closed' ? 'Volets battants fermés' : 'Volets battants ouverts']]);
+        linkMaterial('Bois', sh);
+      }
     } else if (el.kind === 'roof') {
       const pl = placement(st.placement);
       let item;
@@ -330,8 +350,14 @@ export function exportIfc(project) {
       else item = styled(faceSet(el.mesh, st.z), 'roof', el.body);
       // La géométrie est portée directement par l'IfcRoof (et non par des IfcSlab .ROOF.
       // regroupés) : les visionneuses l'identifient alors comme une toiture.
-      const typeEnum = { gable: '.GABLE_ROOF.', hip: '.HIP_ROOF.', shed: '.SHED_ROOF.', flat: '.FLAT_ROOF.' }[el.body?.roof?.type] || '.NOTDEFINED.';
-      const ent = w.add(`IFCROOF(${guid(key)},${oh},${stepString(el.name)},$,$,${pl},${shape([item], el.profile ? 'SweptSolid' : 'Tessellation')},$,${typeEnum})`);
+      // type de toiture ; une croupe d'un côté et un pignon de l'autre n'a pas de valeur
+      // prévue en IFC4 : USERDEFINED, décrit dans ObjectType
+      const rf = el.body?.roof || {};
+      const mixed = (rf.type === 'gable' || rf.type === 'hip') && rf.ends && rf.ends.min !== rf.ends.max;
+      const typeEnum = mixed ? '.USERDEFINED.'
+        : ({ gable: '.GABLE_ROOF.', hip: '.HIP_ROOF.', shed: '.SHED_ROOF.', flat: '.FLAT_ROOF.' }[rf.type] || '.NOTDEFINED.');
+      const objectType = mixed ? stepString('Trois pans (croupe et pignon)') : '$';
+      const ent = w.add(`IFCROOF(${guid(key)},${oh},${stepString(el.name)},$,${objectType},${pl},${shape([item], el.profile ? 'SweptSolid' : 'Tessellation')},$,${typeEnum})`);
       contained[el.level.id].push(noteBody(el, ent));
       linkMaterial('Couverture', ent);
       roofEntities[el.key] = ent;

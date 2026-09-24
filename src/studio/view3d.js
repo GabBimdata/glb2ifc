@@ -75,6 +75,16 @@ export function buildObject3D(project, options = {}) {
     for (const rp of el.railParts || []) parts.push({ mesh: rp.mesh, key: rp.key, opacity: rp.key === 'window' ? GLASS_OPACITY : 1 });
     if (el.kind === 'stair') for (const sp of el.parts) parts.push({ mesh: sp.mesh, key: sp.key === 'rail' ? 'railing' : 'stair' });
     if (el.roofMesh) parts.push({ mesh: el.roofMesh, key: 'roof' });
+    if (el.joinery) {
+      // menuiserie détaillée : dormant et ouvrants, vitrages, vantaux de porte, appui, poignées, volets
+      const J = el.joinery;
+      if (J.frame) parts.push({ mesh: J.frame, key: 'frame' });
+      if (J.glass) parts.push({ mesh: J.glass, key: 'window', opacity: GLASS_OPACITY });
+      if (J.door) parts.push({ mesh: J.door, key: 'door' });
+      if (J.sill) parts.push({ mesh: J.sill, key: 'sill' });
+      if (J.handle) parts.push({ mesh: J.handle, key: 'railing' });
+      if (J.shutter) parts.push({ mesh: J.shutter, key: 'shutter' });
+    }
     if (el.frame) parts.push({ mesh: el.frame, key: 'frame' });
     const panelKey = el.kind === 'skylight' || el.kind === 'dormer' ? 'window' : el.kind;
     if (el.panel) parts.push({ mesh: el.panel, key: panelKey, opacity: panelKey === 'window' ? GLASS_OPACITY : 1 });

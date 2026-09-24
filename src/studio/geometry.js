@@ -1,5 +1,6 @@
 // Smelt Studio — moteur géométrique pur (aucune dépendance, testable sous Node).
 // Convention plan : x vers la droite, y vers le bas, unités en mètres.
+import { joineryParts } from './joinery.js'; // menuiseries (module pur, sans dépendance)
 
 export const EPS = 1e-6;
 
@@ -814,9 +815,11 @@ export function buildRoof(outline, opts) {
     let bx0 = Infinity, bx1 = -Infinity, by0 = Infinity, by1 = -Infinity;
     for (const p of local) { bx0 = Math.min(bx0, p[0]); bx1 = Math.max(bx1, p[0]); by0 = Math.min(by0, p[1]); by1 = Math.max(by1, p[1]); }
     const fill = Math.abs(polygonArea(local)) / Math.max(1e-6, (bx1 - bx0) * (by1 - by0));
-    if (fill >= 0.85 && !opts.followSetbacks) {
-      // emprise presque rectangulaire (une simple encoche, un renfoncement) : une seule toiture,
-      // franche, plutôt qu'une succession de pans qui suivent chaque décroché.
+    // Emprise : 'auto' (un seul toit si l'emprise est presque rectangulaire, sinon un toit par
+    // aile), 'rect' (toujours un seul toit sur le rectangle englobant, même pour un L dont
+    // l'angle est occupé par un garage), 'follow' (suivre chaque décroché de façade).
+    const footprint = opts.footprint || (opts.followSetbacks ? 'follow' : 'auto');
+    if (footprint === 'rect' || (footprint === 'auto' && fill >= 0.85)) {
       rects = [{ x0: bx0, x1: bx1, y0: by0, y1: by1 }];
     } else if (isOrthogonal(local)) {
       rects = rectCover(local);
@@ -824,6 +827,11 @@ export function buildRoof(outline, opts) {
       rects = [{ x0: bx0, x1: bx1, y0: by0, y1: by1 }];
       out.warning = 'Forme non orthogonale : la toiture est calculée sur le rectangle englobant.';
     }
+    // Extrémités du faîtage : pignon ou croupe, réglables séparément. Deux pignons = deux pans,
+    // deux croupes = quatre pans, une de chaque = trois pans. Les extrémités sont repérées
+    // dans le plan : 'min' est celle de plus petite abscisse (faîtage plutôt horizontal à
+    // l'écran) ou de plus petite ordonnée (faîtage plutôt vertical).
+    const endsOpt = opts.ends || (type === 'hip' ? { min: 'hip', max: 'hip' } : { min: 'gable', max: 'gable' });
     rects.forEach((r, idx) => {
       let along = r.x1 - r.x0 >= r.y1 - r.y0; // faîtage parallèle à x ?
       if (opts.ridgeFlip) along = !along;     // quart de tour demandé
@@ -835,31 +843,35 @@ export function buildRoof(outline, opts) {
       const U0 = u0 - o, U1 = u1 + o, V0 = v0 - o, V1 = v1 + o;
       const zEave = baseZ + tv - o * tan;
       const faces = [];
-      let zTop;
-      if (type === 'hip') {
-        const H = hw + o;
-        let r0 = U0 + H, r1 = U1 - H;
-        if (r0 > r1) { r0 = r1 = (U0 + U1) / 2; }
-        const zR = zEave + Math.min(H, (U1 - U0) / 2) * tan;
-        faces.push([P(U0, V0, zEave), P(U1, V0, zEave), P(r1, vm, zR), P(r0, vm, zR)]);
-        faces.push([P(U1, V1, zEave), P(U0, V1, zEave), P(r0, vm, zR), P(r1, vm, zR)]);
-        faces.push([P(U1, V0, zEave), P(U1, V1, zEave), P(r1, vm, zR)]);
-        faces.push([P(U0, V1, zEave), P(U0, V0, zEave), P(r0, vm, zR)]);
-        zTop = (p) => {
-          const uu = along ? p[0] : p[1], vv = along ? p[1] : p[0];
-          if (uu < U0 - 1e-6 || uu > U1 + 1e-6 || vv < V0 - 1e-6 || vv > V1 + 1e-6) return -Infinity;
-          return zEave + Math.min(Math.min(vv - V0, V1 - vv), Math.min(uu - U0, U1 - uu)) * tan;
-        };
-      } else {
-        const zRidge = zEave + (hw + o) * tan;
-        faces.push([P(U0, V0, zEave), P(U1, V0, zEave), P(U1, vm, zRidge), P(U0, vm, zRidge)]);
-        faces.push([P(U1, V1, zEave), P(U0, V1, zEave), P(U0, vm, zRidge), P(U1, vm, zRidge)]);
-        zTop = (p) => {
-          const uu = along ? p[0] : p[1], vv = along ? p[1] : p[0];
-          if (uu < U0 - 1e-6 || uu > U1 + 1e-6 || vv < V0 - 1e-6 || vv > V1 + 1e-6) return -Infinity;
-          return zEave + Math.min(vv - V0, V1 - vv) * tan;
-        };
+      // quelle extrémité (U0 ou U1) est « min » dans le plan ?
+      const w0 = toWorld(P(U0, vm, 0)), w1 = toWorld(P(U1, vm, 0));
+      const horizontal = Math.abs(w1[0] - w0[0]) >= Math.abs(w1[1] - w0[1]);
+      const u0IsMin = horizontal ? w0[0] <= w1[0] : w0[1] <= w1[1];
+      if (idx === 0) out.ridgeAxis = horizontal ? 'x' : 'y';
+      let hip0 = (u0IsMin ? endsOpt.min : endsOpt.max) === 'hip';
+      let hip1 = (u0IsMin ? endsOpt.max : endsOpt.min) === 'hip';
+      const H = hw + o; // distance horizontale de l'égout au faîtage
+      if ((hip0 || hip1) && (U1 - U0) < (hip0 && hip1 ? 0 : H)) {
+        // aile trop courte pour une croupe d'un seul côté : on garde des pignons
+        hip0 = hip1 = false;
+        out.warning = out.warning || 'Aile trop courte pour une croupe d’un seul côté : pignons conservés.';
       }
+      let r0 = hip0 ? U0 + H : U0, r1 = hip1 ? U1 - H : U1;
+      let run = H;
+      if (r0 > r1) { r0 = r1 = (U0 + U1) / 2; run = Math.min(H, (U1 - U0) / 2); } // pyramide
+      const zR = zEave + run * tan;
+      faces.push([P(U0, V0, zEave), P(U1, V0, zEave), P(r1, vm, zR), P(r0, vm, zR)]);
+      faces.push([P(U1, V1, zEave), P(U0, V1, zEave), P(r0, vm, zR), P(r1, vm, zR)]);
+      if (hip1) faces.push([P(U1, V0, zEave), P(U1, V1, zEave), P(r1, vm, zR)]);
+      if (hip0) faces.push([P(U0, V1, zEave), P(U0, V0, zEave), P(r0, vm, zR)]);
+      const zTop = (p) => {
+        const uu = along ? p[0] : p[1], vv = along ? p[1] : p[0];
+        if (uu < U0 - 1e-6 || uu > U1 + 1e-6 || vv < V0 - 1e-6 || vv > V1 + 1e-6) return -Infinity;
+        let d = Math.min(vv - V0, V1 - vv);
+        if (hip0) d = Math.min(d, uu - U0);
+        if (hip1) d = Math.min(d, U1 - uu);
+        return zEave + d * tan;
+      };
       const outlineR = [P(U0, V0, 0), P(U1, V0, 0), P(U1, V1, 0), P(U0, V1, 0)].map((p) => [p[0], p[1]]);
       const shell = shellFromTopFaces(faces, outlineR, zTop, tv, holes.map((h) => h.map((q) => rotatePt(q, -ang))));
       shell.positions = shell.positions.map(toWorld);
@@ -1044,18 +1056,19 @@ export function buildDormer(opts) {
     [[-w2, z1], [w2, z1], ...top.slice().reverse()],
   ];
   for (const piece of pieces) parts.push({ kind: 'front', mesh: prismFrom(piece, 0, t, (p, u) => [u, p[0], p[1]]) });
-  const frame = [
-    [[-ww / 2, z0], [ww / 2, z0], [ww / 2, z0 + 0.06], [-ww / 2, z0 + 0.06]],
-    [[-ww / 2, z1 - 0.06], [ww / 2, z1 - 0.06], [ww / 2, z1], [-ww / 2, z1]],
-    [[-ww / 2, z0], [-ww / 2 + 0.06, z0], [-ww / 2 + 0.06, z1], [-ww / 2, z1]],
-    [[ww / 2 - 0.06, z0], [ww / 2, z0], [ww / 2, z1], [ww / 2 - 0.06, z1]],
-  ];
-  for (const f of frame) parts.push({ kind: 'frame', mesh: prismFrom(f, 0.01, t - 0.01, (p, u) => [u, p[0], p[1]]) });
-  parts.push({
-    kind: 'glass',
-    mesh: prismFrom([[-ww / 2 + 0.05, z0 + 0.05], [ww / 2 - 0.05, z0 + 0.05], [ww / 2 - 0.05, z1 - 0.05], [-ww / 2 + 0.05, z1 - 0.05]],
-      t / 2 - 0.01, t / 2 + 0.01, (p, u) => [u, p[0], p[1]]),
+  // baie de la lucarne : même menuiserie qu'en façade (dormant, vantaux, vitrages, appui)
+  const jp = joineryParts(
+    { kind: 'window', width: ww, height: z1 - z0, bars: opts.window?.bars },
+    { leaves: opts.window?.leaves ?? (ww >= 0.7 ? 2 : 1), exterior: t / 2, sill: true, shutters: false },
+  );
+  // repère de la menuiserie (x largeur, y vers l'extérieur) → repère de la lucarne (u, v, z)
+  const toDormer = (m) => ({
+    positions: m.positions.map(([x, y, z]) => [t / 2 - y, x, z0 + z]),
+    triangles: m.triangles,
   });
+  for (const m of [...jp.frame, ...jp.handle]) parts.push({ kind: 'frame', mesh: toDormer(m) });
+  for (const m of jp.sill) parts.push({ kind: 'sill', mesh: toDormer(m) }); // appui, sous l'allège
+  for (const m of jp.glass) parts.push({ kind: 'glass', mesh: toDormer(m) });
 
   return { hole, parts, ceilingFaces: clipped
     // dessous de la couverture, limité à l'emprise de la lucarne (le débord est dehors)
