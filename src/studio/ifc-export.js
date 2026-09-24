@@ -449,11 +449,11 @@ export function exportIfc(project) {
         const cat = el.category;
         const solid = extrusion(profilePolyline(el.poly), el.depth, el.z0);
         w.add(`IFCSTYLEDITEM(${solid},(${styleFor(`site-${el.surface.type}`, color(el.surface.type), 0)}),$)`);
-        const ent = cat.ifc === 'slab'
-          ? w.add(`IFCSLAB(${guid(key)},${oh},${stepString(cat.label)},$,${stepString(cat.objectType)},${pl},${shape([solid])},$,.USERDEFINED.)`)
+        const ent = cat.ifc === 'civil'
+          ? w.add(`IFCCIVILELEMENT(${guid(key)},${oh},${stepString(cat.label)},$,${stepString(cat.objectType)},${pl},${shape([solid])},$)`)
           : w.add(`IFCGEOGRAPHICELEMENT(${guid(key)},${oh},${stepString(cat.label)},$,${stepString(cat.objectType)},${pl},${shape([solid])},$,.USERDEFINED.)`);
         siteContained.push(ent);
-        quantities(key, ent, cat.ifc === 'slab' ? 'Qto_SlabBaseQuantities' : 'Qto_SiteBaseQuantities', [[cat.ifc === 'slab' ? 'NetArea' : 'GrossArea', 'area', el.area]]);
+        quantities(key, ent, cat.ifc === 'civil' ? 'Smelt_SurfaceQuantities' : 'Qto_SiteBaseQuantities', [['GrossArea', 'area', el.area]]);
       } else if (el.kind === 'parking') {
         // place de stationnement : un espace extérieur de type PARKING, avec son marquage
         const vol = extrusion(profilePolyline(el.poly), 2.0, el.top);

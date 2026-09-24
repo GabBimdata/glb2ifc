@@ -548,6 +548,33 @@ export function atticContext(project, levelIndex) {
   return map;
 }
 
+// railingParts produces vertical boxes. Rebuild intersecting boxes as closed
+// prisms below the roof, preserving the uncut portions outside its footprint.
+export function railingUnderRoof(parts, ctx, clearance = 0.02) {
+  if (!ctx?.faces.length) return { parts, clipped: false };
+  const faces = ctx.faces.map((f) => ({ ...f, zAt: (p) => f.zAt(p) - clearance }));
+  let clipped = false;
+  const result = parts.flatMap((part) => {
+    const mesh = part.mesh;
+    const poly = mesh.positions.slice(0, 4).map(([x, y]) => [x, y]);
+    const z0 = Math.min(...mesh.positions.map((p) => p[2]));
+    const z1 = Math.max(...mesh.positions.map((p) => p[2]));
+    const cells = faces.flatMap((f) => {
+      const cell = G.convexClip(poly, f.poly);
+      return cell ? [{ ...f, poly: cell }] : [];
+    });
+    if (!cells.some((f) => f.poly.some((p) => z1 > f.zAt(p) + 1e-8))) return [part];
+    clipped = true;
+    const outside = G.subtractConvexHoles(poly, faces.map((f) => f.poly));
+    const cut = mergeMeshes([
+      G.prismUnderRoof(poly, z0, z1, faces),
+      ...outside.map((p) => extrude(p, z0, z1)),
+    ]);
+    return cut.triangles.length ? [{ ...part, mesh: cut }] : [];
+  });
+  return { parts: result, clipped };
+}
+
 // Escaliers d'un niveau, mis en plan et en volume (hauteurs depuis son plancher)
 export function levelStairs(project, levelIndex) {
   const level = project.levels[levelIndex];
@@ -794,8 +821,11 @@ export function buildElements(project, options = {}) {
         if (G.dot(n, outward) < 0) n = G.mul(n, -1);
         railParts.push(...railingParts(p, q, z, 1.0, 'bars', n));
       }
+      const owner = present.find((b) => bodyOutlines(project, level, b.id, 1).some((o) => G.pointInPolygon(c, o))) || bodyById(project, mainId);
+      const fitted = railingUnderRoof(railParts, attic.get(owner.id));
+      if (fitted.clipped) warnings.push(`${level.name} : garde-corps de trémie ajusté sous les rampants de ${owner.name}. Vérifier l'échappée de l'escalier.`);
       elements.push({
-        kind: 'tremieRail', level, levelIndex: li, body: bodyById(project, mainId), railParts,
+        kind: 'tremieRail', level, levelIndex: li, body: owner, railParts: fitted.parts,
         name: `Garde-corps de trémie ${level.name}${tremies.length > 1 ? ` ${i + 1}` : ''}`,
         key: `tremie-${level.id}-${t.stair.id}`,
       });

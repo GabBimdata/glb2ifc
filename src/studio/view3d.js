@@ -88,9 +88,10 @@ export function buildObject3D(project, options = {}) {
     if (el.frame) parts.push({ mesh: el.frame, key: 'frame' });
     const panelKey = el.kind === 'skylight' || el.kind === 'dormer' ? 'window' : el.kind;
     if (el.panel) parts.push({ mesh: el.panel, key: panelKey, opacity: panelKey === 'window' ? GLASS_OPACITY : 1 });
+    const ifcType = el.kind === 'siteSurface' ? (el.category.ifc === 'civil' ? 'IfcCivilElement' : 'IfcGeographicElement') : IFC_HINT[el.kind] || 'IfcBuildingElementProxy';
     const group = new THREE.Group();
     group.name = el.name;
-    group.userData = { ifcType: IFC_HINT[el.kind] || 'IfcBuildingElementProxy', smeltKey: el.key, level: el.level?.name };
+    group.userData = { ifcType, smeltKey: el.key, level: el.level?.name };
     for (const part of parts) {
       if (!part.mesh.triangles.length) continue;
       const geom = toGeometry(part.mesh);
@@ -98,7 +99,7 @@ export function buildObject3D(project, options = {}) {
       m.name = el.name;
       // les métadonnées doivent être portées par le nœud du maillage : c'est là que les
       // lecteurs glTF vont chercher les extras
-      m.userData = { smeltIfcType: IFC_HINT[el.kind] || 'IfcBuildingElementProxy', ifcType: IFC_HINT[el.kind] || 'IfcBuildingElementProxy', smeltSource: 'Smelt Studio', level: el.level?.name || '', body: el.body?.name || '' };
+      m.userData = { smeltIfcType: ifcType, ifcType, smeltSource: 'Smelt Studio', level: el.level?.name || '', body: el.body?.name || '' };
       m.castShadow = true;
       m.receiveShadow = true;
       group.add(m);

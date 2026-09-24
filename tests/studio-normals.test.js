@@ -137,3 +137,37 @@ test('IFC coordinates and triangle order preserve outward attic walls after Y re
   }
   assert.ok(checked >= 5);
 });
+
+test('roof faces keep outward winding with flipped ridges and either opening contour direction', () => {
+  const outline = [[0, 0], [10, 0], [10, 8], [0, 8]];
+  const hole = [[1, 1], [2, 1], [2, 2], [1, 2]];
+  for (const type of ['gable', 'hip', 'shed', 'flat']) for (const ridgeFlip of [false, true]) {
+    for (const holes of [[], [hole], [hole.toReversed()]]) {
+      const roof = G.buildRoof(outline, { type, ridgeFlip, holes, pitch: 35, baseZ: 3, thickness: 0.25 });
+      for (const mesh of roof.parts) {
+        assert.ok(volume(mesh) > 0, `${type} / ${ridgeFlip}: positive volume`);
+        // Every face on the top skin must face up; every underside must face down.
+        for (const tri of mesh.triangles) {
+          const points = tri.map((i) => mesh.positions[i]);
+          const n = cross(sub(points[1], points[0]), sub(points[2], points[0]));
+          if (Math.abs(n[2]) < 1e-10) continue;
+          const onTop = roof.faces.some((f) => {
+            const zAt = G.planeOf(f.poly);
+            return points.every((p) => Math.abs(p[2] - zAt(p)) < 1e-8);
+          });
+          assert.equal(n[2] > 0, onTop, `${type} / ${ridgeFlip}: skin orientation`);
+        }
+        if (!holes.length) closedOriented(mesh);
+      }
+    }
+  }
+});
+
+test('roof cuts at the prism base do not emit zero-area triangles', () => {
+  const mesh = G.prismVarTop([[0, 0], [1, 0], [1, 1], [0, 1]], 0, ([x]) => x);
+  for (const t of mesh.triangles) {
+    const [a, b, c] = t.map((i) => mesh.positions[i]);
+    assert.ok(Math.hypot(...cross(sub(b, a), sub(c, a))) > 1e-12);
+  }
+  closedOriented(mesh);
+});

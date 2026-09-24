@@ -40,9 +40,9 @@ export const BALCONY = { label: 'Balcon en saillie', width: 3.0, depth: 1.2, thi
 
 // Abords : surfaces tracées sur la parcelle, stationnement, végétation
 export const SITE_SURFACES = {
-  road: { label: 'Voirie (enrobé)', color: '#5d6266', thickness: 0.08, ifc: 'slab', objectType: 'Voirie' },
-  path: { label: 'Allée (gravier)', color: '#cdbd9e', thickness: 0.05, ifc: 'slab', objectType: 'Allée' },
-  paving: { label: 'Dallage', color: '#b9ada0', thickness: 0.06, ifc: 'slab', objectType: 'Dallage' },
+  road: { label: 'Voirie (enrobé)', color: '#5d6266', thickness: 0.08, ifc: 'civil', objectType: 'Voirie' },
+  path: { label: 'Allée (gravier)', color: '#cdbd9e', thickness: 0.05, ifc: 'civil', objectType: 'Allée' },
+  paving: { label: 'Dallage', color: '#b9ada0', thickness: 0.06, ifc: 'civil', objectType: 'Dallage' },
   lawn: { label: 'Pelouse', color: '#86a85e', thickness: 0.02, ifc: 'geo', objectType: 'Pelouse' },
   bed: { label: 'Massif planté', color: '#5e7c42', thickness: 0.04, ifc: 'geo', objectType: 'Massif planté' },
 };

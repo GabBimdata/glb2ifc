@@ -48,10 +48,10 @@ test('site elements are closed solids sitting on the finished ground', () => {
   assert.ok(Math.abs(Math.min(...tree.siteParts[0].mesh.positions.map((q) => q[2])) - lawnTop) < 1e-9);
 });
 
-test('site is exported in IfcSite: terrain, paving slabs, vegetation, parking spaces', () => {
+test('site is exported in IfcSite: terrain, civil surfaces, vegetation, parking spaces', () => {
   const ifc = exportIfc(project());
   assert.match(ifc, /IFCGEOGRAPHICELEMENT\([^\n]*\.TERRAIN\./);
-  assert.match(ifc, /IFCSLAB\([^\n]*'Voirie'[^\n]*\.USERDEFINED\./);
+  assert.match(ifc, /IFCCIVILELEMENT\([^\n]*'Voirie'/);
   assert.match(ifc, /IFCGEOGRAPHICELEMENT\([^\n]*'Pelouse'/);
   assert.match(ifc, /IFCGEOGRAPHICELEMENT\([^\n]*'Arbre'/);
   assert.match(ifc, /IFCGEOGRAPHICELEMENT\([^\n]*'Haie'/);
@@ -72,4 +72,18 @@ test('older projects without a site open with an empty one', () => {
   const again = M.validateProject(JSON.parse(JSON.stringify(pr)));
   assert.deepEqual(again.site, M.emptySite());
   assert.ok(buildElements(again).elements.every((e) => e.kind !== 'terrain'));
+});
+
+test('all paved site surfaces are civil elements contained directly in the site', () => {
+  const pr = project();
+  pr.site.surfaces = ['road', 'path', 'paving'].map((type, i) => ({ id: `civil-${i}`, type, poly: [[12, 0], [14, 0], [14, 2], [12, 2]] }));
+  const ifc = exportIfc(pr);
+  const siteId = ifc.match(/(#\d+)=IFCSITE\(/)[1];
+  const surfaces = [...ifc.matchAll(/(#\d+)=IFCCIVILELEMENT\(([^\n]*)\);/g)];
+  assert.equal(surfaces.length, 3);
+  for (const [_, id, attrs] of surfaces) {
+    assert.equal(attrs.split(',').length, 8, 'IfcCivilElement has no PredefinedType argument');
+    assert.ok(ifc.split('\n').some(line => line.includes('IFCRELCONTAINEDINSPATIALSTRUCTURE(') && line.endsWith(`,${siteId});`) && line.includes(id + ',')));
+  }
+  assert.doesNotMatch(ifc, /IFCSLAB\([^\n]*'Dallage'/);
 });

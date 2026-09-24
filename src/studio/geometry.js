@@ -514,13 +514,22 @@ function clipSegmentToConvex(a, b, poly) {
 }
 
 function shellFromTopFaces(topFaces, outline, zOfTop, thicknessV, holes = []) {
+  // Normalize each boundary independently. Swapping the ridge axes mirrors the
+  // uncut faces, but perforated faces are already triangulated CCW.
+  // A single signed-volume flip cannot repair that mixed winding.
+  topFaces = topFaces.map((f) => polygonArea(f) < 0 ? f.slice().reverse() : f);
+  outline = polygonArea(outline) < 0 ? outline.slice().reverse() : outline;
+  holes = holes.map((h) => polygonArea(h) < 0 ? h.slice().reverse() : h);
   const positions = [];
   const triangles = [];
   const pushPoly3 = (pts, flip) => {
+    // A hip can collapse its ridge to a point; remove repeated vertices before
+    // triangulating. Ear clipping also handles concave flat/shed footprints.
+    pts = cleanPolygon(pts);
     const base = positions.length;
     for (const p of pts) positions.push(p);
-    for (let i = 1; i + 1 < pts.length; i++) {
-      triangles.push(flip ? [base, base + i + 1, base + i] : [base, base + i, base + i + 1]);
+    for (const [a, b, c] of triangulate(pts)) {
+      triangles.push(flip ? [base + a, base + c, base + b] : [base + a, base + b, base + c]);
     }
   };
   for (const f of topFaces) {
@@ -1329,7 +1338,11 @@ export function prismVarTop(poly, z0, topFn) {
     const j = (i + 1) % n;
     triangles.push([i, j, n + j], [i, n + j, n + i]);
   }
-  return { positions, triangles };
+  return { positions, triangles: triangles.filter(([i, j, k]) => {
+    const a = positions[i], b = positions[j], c = positions[k];
+    const u = b.map((v, d) => v - a[d]), v = c.map((x, d) => x - a[d]);
+    return Math.hypot(u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]) > 1e-12;
+  }) };
 }
 
 /**
